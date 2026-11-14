@@ -1,0 +1,8 @@
+node_modules/
+qa/
+__pycache__/
+*.log
+build-training-content.py
+collect-evidence.py
+qa.cjs
+qa-*.cjs

@@ -1,0 +1,56 @@
+{
+  "runs/compare_减脂_20261009_105347/train100/best_metrics.json": {
+    "epoch": 93,
+    "best_metric": "mae",
+    "best_metric_value": 0.8582070860369452,
+    "val_mae": 0.8582070860369452,
+    "val_loss": 0.18472227762485371,
+    "train_loss": 0.563459969445681,
+    "split_mode": "train100"
+  },
+  "runs/compare_减脂_20261009_105347/train90/best_metrics.json": {
+    "epoch": 79,
+    "best_metric": "mae",
+    "best_metric_value": 1.6415794997504263,
+    "val_mae": 1.6415794997504263,
+    "val_loss": 1.1749842133034358,
+    "train_loss": 0.7584947549930497,
+    "split_mode": "train90"
+  },
+  "runs/compare_减脂_20261009_105347/train100/split_summary.json": {
+    "split_mode": "train100",
+    "split_manifest": null,
+    "train_items": 18720,
+    "val_items": 1365,
+    "train_unique_source_images": 13643,
+    "val_unique_source_images": 1365,
+    "source_image_overlap": 1365
+  },
+  "runs/compare_减脂_20261009_105347/train90/split_summary.json": {
+    "split_mode": "train90",
+    "split_manifest": "[本地路径省略]",
+    "train_items": 17150,
+    "val_items": 1570,
+    "train_unique_source_images": 12279,
+    "val_unique_source_images": 1364,
+    "source_image_overlap": 0
+  },
+  "splits/grouped_v2/减脂无垫_20261009/meta.json": {
+    "actual_val_ratio": 0.09997801070145862,
+    "created_at_utc": "2026-10-09T10:49:45.330744+00:00",
+    "data_root": "[本地路径省略]",
+    "data_root_real": "[本地路径省略]",
+    "group_definition": "parent directory containing images/ and annotations/",
+    "manifest_sha256": "85820a9a363b85fc07bcb6e462d54e22787e35b875ec006c1c877e2dc89af258",
+    "name": "减脂无垫_20261009",
+    "requested_val_ratio": 0.1,
+    "schema_version": 1,
+    "seed": 20260925,
+    "total_groups": 56,
+    "total_pairs": 13643,
+    "train_groups": 50,
+    "train_pairs": 12279,
+    "val_groups": 6,
+    "val_pairs": 1364
+  }
+}

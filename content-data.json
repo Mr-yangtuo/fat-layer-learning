@@ -1,0 +1,849 @@
+[
+  {
+    "path": "LineDet/dataset/__init__.py",
+    "title": "数据包的公共入口",
+    "overview": "把真正位于 dataset.py 的类和函数导出到包这一层，使 main.py 可以直接 from LineDet.dataset import LineDataset, default_collate。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 1,
+        "title": "相对导入与包接口",
+        "principle": [
+          "这里没有新的算法。它定义包对外暴露的入口；调用者不必知道内部实现放在哪个文件。"
+        ],
+        "syntax": [
+          "一个点 . 代表当前包 LineDet.dataset；from .dataset 指向同目录 dataset.py。逗号后是第二个被导入的名字。"
+        ],
+        "shapes": "",
+        "pitfall": "",
+        "exercise": "手写主程序里的对应导入语句。",
+        "answer": "from LineDet.dataset import LineDataset, default_collate",
+        "diagram": ""
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/dataset.py",
+    "title": "Dataset：从磁盘样本到训练张量",
+    "overview": "这个文件把图像、标注、固定划分、尺寸变换、增强和热图串起来。理解它的关键是始终追踪图像与 y 坐标是否使用了同一个几何变换，以及 valid 是否仍代表可信的标注列。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 32,
+        "title": "依赖与全局尺寸策略",
+        "principle": [
+          "PIL 负责读图；NumPy 处理标注数组；PyTorch 接收训练张量。尺寸统一通过环境变量决定，导入模块时就读取，不是在每次取样时重新读取。",
+          "none 直接进入最终缩放；crop 从右边/底部裁到不超过目标尺寸；resize 先整体缩放；unify 保留原图并有条件追加按目标宽高比裁底的副本。"
+        ],
+        "syntax": [
+          "os.environ.get(key, default) 返回字符串；strip().lower() 去空格并统一大小写。split(\",\") 后用 int 转换，tuple 收集为 (W,H)。",
+          "ImageFile.LOAD_TRUNCATED_IMAGES=True 允许 PIL 尝试读取不完整图像。UNIFY_SIZE 默认 (516,594)，最终模型 img_size 通常 (256,256)。"
+        ],
+        "shapes": "PIL size=(W,H)；张量 image=[C,H,W]",
+        "pitfall": "augment 参数后面虽保存，但没有用于控制这些增强开关；导入后再改变环境变量不会自动更新模块常量。",
+        "exercise": "解释为何 img_size[1] 才是热图高度。",
+        "answer": "img_size 遵循 PIL 的 (宽,高)，而张量空间维度遵循 (高,宽)。",
+        "diagram": "data"
+      },
+      {
+        "start": 35,
+        "end": 48,
+        "title": "crop_annotation：裁图也要裁监督",
+        "principle": [
+          "只保留左侧 new_w 列；底部被裁掉的点 y≥new_h 置为无效。坐标值清零只是占位，不能把这些零当作真实的图像上边界。",
+          "这里没有做坐标缩放，因为裁剪原点仍是左上角。有效的剩余点坐标不变。"
+        ],
+        "syntax": [
+          "np.asarray(...,dtype=bool) 建布尔掩码；[None,:] 为一维数组补行维。np.where(condition,0.0,y) 逐元素选择。",
+          "valid_arr & ~out_of_h 是逐元素逻辑与和取反；返回二元 tuple，由调用者解包。"
+        ],
+        "shapes": "[L,W₀] → [L,min(new_w,W₀)]",
+        "pitfall": "只检查底部越界，不检查负 y；前置解析器已过滤原始负坐标，但单独复用该函数需注意。",
+        "exercise": "若 y=[10,90,20]，valid 全真，new_h=80，写出结果。",
+        "answer": "y=[10,0,20]，valid=[True,False,True]。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 51,
+        "end": 69,
+        "title": "裁剪前预检：每条目标线至少保留一列",
+        "principle": [
+          "unify 不希望生成完全看不到某条目标线的副本，因此先解析标注、模拟裁剪，再逐行检查 valid.any()。如果任一条线完全消失，就不追加裁剪副本。"
+        ],
+        "syntax": [
+          "try/except Exception 把解析异常转成 True；for r in range(shape[0]) 按线检查；any() 判断是否至少一个 True。"
+        ],
+        "shapes": "每条线的 valid[r] 是长度 W 的布尔数组",
+        "pitfall": "异常时返回 True 是放行策略，不保证坏标注能训练；后续 __getitem__ 仍可能报错。",
+        "exercise": "为什么不能用 valid_cropped.all()？",
+        "answer": "all() 会要求每一列都有效，稀疏或局部标注也会被误判；当前目标仅是每条线至少留下一列。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 72,
+        "end": 100,
+        "title": "选择样本：manifest 与 train100 的根本区别",
+        "principle": [
+          "提供 split_manifest 时，训练和验证分别读固定名单；不提供时先找到全部有效图像对。train 分支使用 pass，意味着保留全部数据；val 才切出末尾约 10%。",
+          "因此 train100 的验证样本来自训练样本内部。它可用于观察拟合，但不能把其验证数值当成独立泛化性能。"
+        ],
+        "syntax": [
+          "self 保存实例状态。列表推导式 [p[0] for p in pairs] 取每个二元组的图像路径；切片 [train_len:] 取尾部。",
+          "mode==\"all\" 也保留全部。split_ratio=0.9 只用于算 val 起始位置；它没有把 train 截到前 90%。"
+        ],
+        "shapes": "pairs: list[tuple[str,str]]；img_paths 与 ann_paths 等长",
+        "pitfall": "文件遍历顺序不等于随机划分，且按目录的患者/采集组独立性只有 manifest 方案才有显式检查。",
+        "exercise": "手写真正互斥的普通 90/10 切分，还需要注意什么？",
+        "answer": "train=pairs[:k]，val=pairs[k:]；但相邻帧仍可能属于同一人，最好先按患者或采集组分组。",
+        "diagram": "split"
+      },
+      {
+        "start": 102,
+        "end": 128,
+        "title": "unify：原图与裁剪副本共存",
+        "principle": [
+          "对每个源图先追加一次 crop_flag=False；若高度超过 floor(w×594/516)，且裁后两条线都仍有监督，再追加同一路径但 crop_flag=True 的样本。",
+          "例如宽 422、高 728 的图，裁剪候选高度约 485。原图与裁剪图之后都拉伸到模型尺寸，相当于提供不同纵向尺度的观察。"
+        ],
+        "syntax": [
+          "zip 同步遍历图像与标注；with Image.open(...) 读取尺寸并关闭文件。三个列表通过相同 append 顺序维持索引对应。",
+          "crop_flags 是 list[bool]，决定 __getitem__ 使用原图还是裁剪图；没有把副本保存到磁盘。"
+        ],
+        "shapes": "一个源图 → 1 或 2 个 dataset items",
+        "pitfall": "该分支没有 mode==train 限制，因此验证集也会扩充；样本数不是唯一源图数，而且可裁图在平均指标里权重更高。",
+        "exercise": "为何应在追加裁剪副本之前进行数据集分组？",
+        "answer": "否则同一源图的原版和裁剪版可能落入训练与验证两侧，产生泄漏。",
+        "diagram": "data"
+      },
+      {
+        "start": 130,
+        "end": 149,
+        "title": "训练增强链与 __len__",
+        "principle": [
+          "训练模式配置噪声、模糊、亮度、对比度、低分辨率和两种 gamma 变换，以扩展成像外观；验证模式只做 ToTensor。几何增强另由 JointAugment 执行。",
+          "__len__ 返回扩充后的索引总量，DataLoader 用它建立采样索引。"
+        ],
+        "syntax": [
+          "p_per_sample 是样本级触发概率，p_per_channel 是通道级概率；Compose 顺序调用变换。GammaTransform 的 True/False 参数对应两种强度处理路径，retain_stats=True 尝试保留统计量。",
+          "GaussianBlurTransform((0.5,1.)) 配置模糊尺度区间；SimulateLowResolutionTransform 用先降采样后升采样模拟分辨率损失。"
+        ],
+        "shapes": "训练最终应维持 [1,H,W]",
+        "pitfall": "代码把 [1,H,W] NumPy 数组传入 batchgenerators；该库通常面向含 batch 和 channel 维的数据，需结合实际版本确认维度解释，不应仅凭接口名称断言这里等同标准二维增强。",
+        "exercise": "为什么验证集不随机增强？",
+        "answer": "否则每轮验证输入变化，指标波动会混入增强随机性，难以公平选择最佳模型。",
+        "diagram": "data"
+      },
+      {
+        "start": 151,
+        "end": 183,
+        "title": "__getitem__ 前半：统一图像与标注几何",
+        "principle": [
+          "按 idx 读灰度图并在原图尺寸解析 y。crop 分支同步裁标注；resize 分支同步缩放标注；unify 仅在该索引标记为裁剪副本时裁底。",
+          "unified_size 记录当前图像坐标系，让下一次缩放知道 y 属于哪个高度。没有这一中间尺寸，标签就可能按错误比例变换。"
+        ],
+        "syntax": [
+          "Image.open(...).convert(\"L\") 得单通道灰度图；image.size 返回 (W,H)。PIL crop((left,top,right,bottom)) 的右/下边界不包含在结果中。",
+          "elif 使四种策略互斥；unified_size=original_size 表示此阶段尚未改变几何。"
+        ],
+        "shapes": "原图 [H₀,W₀]，标注 [2,W₀] → 统一阶段图像与同坐标系标签",
+        "pitfall": "unify 的未裁剪原图仍保持原始比例；它不是把所有输入都强制裁成同一比例。",
+        "exercise": "给裁剪副本写出 crop_h 的公式。",
+        "answer": "crop_h=min(H₀, int(W₀×目标高/目标宽))。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 185,
+        "end": 207,
+        "title": "__getitem__ 中段：最终缩放、标准化、联合增强",
+        "principle": [
+          "所有分支最终都把图像和标注变成模型尺寸。图像先做外观增强，再执行逐图 z-score：(I−mean)/(std+10⁻⁷)，把不同整体亮度对齐到相近数值尺度。",
+          "标准化后执行会改变位置的 JointAugment；另以 0.3 概率选择 special_augmentation2。标签必须和图像一起动，单独增强图像会破坏监督关系。"
+        ],
+        "syntax": [
+          "torch.from_numpy 共享 NumPy 数组底层内存；astype(np.float32) 保证浮点标签。np.bool 的可用性与 NumPy 版本有关，可移植写法通常使用 np.bool_。",
+          "[None] 给灰度图补通道维；ToTensor 把 uint8 图转换为通道优先浮点张量。img.mean()/std() 沿整幅图求标量统计量。"
+        ],
+        "shapes": "image: float32[1,H,W]；y_px: float32[2,W]；valid: bool[2,W]",
+        "pitfall": "special_augmentation2 不接收 valid；裁掉的点被 clamp 回边界但仍可能标为有效。self.augment 没有被判断，augment=False 不会关闭训练增强。",
+        "exercise": "若 I 是常数图，标准化后是什么？",
+        "answer": "分子全零，加 epsilon 避免除零，输出全零。",
+        "diagram": "data"
+      },
+      {
+        "start": 209,
+        "end": 217,
+        "title": "返回样本字典：坐标与热图同时存在",
+        "principle": [
+          "依据最终 y 和 valid 生成按列高斯热图。返回 dict 使训练循环按明确键读取图像、坐标与有效性，路径则用于追溯样本。",
+          "注意训练主循环虽然把 batch[\"heatmaps\"] 搬到设备，实际 HeatmapCompositeLoss 又根据 gt_y 自己生成热图；这份 dataset 热图没有直接参与当前损失。"
+        ],
+        "syntax": [
+          "generate_heatmap_targets 的 height 使用 img_size[1]，width 使用 img_size[0]；self.sigma 默认 2.0。dict 中值可以同时包含 Tensor 和字符串。"
+        ],
+        "shapes": "image [1,H,W]；heatmaps [L,H,W]；y_px/valid [L,W]",
+        "pitfall": "不要把 dataset sigma=2 与实际损失热图的宽度混为一谈；loss.py 的构造函数把 self.sigma 固定写成 3.0。",
+        "exercise": "一个 256×256、两条线样本的热图元素数？",
+        "answer": "2×256×256=131072 个浮点数。",
+        "diagram": "heatmap"
+      },
+      {
+        "start": 220,
+        "end": 237,
+        "title": "default_collate：把样本列表堆成 batch",
+        "principle": [
+          "Dataset 只返回一个样本；DataLoader 收集 B 个样本后，collate 函数沿新增第 0 维堆叠 Tensor。名称字符串保留为列表，方便对应到每个样本。"
+        ],
+        "syntax": [
+          "torch.stack 需要每个输入 shape 一致；它新增维度，不同于 cat 沿已有维拼接。if \"heatmaps\" in batch[0] 检查首样本后决定是否打包热图。"
+        ],
+        "shapes": "list[B 个样本] → image[B,1,H,W]、y/valid[B,L,W]、heatmaps[B,L,H,W]",
+        "pitfall": "ann_path 没有加入 batch；若某标注缺一条目标线，各样本 L 不一致，stack 将失败。",
+        "exercise": "stack 与 cat 用在两个 [2,256] 标签上，结果分别是什么？",
+        "answer": "stack(...,dim=0) 得 [2,2,256]；cat(...,dim=0) 得 [4,256]。",
+        "diagram": "data"
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/line_utils.py",
+    "title": "标注解析：把点集变成每列一个 y",
+    "overview": "任务的标签不是整幅二值 mask，而是两条边界各自的 y(x)。这个文件固定通道语义，过滤非法点，并把不同宽度的离散标注插值到模型宽度。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 29,
+        "title": "标签规范化与通道顺序",
+        "principle": [
+          "TARGET_LABELS 指定第 0 条线是真皮层下界、第 1 条是脂肪层下界；模型输出通道必须遵守这个顺序，拓扑约束才有意义。",
+          "先用别名字典规范化，再按目标列表重新排序；同名重复标注只取第一个非空 data。表皮层相关标签被忽略。"
+        ],
+        "syntax": [
+          "dict.get(key,default) 允许键缺失；label not in selected 防止覆盖首个结果。返回列表推导式按 TARGET_LABELS 的顺序取值。"
+        ],
+        "shapes": "items list[dict] → 至多 2 个目标线 dict",
+        "pitfall": "缺失的目标线不会补一条全无效占位线，而是直接消失；因此数据入口的校验十分关键。",
+        "exercise": "如果 JSON 把脂肪下界写在真皮下界之前，输出顺序会变吗？",
+        "answer": "不会；返回值由 TARGET_LABELS 重排。",
+        "diagram": "data"
+      },
+      {
+        "start": 31,
+        "end": 75,
+        "title": "parse_djm_annotation：分桶、均值与 valid",
+        "principle": [
+          "将每个连续 x 四舍五入到列 xi，同列若有多个 y 就取均值，从而得到单值曲线 y(x)。缺标注列先填零且 valid=False，这个零只是容器默认值。",
+          "过滤缺键、NaN/Inf、横向越界、纵向越界点。原始函数不做跨列插值；插值发生在 resize_y_and_valid。"
+        ],
+        "syntax": [
+          "per_x_ys.setdefault(xi,[]).append(yi) 是 dict[int,list[float]] 分桶；np.stack(list,axis=0) 把每条长度 W 数组堆成二维。",
+          "类型注解 Tuple[np.ndarray,np.ndarray] 说明返回两个数组；max_lines 参数当前未使用，不会截断线条数量。"
+        ],
+        "shapes": "y_px=float[L,W₀]；valid=bool[L,W₀]",
+        "pitfall": "没有任何目标线时 np.stack([]) 会报错；所有点非法时可得到整行 valid=False。Python round 的半值取偶数规则也会影响恰好 x.5 的列归属。",
+        "exercise": "同一列有 y=20 和 y=24，会生成什么标签？",
+        "answer": "该列 y=22，valid=True。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 78,
+        "end": 87,
+        "title": "parse_annotation_valid：标签存在性检查",
+        "principle": [
+          "扫描 JSON 中的标签，只有两个目标标签都存在才保留该样本。它是粗筛，不是完整的数据质量验证。"
+        ],
+        "syntax": [
+          "all(t in labels for t in TARGET_LABELS) 要求每个目标标签出现；生成器表达式可以短路，某个条件假就无需继续。"
+        ],
+        "shapes": "JSON → bool",
+        "pitfall": "它不检查 data 非空、坐标有限、范围合法、两条线顺序正确。即使返回 True，parse_djm_annotation 仍可能得到缺线或空有效区域。",
+        "exercise": "应补哪些校验才能保证能组成两线 batch？",
+        "answer": "确认每条目标线有至少一个合法点、解析后 shape[0]==2，并记录全无效或交叉样本。",
+        "diagram": "data"
+      },
+      {
+        "start": 90,
+        "end": 120,
+        "title": "resize_y_and_valid：建立目标列到原图的查询坐标",
+        "principle": [
+          "横向重采样决定“新列对应原来的哪一列”，纵向缩放决定“原来的高度现在应是多少”。设 sx=W新/W旧、sy=H新/H旧，则查询 x旧=x新/sx，输出 y新=插值(y旧)×sy。",
+          "known 同时要求 valid=True 且 y 有限；一条线没有任何 known 点时，新线全零且全无效。"
+        ],
+        "syntax": [
+          "np.asarray 统一为数组；None 维把 [W] 变 [1,W]；np.linspace(start,end,num) 生成均匀坐标网格。",
+          "valid & np.isfinite(y) 是逐元素布尔合取，不是 Python 的 and。continue 跳到下一条线。"
+        ],
+        "shapes": "[L,W旧] → [L,W新]",
+        "pitfall": "这里采用尺寸比 W新/W旧，而非端点比 (W新−1)/(W旧−1)，与某些 align_corners 约定不同。",
+        "exercise": "原图高 600，目标高 300，原 y=200 对应新 y？",
+        "answer": "sy=0.5，y新=100；横向还需根据新列插值。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 122,
+        "end": 142,
+        "title": "插值与有效区间：插值不是凭空得到真实标签",
+        "principle": [
+          "np.interp 在相邻已知点之间线性插值；区间之外用端点高度延伸。多点情况下，只有最左到最右已知点覆盖的查询列设为 valid，其余虽然有数值但不监督。",
+          "内部标注空洞会被插值跨越，并成为有效区间的一部分。若只剩一个已知点，代码把整幅宽度的标签都设为该高度且 valid=True。"
+        ],
+        "syntax": [
+          "np.argsort 返回排序索引，再同时重排 x、y；left/right 控制插值范围外的常量外推。",
+          "np.ones(width_new,dtype=bool) 在单点分支创建全真掩码；最终 stack 保留线维。"
+        ],
+        "shapes": "两个已知端点 → 一段线性 y 与区间 mask",
+        "pitfall": "单点推广到全宽监督是很强的假设；crop 后的 invalid 空洞也可能被本函数重新插值为 valid，裁剪无效掩码并不保证完整保留。",
+        "exercise": "已知 x=0,y=10 与 x=4,y=18，查询 x=2 得到多少？",
+        "answer": "线性插值得 14；再乘纵向缩放系数。",
+        "diagram": "geometry"
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/utils.py",
+    "title": "发现数据：按同名文件配对",
+    "overview": "递归寻找包含 images/ 和 annotations/ 的目录，以同名 PNG/JPG 与 JSON 组成样本。生成固定划分和普通 Dataset 都依赖这个入口。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 22,
+        "title": "排除目录配置与 collect_pairs",
+        "principle": [
+          "图像与标注靠去掉扩展名后的同名关系配对：images/a.jpg 对应 annotations/a.json。只返回标注存在且目标标签检查通过的项。",
+          "EXCLUDE_DIRS 是按竖线分隔的目录名集合，在模块导入时读取。它服务于下一段递归扫描。"
+        ],
+        "syntax": [
+          "str.lower().endswith(...) 允许大写扩展名；os.path.splitext(f)[0] 去掉最后一个后缀；append((img_path,ann_path)) 加入二元 tuple。",
+          "sorted(os.listdir(img_dir)) 让单目录内顺序稳定；空目录或缺失目录返回空列表。"
+        ],
+        "shapes": "list[tuple[图像路径,标注路径]]",
+        "pitfall": "只匹配 .png 和 .jpg，没有 .jpeg；损坏 JSON 的异常不在这里捕获。注释声称脚本配置排除目录，但当前 train减脂.sh 未设置该环境变量。",
+        "exercise": "为什么不能根据 os.listdir 的两个列表位置直接 zip 配对？",
+        "answer": "图像和标注缺失情况、排序可能不同；必须以 basename 建立明确对应。",
+        "diagram": "data"
+      },
+      {
+        "start": 25,
+        "end": 35,
+        "title": "find_image_annotation_pairs：剪枝式递归",
+        "principle": [
+          "os.walk 逐层给出当前目录及子目录；发现同时包含 images 与 annotations 的父目录，就收集它们的配对。修改 dirs[:] 能阻止遍历被排除的子树。"
+        ],
+        "syntax": [
+          "dirs[:] = ... 是原地改动 walk 持有的列表；若写 dirs = ... 只改局部绑定，不能保证阻止递归。pairs.extend 把多个 pair 展平加入结果。"
+        ],
+        "shapes": "数据根目录 → 全部合格路径对",
+        "pitfall": "os.walk 的目录顺序未显式排序；无 manifest 的“尾部验证集”可能随目录遍历顺序而变化。",
+        "exercise": "解释 append(collect_pairs(...)) 为何不正确。",
+        "answer": "那会产生嵌套 list；extend 才得到统一的一层样本列表。",
+        "diagram": "data"
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/split_manifest.py",
+    "title": "固定划分加载：把实验边界写成可审计名单",
+    "overview": "train.jsonl 与 val.jsonl 记载确切样本，meta.json 记录来源。加载器会检查清单完整、数据根匹配、组与文件对不重叠，并在选中样本上检查文件存在。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 23,
+        "title": "_read_jsonl：一行一个样本记录",
+        "principle": [
+          "JSONL 适合逐条写入与读取，不需把所有记录包在一个巨大 JSON 数组里。每一条至少包含 image、annotation、group 三个非空字符串。"
+        ],
+        "syntax": [
+          "enumerate(handle,1) 从 1 编号，报错能指出具体行；strip 后跳过空行；json.loads 解析单行对象。",
+          "isinstance(...,str) 做类型检查；类型注解 List[Dict[str,str]] 不会自动在运行时验证，真正检查来自 if。"
+        ],
+        "shapes": "JSONL → list[dict[str,str]]",
+        "pitfall": "记录中的 split 字段没有在这里核对；读取 train.jsonl 就按训练清单解释。",
+        "exercise": "写一个最小 JSONL 记录。",
+        "answer": "{\"image\":\"g/images/a.png\",\"annotation\":\"g/annotations/a.json\",\"group\":\"g\"}",
+        "diagram": "split"
+      },
+      {
+        "start": 26,
+        "end": 35,
+        "title": "_absolute_path：相对路径解析与边界检查",
+        "principle": [
+          "清单要求路径相对数据根，便于理解每个样本的来源。组合路径后检查是否还处于根目录的字面路径范围，并确认目标文件存在。"
+        ],
+        "syntax": [
+          "Path.resolve(strict=False) 规范化路径并允许先不要求文件存在；is_file 随后验证。commonpath 求公共目录路径，不是公共字符串前缀。"
+        ],
+        "shapes": "相对路径 str → 规范化绝对路径 str",
+        "pitfall": "边界检查用的是 lexical 字面路径，未对 resolve 后的符号链接目标再做根目录约束，因此不能视为完整的符号链接隔离。",
+        "exercise": "为什么 ../outside/a.png 应被拒绝？",
+        "answer": "规范化后位于数据根之外，commonpath 不等于根目录。",
+        "diagram": "split"
+      },
+      {
+        "start": 38,
+        "end": 64,
+        "title": "加载清单元数据与组交集检查",
+        "principle": [
+          "要求 meta/train/val 三文件齐全，避免实验只读到半份清单。meta 的 data_root_real 必须与当前根匹配；随后把每侧 group 收集为集合并检查交集。",
+          "同组样本全部留在一侧，可以降低相邻帧或同采集批次泄漏，但目录组是否等价于患者仍要由数据组织保证。"
+        ],
+        "syntax": [
+          "set comprehension 自动去重；train_groups & val_groups 求集合交集；非空集合在 if 中为真。",
+          "Path(data_root).resolve() 与 os.path.realpath 都规范化路径；raise ValueError 中止加载。"
+        ],
+        "shapes": "train_groups,val_groups: set[str]",
+        "pitfall": "迁移数据到另一台机器后即使相对文件完全一致，也会因绝对根不同被拒绝；需要生成或审慎更新清单元数据。",
+        "exercise": "两组清单图像名不同但 group 相同，会怎样？",
+        "answer": "仍然报错；检查的是整个组必须互斥。",
+        "diagram": "split"
+      },
+      {
+        "start": 66,
+        "end": 95,
+        "title": "文件身份与模式选择",
+        "principle": [
+          "identity 将图像和标注都规范化，形成文件对身份；两侧文件对交集非空就拒绝。随后按 mode 选择 train、val 或合并 all，并将路径逐条解析为绝对路径。"
+        ],
+        "syntax": [
+          "内部函数 identity 捕获外层 root；tuple[str,str] 可哈希，所以能作为 set 元素；+ 拼接两个列表。",
+          "列表推导式中的 _absolute_path 对选中清单逐条验证；不支持的 mode 显式抛异常。"
+        ],
+        "shapes": "records → list[(absolute_image,absolute_annotation)]",
+        "pitfall": "这里检查“图像路径+标注路径”二元组重叠，不是分别检查图片集合；同一图片搭不同标注路径可能漏检。元数据的 sha256 没有在加载时重算验证，也不检查图片内容重复。",
+        "exercise": "若要更严格排除源图泄漏，应补什么？",
+        "answer": "分别求规范化 image 路径交集；必要时对图像内容哈希，并按真实患者/采集标识分组。",
+        "diagram": "split"
+      }
+    ]
+  },
+  {
+    "path": "generate_group_split.py",
+    "title": "分组划分生成：接近 10%，保持组完整",
+    "overview": "把每个包含 images/annotations 的父目录当作一个组，用子集和动态规划找出样本总数最接近目标的验证组，输出固定 JSONL 与带摘要的元数据。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 48,
+        "title": "choose_validation_groups：子集和动态规划",
+        "principle": [
+          "目标是选若干完整目录组，使验证样本数接近 target。parents 的键是当前可达到的样本总数，值记录“之前的总数与新加入的组”，因此最后能反向还原选择。",
+          "先排序再用局部随机数生成器打乱组顺序，同一 seed 下选择可重复。每组只遍历更新前的状态快照，避免同一个组被重复使用。"
+        ],
+        "syntax": [
+          "parents={0:None} 是初始空集合；list(parents) 拷贝键；sorted(...,reverse=True) 倒序遍历；new_sum not in parents 保留首条到达路径。",
+          "min 的 key=(绝对偏差,value<target,value) 按元组字典序比较：同样偏差时优先达到或略高于目标的数值。cursor,key=parent 沿父指针回溯。"
+        ],
+        "shapes": "dict[str,int] → set[str]",
+        "pitfall": "这是按样本数量近似 90/10，不是按组数严格 90/10，也不是标签分层抽样。空 group_sizes 在 max() 会先报错；主程序已检查总样本非空。",
+        "exercise": "组大小 4、5、9，target=6，可能选哪个最接近？",
+        "answer": "选 5，偏差 1；不能把大小 9 的目录切成 6 和 3。",
+        "diagram": "split"
+      },
+      {
+        "start": 51,
+        "end": 62,
+        "title": "write_jsonl 与 manifest_digest：可读清单和稳定摘要",
+        "principle": [
+          "逐条输出 JSONL，避免汉字转成大量转义序列。digest 对排序后的 split/group/image/annotation 字段计算 SHA-256，用于标识这份划分清单的内容。"
+        ],
+        "syntax": [
+          "ensure_ascii=False 保留中文；sort_keys=True 让每条记录键顺序稳定；\"\n\" 连接记录，\"\t\" 分隔字段；encode(\"utf-8\") 把文本变成哈希函数要求的 bytes。"
+        ],
+        "shapes": "records → JSONL 文件；digest → 64 个十六进制字符",
+        "pitfall": "摘要只覆盖路径、组和 split，不覆盖图像像素或标注文件内容；换了同一路径内的图片，清单摘要可以不变。",
+        "exercise": "为什么先排序再计算摘要？",
+        "answer": "相同记录仅顺序改变时，摘要仍然一致；能聚焦划分内容差异。",
+        "diagram": "split"
+      },
+      {
+        "start": 65,
+        "end": 98,
+        "title": "main 前半：参数校验、扫描、定义组",
+        "principle": [
+          "要求验证比例在 0 与 1 之间，默认 0.1。已有非空输出目录默认拒绝覆盖，防止一次新扫描悄悄改变后续实验的固定验证集。",
+          "image.parent.parent 将 images 目录再向上一级，作为采集目录组。目标验证数量 round(N×ratio)，然后交给动态规划选完整组。"
+        ],
+        "syntax": [
+          "argparse 的 required=True 要求用户提供；action=\"store_true\" 使 --force 成为布尔开关。defaultdict(list) 访问新 group 时自动建空列表。",
+          "Path.resolve() 得规范路径；os.path.relpath 记录相对根的组名；{group:len(items) ...} 构建组大小字典。"
+        ],
+        "shapes": "全部配对 → dict[组名,list[Pair]]",
+        "pitfall": "按目录独立并不自动证明按患者独立；同一患者若分散在不同组仍可能泄漏。--force 会覆盖旧固定清单，应把旧清单随实验保存。",
+        "exercise": "本项目 group 是患者 ID 吗？",
+        "answer": "代码只定义为包含 images/annotations 的父目录；只有数据组织保证一人一组时才能这样解释。",
+        "diagram": "split"
+      },
+      {
+        "start": 100,
+        "end": 144,
+        "title": "main 后半：分配、落盘、回读验证",
+        "principle": [
+          "每个组整体选 train 或 val，保存相对图像路径、相对标注路径和 group。meta 记录实际数量、实际比例、随机种子、根目录与摘要，为实验追溯提供依据。",
+          "写完后立即用正式加载器回读 train 和 val，复用组重叠、文件身份和存在性检查；验证通过才打印成功信息。"
+        ],
+        "syntax": [
+          "destination 是 train_records 或 val_records 的列表引用，append 会修改原列表；with path.open(...,encoding=\"utf-8\") 确保文件正确关闭。",
+          "datetime.now(timezone.utc).isoformat() 写 UTC 时间；__name__==\"__main__\" 保证脚本直接执行才运行 main，import 时不启动。"
+        ],
+        "shapes": "train.jsonl + val.jsonl + meta.json",
+        "pitfall": "回读检查不等于检查患者独立或图像内容去重。当前 grouped_v2 清单有 13643 对，训练 12279、验证 1364，组数 50/6。",
+        "exercise": "为什么要记录 actual_val_ratio？",
+        "answer": "组不能拆开，实际比例可能偏离要求；报告应使用真正的样本数量与比例。",
+        "diagram": "split"
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/dataset_utils.py",
+    "title": "联合增强与数据侧高斯热图",
+    "overview": "几何增强必须一起改变图像、边界坐标和有效掩码；热图则把一个确定的边界高度变成周围逐渐衰减的连续监督信号。这里也有若干变量名与实际行为不一致的实现细节。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 20,
+        "title": "JointAugment 的参数与水平翻转",
+        "principle": [
+          "翻转改变的是横向列顺序，纵向 y 数值本身不应取反。图像、y、valid 同时反转各自的宽度轴，保持每列对应。",
+          "p_flip=0.5 表示每次调用独立抛一次概率事件。out_size、p_resize_crop、p_vertical_distort 虽保存在对象里，但当前 __call__ 没有使用它们。"
+        ],
+        "syntax": [
+          "__call__ 让实例能像函数调用：augment(img,y,valid)。torch.flip(...,dims=[2]) 翻图像的 W 维，[1] 翻标签的 W 维。",
+          "random.random() 返回 [0,1) 浮点数；与概率比较决定执行分支。"
+        ],
+        "shapes": "img [1,H,W]；y/valid [L,W]，翻转后尺寸不变",
+        "pitfall": "不要对 y 做 H−1−y；那是纵向翻转的坐标变换，当前只左右翻。",
+        "exercise": "y=[10,12,15] 左右翻转后是多少？",
+        "answer": "[15,12,10]；valid 同样反序。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 22,
+        "end": 31,
+        "title": "随机边缘遮挡：不仅图变，标签也改了",
+        "principle": [
+          "以 p_erase=0.2 随机选一侧，遮住最多四分之一宽度。遮住部分的 y 直接延伸为邻接边界列的值，相当于强迫隐藏区为水平线；它并没有保持原曲线作为遮挡监督。"
+        ],
+        "syntax": [
+          "random.randint(0,w//4) 两端都可取；[:,None] 把 [L] 扩为 [L,1]，广播到被遮挡的多列；切片赋值是原地修改。",
+          "图像已做 z-score，此时置 0 表示标准化后的均值强度，不是原始灰度意义上的黑色。"
+        ],
+        "shapes": "遮挡片段 image[:, :, x段]；y[:,x段]",
+        "pitfall": "严重边界情况：右侧 erase_width=0 时，-0 等于 0，img[:,:,-0:] 实际选中整幅图，y[:,-0:] 也变成全宽常量。valid 从未随遮挡或替换标签修改。",
+        "exercise": "手写最小修复，避免 0 宽度右侧切片。",
+        "answer": "在左右分支前加 if erase_width > 0:；是否改写 y 与 valid 还需先明确遮挡增强的监督设计。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 33,
+        "end": 61,
+        "title": "纵向平移：追踪 roll 的方向与填充位置",
+        "principle": [
+          "第一分支向上平移 shift：roll 的负位移把内容上移，同时底部被卷回来的内容清零，标签减去 shift。上移幅度由最浅标签限制，预留 3 像素。",
+          "else 内根据 max_shift_down 计算的分支名字像向下，但实际仍使用 shifts=-shift、y−shift，却清空顶部。它会留下底部环绕内容并清掉正常顶部内容。"
+        ],
+        "syntax": [
+          "torch.roll 会循环移动，不会自动补零；必须清除正确的边缘。img.shape[1] 是 H；clamp(min=0) 把负坐标截到零。",
+          "第二分支发生概率是前一次不满足 0.2 再满足 0.2，即 0.8×0.2=0.16，且还受 shift_max 条件限制。"
+        ],
+        "shapes": "图像与标签尺寸不变",
+        "pitfall": "min/max 计算未使用 valid；无效列的占位 y 可能阻止位移或干扰限幅。若意图下移，应 roll(+shift)、顶端清零、y+shift，并同步有效性。",
+        "exercise": "上移 5 像素时应清图像哪一边？",
+        "answer": "清最后 5 行，因为 roll 把原顶部内容环绕到了底部。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 64,
+        "end": 91,
+        "title": "generate_heatmap_targets：逐列高斯监督",
+        "principle": [
+          "对有效列，在真实 y 中心构造 G(h,x)=exp(−(h−y(x))²/(2σ²))。离边界越远值越小；sigma 决定纵向容忍带宽。这不是二维点高斯，因为每列都有自己的中心。",
+          "无效线/无效列保持全零。高斯峰值接近 1，但没有沿高度归一化为总和 1，因此它是强度目标，不是完整概率分布。"
+        ],
+        "syntax": [
+          "torch.zeros(L,H,W) 初始化；arange(H).float().unsqueeze(1) 得 [H,1] 高度坐标。valid.dim()==1 支持整条线有效性；dim()==2 支持逐列有效性。",
+          "y_px.dim()==1 时每条线只有一个固定 y；常规路径是 [L,W]。item() 把单元素 Tensor 取成 Python 数值；x_coords 被创建但没有使用。"
+        ],
+        "shapes": "y [L,W] + valid [L,W] → heatmaps [L,H,W]",
+        "pitfall": "双层 Python 循环每个列生成一次高斯，效率低于广播；当前训练损失不直接使用这份目标。sigma 应为正，函数未显式检查。",
+        "exercise": "中心 y=10，sigma=2，高度 h=12 的目标值是多少？",
+        "answer": "exp(−4/8)=exp(−0.5)≈0.607。",
+        "diagram": "heatmap"
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/special_dataset_utils.py",
+    "title": "外观增强：暗区、对比度、遮挡和局部亮度跃变",
+    "overview": "这些操作在 uint8 灰度图阶段运行，只改变像素强度，不改变边界坐标。它们是人为扰动，用于增加外观多样性；不能仅凭函数名认定它们精确模拟了真实超声成像。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 25,
+        "title": "local_transparent_blackening：半透明局部变暗",
+        "principle": [
+          "按图像面积选若干矩形，与全黑矩形混合：I新=(1−α)I旧+α·0。调用方 alpha=0.7 时，选中区强度约变为 0.3 倍。",
+          "black_ratio=0.15 是每块的目标面积占比，num_regions 是块数；重叠区域可能被反复变暗，因此总遮盖比例不等于两者简单乘积。"
+        ],
+        "syntax": [
+          "np.sqrt 面积估算边长；block_h=面积/block_w 调整另一边。img.copy() 避免修改调用者原始数组；cv2.addWeighted 执行加权相加。"
+        ],
+        "shapes": "uint8[H,W] → uint8[H,W]",
+        "pitfall": "随机矩形可因边界切片而变小；很小图像上 block_w 可能为 0，引发除零，当前 256×256 路径通常不会触发。",
+        "exercise": "原像素 100，alpha=0.7，与黑图混合后约多少？",
+        "answer": "30。",
+        "diagram": "data"
+      },
+      {
+        "start": 27,
+        "end": 34,
+        "title": "enhance_contrast：全图线性强度变换",
+        "principle": [
+          "随机以一半概率放大灰度、一半概率缩小灰度。公式近似为 I新=saturate_uint8(|αI+β|)，不是围绕均值的标准对比度变换。"
+        ],
+        "syntax": [
+          "random.uniform(*enhance_range) 的 * 把二元 tuple 展开为两个位置参数；cv2.convertScaleAbs 含绝对值和 uint8 饱和截断。"
+        ],
+        "shapes": "uint8 灰度图 → 同尺寸 uint8 图",
+        "pitfall": "高亮值乘大系数会饱和到 255，信息不可逆丢失。beta 默认 0 且输入非负，所以当前绝对值通常不改变结果。",
+        "exercise": "像素 200 乘 2 会输出 400 吗？",
+        "answer": "不会；uint8 饱和后是 255。",
+        "diagram": "data"
+      },
+      {
+        "start": 36,
+        "end": 60,
+        "title": "partial_occlusion：用矩形或圆遮住局部区域",
+        "principle": [
+          "以总面积的一定比例生成填充形状，模拟局部证据缺失。边界标签保持不变，要求模型借助邻域信息推断被遮挡的组织位置。",
+          "当前 special_enhancement 调用显式固定 shape=\"rect\"；圆形分支只是函数支持的另一条路径。"
+        ],
+        "syntax": [
+          "shape=\"random\" 时 random.choice 在两个字符串中选一个；cv2.rectangle/circle 最后参数 -1 代表填充而非描边。",
+          "圆半径由 sqrt(area/π) 求得；矩形宽高由面积和随机比例决定。"
+        ],
+        "shapes": "输入/输出 [H,W]",
+        "pitfall": "函数构造了三元素颜色，但当前图像是单通道，不能把它理解为真正的 RGB 彩色遮挡；圆半径过大也会让随机中心范围非法。",
+        "exercise": "这种增强为什么不用移动 y？",
+        "answer": "只改像素外观，目标解剖边界的几何位置未改变。",
+        "diagram": "data"
+      },
+      {
+        "start": 62,
+        "end": 80,
+        "title": "local_contrast_jump：局部强度突变",
+        "principle": [
+          "随机选 num_regions 个矩形区域，各自乘独立随机系数。这会制造不同区域增益不一致，促使模型降低对单一亮度阈值的依赖。",
+          "每个区域目标面积固定为图像面积的 0.1；默认倍率在 1 到 3，只增强不衰减，且可能发生饱和。"
+        ],
+        "syntax": [
+          "切片取 region 后 copy；cv2.convertScaleAbs 处理局部；写回原位置。for _ 表示循环变量的值不用于计算。"
+        ],
+        "shapes": "uint8[H,W] → 同尺寸",
+        "pitfall": "局部边缘会出现人为不连续，不能默认这些伪影与真实设备增益变化完全一致。",
+        "exercise": "局部乘 3 后标签为何不乘 3？",
+        "answer": "强度单位改变不代表坐标单位改变；标签 y 是像素位置。",
+        "diagram": "data"
+      },
+      {
+        "start": 83,
+        "end": 92,
+        "title": "special_enhancement：随机选择一种外观扰动",
+        "principle": [
+          "列表里存的是函数对象，先随机选一个再调用；每次触发只执行一种，不会按顺序全部执行。Dataset 以 0.2 概率调用这里，因此每种选择的无条件概率约为 0.05。"
+        ],
+        "syntax": [
+          "lambda x: ... 将带定制参数的函数包装成只接收一个图像的接口。random.choice(funcs) 返回函数对象，func(img) 才真正执行。"
+        ],
+        "shapes": "图像 → 四种增强中的一种 → 图像",
+        "pitfall": "funcs 中只有函数/匿名函数，不应写成 local_contrast_jump(img)；那会在建列表时提前执行。",
+        "exercise": "lambda 在第一项里固定了哪些参数？",
+        "answer": "alpha=0.7、num_regions=2，其余如 black_ratio 使用被调用函数默认值。",
+        "diagram": "data"
+      }
+    ]
+  },
+  {
+    "path": "LineDet/dataset/special_dataset_utils2.py",
+    "title": "几何与条纹增强：坐标映射比函数名字更重要",
+    "overview": "图像已标准化为 Tensor。前三种操作沿高度裁剪或缩放，条纹操作只加强度，组织变形通过 grid_sample 做像素重采样。理解这些函数要分别写出图像的反向采样映射与标签的前向坐标映射，并检查二者一致。",
+    "segments": [
+      {
+        "start": 1,
+        "end": 58,
+        "title": "crop_upper_and_stretch：实际裁掉底部再拉伸",
+        "principle": [
+          "虽然函数名带 upper，真正切片是 img[:,:H−x,:]，保留顶部、裁掉底部 x 行。剩余高度 H−x 再拉伸回 H，所以标签按 y新=y旧·H/(H−x) 增大。",
+          "若原标签在被裁掉的底部，代码仍把它缩放并 clamp 到 H−1，没有把监督设为无效。学习时要按照切片判断真实行为。"
+        ],
+        "syntax": [
+          "assert 检查图像 3 维、标签 2 维且宽度一致；unsqueeze(0) 为 F.interpolate 补 batch 维，squeeze(0) 在结束时移除。",
+          "size=(H,W) 是目标空间尺寸；mode=\"bilinear\" 用邻域双线性插值；align_corners=False 使用像素中心的采样约定。"
+        ],
+        "shapes": "[C,H,W] → [1,C,H−x,W] → [C,H,W]；y [L,W]",
+        "pitfall": "标签只做简单比例，未严格包含 align_corners=False 的半像素偏移。函数不接收 valid，裁掉的真值可能被误留在边界。",
+        "exercise": "H=100、x=20、原 y=40，新 y 是多少？",
+        "answer": "40×100/80=50；这是代码使用的坐标公式。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 61,
+        "end": 123,
+        "title": "compress_height_with_pad：压缩内容、顶部补零",
+        "principle": [
+          "将整幅内容从 H 压缩到 H−x，再放到画布底部。每个标签先按比例变矮，再整体下移 x：y新=y旧·(H−x)/H+x。",
+          "这样上方多了一条空白带，但图像输出尺寸与其他样本保持一致。"
+        ],
+        "syntax": [
+          "torch.zeros_like(img) 创建形状、dtype、device 相同的零画布；padded[:,x:H,:]=resized 把压缩图贴到底部。",
+          "max(6,int(H×rand_ratio)) 设随机上界；random.randint(5,max_x) 包含端点；非法 x 直接返回原对象。"
+        ],
+        "shapes": "[C,H,W] → [C,H−x,W] → [C,H,W]",
+        "pitfall": "这里的“黑条”实际是标准化后值 0 的均值强度带；不是原始像素 0 对应的标准化值。",
+        "exercise": "H=100、x=20、y=50，新坐标是多少？",
+        "answer": "50×0.8+20=60。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 125,
+        "end": 194,
+        "title": "crop_lower_and_stretch：实际裁掉顶部再拉伸",
+        "principle": [
+          "真正切片 img[:,x:H,:] 丢弃顶部 x 行，剩余区域拉伸回原高度。标签先减裁剪偏移再乘尺度：y新=(y旧−x)·H/(H−x)。",
+          "为避免裁掉最上层边界，先求 y_px[0] 的最小值，将 x 限制在它以内。只检查最上面一条线，依赖通道顺序正确。"
+        ],
+        "syntax": [
+          "torch.min(...).item() 转为 Python 标量供 random 使用；x=min(x,max_safe_x) 也约束显式传入值；if 条件不满足时提前 return。"
+        ],
+        "shapes": "图像和标签输出尺寸不变",
+        "pitfall": "min 没有过滤 valid=False 列，无效占位或外推值会影响裁剪上限；函数名 lower 容易误导，实际裁顶部。",
+        "exercise": "H=100、x=10、y=55，新 y 是多少？",
+        "answer": "(55−10)×100/90=50。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 196,
+        "end": 255,
+        "title": "add_diffraction_strips：在浅部添加亮带",
+        "principle": [
+          "在上方约六分之一范围随机选亮带中心，按离中心的距离生成平方衰减强度，中心约 3 像素保持最大值，再沿全宽叠加。",
+          "强度参数使用 z-score 数值单位；主调用 y_noise=0，所以标签不变。它是手工添加条纹的增强，不是超声衍射物理过程的数值模拟。"
+        ],
+        "syntax": [
+          "torch.arange(y_min,y_max) 生成纵向采样；view(-1,1) 变列向量，expand(-1,W) 沿宽度广播，再 unsqueeze(0) 补通道。",
+          "random.randint(*num_range) 随机条数；radius 在条循环外只采一次。torch.rand_like(new_y) 生成同形随机数供可选坐标扰动。"
+        ],
+        "shapes": "条纹 [1,H条,W] 加到图像对应切片；y [L,W]",
+        "pitfall": "添加后不重新标准化；小高度下 random.uniform(10,limit_y−1) 的区间不符合原设计，默认 256 高度才有合理浅部范围。",
+        "exercise": "若 y_noise=0，为什么仍计算 mask 和 noise？",
+        "answer": "当前实现保留了通用分支，但 noise 全零，对标签没有实际影响。",
+        "diagram": "data"
+      },
+      {
+        "start": 258,
+        "end": 284,
+        "title": "平滑噪声：正弦叠加与可分离外积",
+        "principle": [
+          "一维噪声由多组正弦相加，每层振幅 1/k，高频贡献减小；除以最大绝对值后幅度不超过 1。它能产生连续缓变形状，而非逐像素独立白噪声。",
+          "二维场通过 y 噪声与 x 噪声外积得到，空间结构可分离。注释提到 Perlin，但代码没有实现经典梯度 Perlin 噪声算法。"
+        ],
+        "syntax": [
+          "torch.linspace(0,1,W) 建位置轴；randint(1,4) 右端不包含，所以抽到 1、2、3；phase 为 [0,2π) 随机相位。",
+          "unsqueeze(1) 把 [H] 变 [H,1]，unsqueeze(0) 把 [W] 变 [1,W]，相乘广播得 [H,W]。clamp(min=1e-6) 避免归一化除零。"
+        ],
+        "shapes": "noise_1d [W]；noise_2d [H,W]",
+        "pitfall": "一维函数文档说未严格归一化，但实际第270行已经归一化；应以实现为准。随机频率/相位使用 PyTorch RNG，不是 Python random。",
+        "exercise": "为什么不能直接把 [H] 与 [W] 相乘得到二维？",
+        "answer": "它们没有独立轴；补 [H,1] 和 [1,W] 后广播才得到外积。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 287,
+        "end": 351,
+        "title": "tissue_nonuniform_deform：逐列改变两条边界间厚度",
+        "principle": [
+          "选定上界 y_top 与下界 y_bot，旧厚度 h_old=y_bot−y_top。每列比例 s(x)=scale+noise(x)·scale_noise_amp·(scale−1)，新下界为 y_top+s(x)·h_old。",
+          "上界固定，区域内部被拉伸/压缩，下方整体平移 delta_bot。scale 是人工增强因子，不代表模型估计的真实组织弹性。"
+        ],
+        "syntax": [
+          "index_top/index_btn 是 y_px 的行索引；clone().float() 保留原值并转浮点。clamp(min=1e-6) 防止厚度为零；scale_col 最小 0.1 防止非正尺度。",
+          "seed 非空时 torch.manual_seed(seed) 修改全局 PyTorch RNG；默认 scale_noise_amp=0.15，lateral_amp=0.5，fat_ratio=0.3，fat_softness=2。"
+        ],
+        "shapes": "y_top/y_bot/h_old/scale_col: [W]",
+        "pitfall": "若两条线已交叉，clamp 只是防止数值故障，不会恢复正确解剖关系。函数未读取 valid，所有列均参与形变。",
+        "exercise": "上界40、下界80、scale=1.5且无噪声，新下界是多少？",
+        "answer": "40+(80−40)×1.5=100；下方位移 delta=20。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 353,
+        "end": 424,
+        "title": "深度权重与反向采样：每个输出像素去哪里取值",
+        "principle": [
+          "depth_weight 在浅部 t<fat_ratio 返回 fat_softness，否则返回 1；有效比例为 1+(scale_col−1)·weight。图像采用反向映射：遍历新图位置，计算来源位置，避免前向搬运像素留下孔洞。",
+          "上方来源不变；中间 src_y=y_top+(dst_y−y_top)/scale_eff；下方 src_y=dst_y−delta_bot。横向再加平滑噪声位移，中部用 sin 窗在边界衰减，下方强度直接置 1。"
+        ],
+        "syntax": [
+          "view(1,W).expand(H,W) 把每列参数广播到整幅网格。mask_top/mid/bot 是布尔图，通过布尔索引分别赋值。",
+          "depth_weight 是嵌套函数，捕获 fat_ratio 与 fat_softness；torch.ones_like(t) 初始化，条件索引写入浅部权重。"
+        ],
+        "shapes": "ys/xs/src_y/src_x: [H,W]",
+        "pitfall": "深度权重在阈值处突变；这里按目标深度算反向权重、按原始深度算标签前向权重，两者一般不是严格互逆。横向扰动没有同步重采样标签的 x。",
+        "exercise": "为什么 grid_sample 要给“来源坐标”，而不是“去向坐标”？",
+        "answer": "它对每个输出网格点读取输入；反向查询能为每个输出位置都定义采样值。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 426,
+        "end": 436,
+        "title": "grid_sample：归一化坐标与插值",
+        "principle": [
+          "grid_sample 要求采样位置用 [−1,1] 坐标表示。align_corners=True 时，原图 x=0 对应 −1，x=W−1 对应 1，y 同理；与前面的归一化公式配套。",
+          "bilinear 根据四邻域加权读值；padding_mode=\"border\" 在采样点越界时重复边缘值。"
+        ],
+        "syntax": [
+          "torch.stack((grid_x,grid_y),dim=2) 把 x/y 放最后一维，顺序必须先 x 后 y；unsqueeze(0) 补 batch。",
+          "输入 img.unsqueeze(0) 为 [1,C,H,W]；grid [1,H,W,2] 指定每个输出像素的输入来源。"
+        ],
+        "shapes": "[1,C,H,W] + [1,H,W,2] → [1,C,H,W]",
+        "pitfall": "W 或 H 等于 1 会导致除以零；当前正常图像尺寸远大于1。border 不代表出界标签仍有效，标签有效性需另行处理。",
+        "exercise": "W=101 时像素 x=50 的归一化坐标是多少？",
+        "answer": "2×50/(101−1)−1=0。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 438,
+        "end": 464,
+        "title": "标签前向变换：坐标与图像是否一致",
+        "principle": [
+          "标签使用前向变换：上方保持，中间按深度权重拉伸，下方加 delta_bot。最后 clamp 到 [0,H−1]，避免数值出界。",
+          "边界两端在纯纵向模型下较容易对齐，但复杂深度权重与横向扰动会带来不一致；这是一段应通过合成网格图与曲线叠加验证的增强实现。"
+        ],
+        "syntax": [
+          "循环 i 遍历所有标签行；mask_mid_i.any() 避免在空选择上继续计算。new_y=y_px.clone().float() 保持输入不被直接覆盖。",
+          "代码仅写 new_y[i,同一列]，没有改变横向索引；最终返回 (new_img,new_y)，没有 valid。"
+        ],
+        "shapes": "new_y [L,W]",
+        "pitfall": "超出视野的点被夹在边界而没有失效；横向源点变了，标签却保留原列对应。即使 scale=1，lateral_amp>0 时横向扰动仍存在。",
+        "exercise": "怎样验证这类增强是否同步？",
+        "answer": "用一幅在标签位置画亮线的合成图，变换后叠加 new_y；检查每列亮线与标签是否重合，并测试 scale=1、纯纵向、越界等情况。",
+        "diagram": "geometry"
+      },
+      {
+        "start": 466,
+        "end": 494,
+        "title": "special_augmentation2：按线数构建候选增强",
+        "principle": [
+          "固定四种候选：裁底拉伸、高度压缩补顶、裁顶拉伸、浅部亮条。若至少两条线，追加最后两线之间的组织变形；至少三条时再加两个区域组合。",
+          "当前项目两条线，候选总数为五；Dataset 以 0.3 概率进入这里，再等概率选一种，因此每种约 6% 的取样机会，实际函数也可能因安全条件直接返回。"
+        ],
+        "syntax": [
+          "lambda i,y 统一所有函数为相同二参数接口；N−2/N−1 取最后两条线。random.uniform(0.5,2.0) 在被选 lambda 执行时才采样尺度。",
+          "random.choice(funcs) 选择单个可调用对象；new_img,new_y=func(img,y_px) 解包二元返回值。"
+        ],
+        "shapes": "img [1,H,W]、y [2,W] → 同形结果",
+        "pitfall": "候选函数共享接口却不共享 valid；不能把这条链视为完整的图像/标签/掩码联合几何增强。",
+        "exercise": "当前两线模型里 tissue_nonuniform_deform 作用于哪两条线？",
+        "answer": "index_top=0 真皮层下界，index_btn=1 脂肪层下界。",
+        "diagram": "geometry"
+      }
+    ]
+  }
+]

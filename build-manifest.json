@@ -1,0 +1,27 @@
+{
+  "files": 19,
+  "segments": 114,
+  "source_lines": 2572,
+  "html_bytes": 405437,
+  "hashes": {
+    "LineDet/dataset/__init__.py": "bae4c91e4ec7411341a0714ce1530c11c6f03a490490e0f43d82944554a35425",
+    "LineDet/dataset/dataset.py": "e8f4ecfc579411b3dd38ef7ce57663de1479a57d3f42c1d86b1edcff190920a5",
+    "LineDet/dataset/line_utils.py": "52143384c080c2f47e354275e1fcfefc1c7a34bb428757ba993c42502ec08264",
+    "LineDet/dataset/utils.py": "f38afb53690d62c285be02ad6401c8b7ba2cca4ade0065a4086a1e89b83f124d",
+    "LineDet/dataset/split_manifest.py": "1d6b91df6d1a3cec0ff7d3c0a0e64382b22e31b3b8613349edab82c02563f9e1",
+    "generate_group_split.py": "6612e257e614de816e8b23a0e36dc63034eed41ef26261b3c2dee16510116f5e",
+    "LineDet/dataset/dataset_utils.py": "4b90bac12b1213d28225be2e83e2698d47860a343c334f11cc7a70e20c5d5762",
+    "LineDet/dataset/special_dataset_utils.py": "ad9fb77c33066f8f231ee7d14094f470686d3a54b66c7c3432014c57b2cefb9d",
+    "LineDet/dataset/special_dataset_utils2.py": "ca66504e9c1275f5a9f513ad251f70b1011f982dbca5ebfff0d1daed7e3a1b13",
+    "LineDet/model/model.py": "06ac8dba48d746fc18de4e2ed7ab406838fa0bac73d3e38c4bdc7175a592868d",
+    "LineDet/model/__init__.py": "5ea5fad3d442134d33172a6e0b61efa6974e3a44b29e91ec8625b8fe227a994e",
+    "LineDet/loss.py": "704262279c0f60ea9c47fed717ac9a68228e6780fcaca29f3a3b6a7efd46ca75",
+    "LineDet/utils.py": "a69679205c18a0c986995dd252f98ec2f76d263b20bab750d13c3be7f6b1cfb1",
+    "LineDet/export.py": "0995c1ccc93914b27f5025c76eebeeaf474094f4bfdf71eaadb4f45d8d0280f3",
+    "LineDet/__init__.py": "bae4c91e4ec7411341a0714ce1530c11c6f03a490490e0f43d82944554a35425",
+    "main.py": "8023e3de61ce109132a4b44aaed8b741a33cdc5d556460016b486a03ea11361e",
+    "run_dual_split.sh": "7996e7e751ed86c8de164e9bbafc9ea547c2f87f1407da2a5a648b535bcc27ba",
+    "train减脂.sh": "8ea3f48f2e20a739b5ed0f54bfbbae73b9343fae9fad146c335aee6f73a223fa",
+    "summarize_comparison.py": "464799b1bcdb0baa55f03912d7e4605d381ed56791beed39d5165927a7751dce"
+  }
+}

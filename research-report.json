@@ -1,0 +1,318 @@
+{
+  "scope": "基于当前可读源码及保存的 JSON 元数据进行静态研究；没有重新训练、加载权重或声称复现精度。日志尾部存在截断，完整训练结果以 best_metrics.json 的保存记录为证。",
+  "evidence": [
+    {
+      "source": "runs/compare_减脂_20261009_105347/train100/best_metrics.json",
+      "values": {
+        "epoch": 93,
+        "val_mae": 0.8582070860369452,
+        "val_loss": 0.18472227762485371,
+        "train_loss": 0.563459969445681
+      },
+      "interpretation": "保存记录显示最佳 MAE 出现在第 93 轮；该验证协议存在源图重叠，不能称为独立泛化精度。"
+    },
+    {
+      "source": "runs/compare_减脂_20261009_105347/train100/split_summary.json",
+      "values": {
+        "train_items": 18720,
+        "val_items": 1365,
+        "train_unique_source_images": 13643,
+        "val_unique_source_images": 1365,
+        "source_image_overlap": 1365
+      },
+      "interpretation": "验证的 1365 张源图全部也出现在训练集中；训练条目大于源图数是 unify 扩充导致。"
+    },
+    {
+      "source": "runs/compare_减脂_20261009_105347/train90/best_metrics.json",
+      "values": {
+        "epoch": 79,
+        "val_mae": 1.6415794997504263,
+        "val_loss": 1.1749842133034358,
+        "train_loss": 0.7584947549930497
+      },
+      "interpretation": "保存记录显示分组留出协议最佳 MAE 出现在第 79 轮；比 train100 大不能直接解释为模型变差。"
+    },
+    {
+      "source": "runs/compare_减脂_20261009_105347/train90/split_summary.json",
+      "values": {
+        "train_items": 17150,
+        "val_items": 1570,
+        "train_unique_source_images": 12279,
+        "val_unique_source_images": 1364,
+        "source_image_overlap": 0
+      },
+      "interpretation": "按源文件路径没有训练验证重叠。验证有 206 个裁剪副本，因此 1570 条目不是 1570 张独立原图。"
+    },
+    {
+      "source": "splits/grouped_v2/减脂无垫_20261009/meta.json",
+      "values": {
+        "seed": 20260925,
+        "total_pairs": 13643,
+        "total_groups": 56,
+        "train_pairs": 12279,
+        "val_pairs": 1364,
+        "train_groups": 50,
+        "val_groups": 6,
+        "actual_val_ratio": 0.09997801070145862
+      },
+      "interpretation": "group 定义为包含 images/ 与 annotations/ 的父目录；分组隔离并不自动等同患者隔离。"
+    },
+    {
+      "source": "splits/grouped_v1/减脂/meta.json",
+      "values": {
+        "total_pairs": 8300,
+        "total_groups": 37,
+        "train_pairs": 7470,
+        "val_pairs": 830,
+        "train_groups": 33,
+        "val_groups": 4
+      },
+      "interpretation": "较早清单的数据范围和规模不同，不应与 v2 的计数混在同一实验中。"
+    },
+    {
+      "source": "runs/compare_减脂_20261009_105347/train90/training.log:1-10",
+      "values": {
+        "train_crop_added": 4871,
+        "train_crop_skipped": 484,
+        "val_crop_added": 206,
+        "val_crop_skipped": 0
+      },
+      "interpretation": "日志开头支持当前保存的样本计数：12279+4871=17150；1364+206=1570。"
+    }
+  ],
+  "workflow": [
+    "train减脂.sh 设置统一尺寸策略和共享训练参数，调用 run_dual_split.sh。",
+    "run_dual_split.sh 创建实验目录、代码与清单快照，依次启动 train100 和 train90 两个独立 Python 进程。",
+    "main.py 解析参数、固定随机种子，Dataset 生成原图或裁剪条目，DataLoader 按批次装配。",
+    "LineCoordNetFPN 将图像映射到热图 logits，再用 soft-argmax 得到逐列 y 坐标。",
+    "HeatmapCompositeLoss 使用热图、坐标、顺序、二阶平滑和一阶 TV 五项监督；反向后裁剪梯度，再由 AdamW 更新。",
+    "每轮评估并按验证 MAE 选择 best.pth；每 10 轮额外保存，最多可视化前五批的首张。",
+    "默认恢复最佳模型，与外部质量分类器一起导出 PTE；若 skip_export 则跳过恢复与导出。",
+    "MLflow 记录指标和产物；双协议均完成后汇总 split 与 best JSON。"
+  ],
+  "limitations": [
+    {
+      "title": "train100 不是独立验证",
+      "source": "LineDet/dataset/dataset.py / main.py:33-47",
+      "detail": "无清单时训练保留全部源图、验证取末尾约10%。保存摘要明确记录1365张重叠。"
+    },
+    {
+      "title": "分组不等于患者隔离",
+      "source": "generate_group_split.py / splits/grouped_v2/减脂无垫_20261009/meta.json",
+      "detail": "按包含 images/annotations 的目录分组，缺少患者身份映射及跨文件内容去重证据。"
+    },
+    {
+      "title": "验证样本有裁剪副本",
+      "source": "LineDet/dataset/dataset.py",
+      "detail": "unify 同样用于 val，不同源图可拥有不同条目数；全体条目平均会赋予有副本的源图更多权重。"
+    },
+    {
+      "title": "指标统计口径不统一",
+      "source": "main.py:50-82,115-154",
+      "detail": "MAE使用valid；A@和当前HD不用valid；最终以批次等权平均而非有效点总和除以总数。"
+    },
+    {
+      "title": "HD 并非二维边界距离",
+      "source": "main.py:60-82",
+      "detail": "忽略横坐标，仅对高度集合求最近距离。不能直接当成标准二维 Hausdorff/HD95 报告。"
+    },
+    {
+      "title": "参数接口与实际效果不一致",
+      "source": "main.py:167-245 / LineDet/loss.py",
+      "detail": "pretrained未传给模型；use_heatmap无法关闭且模型总返回二元组；损失sigma固定3.0；部分损失权重硬编码。"
+    },
+    {
+      "title": "检查点不足以完全续训",
+      "source": "main.py:294-329",
+      "detail": "缺少优化器状态与随机数状态，没有resume逻辑；best.pth含Namespace对象，不是纯权重。"
+    },
+    {
+      "title": "导出是另一条依赖链",
+      "source": "main.py:358-378 / LineDet/export.py",
+      "detail": "需要ExecuTorch和外部质量分类器权重；当前仅随机输入形状检查，无数值一致性验证。"
+    },
+    {
+      "title": "未提供重复实验统计",
+      "source": "runs/compare_减脂_20261009_105347",
+      "detail": "这些保存记录不包含多随机种子均值方差、独立测试集置信区间或患者分层结果。"
+    },
+    {
+      "title": "保存的日志有截断",
+      "source": "runs/compare_减脂_20261009_105347/train100/training.log / runs/compare_减脂_20261009_105347/train90/training.log",
+      "detail": "文件尾部停在进度条中且长度受限；不能据此断言训练失败，也不能用它证明完整100轮日志齐备。"
+    }
+  ],
+  "effective_loss": "L = 1.0 Lheatmap + 0.1 Lcoord + 0.01 Ltopo + 0.1 Lsmooth + 0.05 Ltv；实际sigma=3.0，默认heatmap_loss_type=bce。",
+  "handwrite_plan": [
+    {
+      "step": 1,
+      "task": "手写一个Dataset样本字典与collate",
+      "check": "能解释 image [1,H,W]、y/valid [L,W] 如何变成批次。"
+    },
+    {
+      "step": 2,
+      "task": "手写soft-argmax与masked MAE",
+      "check": "正确沿高度dim=2归一化；无有效点有明确返回约定。"
+    },
+    {
+      "step": 3,
+      "task": "手写一批训练循环",
+      "check": "zero_grad→forward→loss→backward→clip→step 顺序正确。"
+    },
+    {
+      "step": 4,
+      "task": "手写验证与最佳检查点",
+      "check": "同时eval/no_grad，先累积误差总和与有效点数，再求整体MAE；deepcopy最佳状态。"
+    },
+    {
+      "step": 5,
+      "task": "手写分组划分审计",
+      "check": "原图和增强副本同组、源图零重叠，并区分目录组与患者组。"
+    },
+    {
+      "step": 6,
+      "task": "复述结果的证据边界",
+      "check": "能解释0.8582px与1.6416px为何不能直接作为同测试集模型性能优劣比较。"
+    }
+  ],
+  "parameters": [
+    {
+      "name": "--img_size",
+      "default": "256",
+      "entry": "256",
+      "meaning": "输入宽高；单数表示正方形，也支持 W,H。"
+    },
+    {
+      "name": "--num_lines",
+      "default": "2",
+      "entry": "2",
+      "meaning": "模型输出曲线数量；必须与标注和损失形状匹配。"
+    },
+    {
+      "name": "--epochs",
+      "default": "40",
+      "entry": "100",
+      "meaning": "完整遍历训练集的轮数，无早停。"
+    },
+    {
+      "name": "--batch_size",
+      "default": "32",
+      "entry": "48",
+      "meaning": "每批条目数，末批保留。"
+    },
+    {
+      "name": "--lr",
+      "default": "1e-3",
+      "entry": "1e-3",
+      "meaning": "AdamW学习率，没有scheduler。"
+    },
+    {
+      "name": "--num_workers",
+      "default": "8",
+      "entry": "NUM_WORKERS或16",
+      "meaning": "DataLoader并行工作进程数。"
+    },
+    {
+      "name": "--device",
+      "default": "有CUDA则cuda，否则cpu",
+      "entry": "默认",
+      "meaning": "模型和张量计算设备。"
+    },
+    {
+      "name": "--backbone",
+      "default": "mobilenet_v3_large",
+      "entry": "mobilenet_v3_large",
+      "meaning": "支持V3 Large或timm V4 Conv Medium。"
+    },
+    {
+      "name": "--backbone_pretrained",
+      "default": "False",
+      "entry": "未设置",
+      "meaning": "被解析但未传到模型，当前主程序无实际效果。"
+    },
+    {
+      "name": "--save_dir",
+      "default": "checkpoints",
+      "entry": "双协议脚本分别设置train100/train90子目录",
+      "meaning": "权重、日志、可视化和摘要保存位置。"
+    },
+    {
+      "name": "--use_heatmap",
+      "default": "True",
+      "entry": "True",
+      "meaning": "store_true且默认True，当前没有关闭入口；模型也始终输出热图。"
+    },
+    {
+      "name": "--heatmap_sigma",
+      "default": "2.0",
+      "entry": "2.0",
+      "meaning": "传给Dataset和Loss构造，但Loss内部固定3.0；Dataset生成的热图未用于loss。"
+    },
+    {
+      "name": "--data_root",
+      "default": "源码中的Linux数据目录",
+      "entry": "入口脚本中的无垫数据目录",
+      "meaning": "图像与标注根目录；网页不公开具体病例路径。"
+    },
+    {
+      "name": "--split_mode",
+      "default": "train100",
+      "entry": "依次train100/train90",
+      "meaning": "校验是否应有manifest，本身不执行切分。"
+    },
+    {
+      "name": "--split_manifest",
+      "default": "None",
+      "entry": "train90使用grouped_v2清单",
+      "meaning": "固定训练/验证记录的目录。"
+    },
+    {
+      "name": "--seed",
+      "default": "20260925",
+      "entry": "SEED或20260925",
+      "meaning": "随机初始化和数据加载的共享随机种子。"
+    },
+    {
+      "name": "--skip_export",
+      "default": "False",
+      "entry": "未设置",
+      "meaning": "跳过加载最佳状态与PTE导出；best.pth依然保存。"
+    },
+    {
+      "name": "LINEDET_UNIFY_MODE",
+      "default": "none",
+      "entry": "unify",
+      "meaning": "内存中尺寸统一策略，启动Python前通过环境变量设置。"
+    },
+    {
+      "name": "LINEDET_UNIFY_SIZE",
+      "default": "516,594",
+      "entry": "516,594",
+      "meaning": "unify裁剪宽高比参考，与最终img_size不同。"
+    },
+    {
+      "name": "SAVE_DIR",
+      "default": "runs/compare_任务名_时间戳",
+      "entry": "默认",
+      "meaning": "双协议实验根目录。"
+    },
+    {
+      "name": "PYTHON_BIN",
+      "default": "python",
+      "entry": "默认",
+      "meaning": "运行训练和汇总的解释器。"
+    },
+    {
+      "name": "AdamW.weight_decay",
+      "default": "1e-4",
+      "entry": "1e-4",
+      "meaning": "写死在main中的解耦权重衰减。"
+    },
+    {
+      "name": "clip_grad_norm_.max_norm",
+      "default": "5.0",
+      "entry": "5.0",
+      "meaning": "所有梯度的总L2范数上限。"
+    }
+  ]
+}

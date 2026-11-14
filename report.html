@@ -1,0 +1,140 @@
+<section class="hero" id="intro">
+<div><span class="eyebrow">A CODE-TO-CONCEPT FIELD GUIDE / 01</span><h1>从一张超声图像，<br>读懂<em>脂肪层的边界。</em></h1><p>沿着数据、网络、损失与训练的完整路径，理解这份项目为什么这样写，再一步步把它写出来。</p><div class="actions"><a class="primary" href="#report/problem">开始阅读 <span aria-hidden="true">↗</span></a><a class="secondary" href="#code/main.py">进入源码工作台 →</a></div></div>
+<div class="hero-visual"><div class="figure-label"><span>FIG. 01 / LAYER BOUNDARY</span><span>SCHEMATIC · 示意</span></div>
+<svg viewBox="0 0 420 260" role="img" aria-label="脂肪层两条边界的示意图，不是真实超声数据"><defs><pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0H0V20" fill="none" stroke="#426056" stroke-width=".4"/></pattern><linearGradient id="scan" x2="0" y2="1"><stop stop-color="#253d3c"/><stop offset="1" stop-color="#162d31"/></linearGradient></defs><rect x="12" y="8" width="396" height="224" rx="8" fill="url(#scan)"/><rect x="12" y="8" width="396" height="224" rx="8" fill="url(#grid)"/><path d="M30 80C100 62 150 106 224 86S332 78 390 96L390 172C330 150 280 185 225 160S100 162 30 153Z" fill="#b7d77c" opacity=".17"/><g fill="none" stroke="#6c8a7a" opacity=".2"><path d="M30 48Q120 30 210 53T390 50"/><path d="M30 58Q120 40 210 63T390 60"/><path d="M30 112Q100 100 210 120T390 125"/><path d="M30 129Q120 115 220 137T390 142"/><path d="M30 197Q110 175 210 195T390 205"/><path d="M30 212Q110 190 210 210T390 220"/></g><path d="M30 80C100 62 150 106 224 86S332 78 390 96" fill="none" stroke="#a4dcba" stroke-width="3"/><path d="M30 153C100 162 155 140 225 160S330 150 390 172" fill="none" stroke="#dbea8a" stroke-width="3"/><path d="M258 87V166M252 87h12M252 166h12" stroke="#dbeaa5" stroke-dasharray="3 3"/><g font-family="Microsoft YaHei,sans-serif" font-size="11"><text x="44" y="64" fill="#a4dcba">真皮层下界 · y₀(x)</text><text x="44" y="184" fill="#dbea8a">脂肪层下界 · y₁(x)</text><text x="274" y="128" fill="#f0f1d8">逐列厚度</text><text x="17" y="252" fill="#60786e">输入：灰度图像</text><text x="273" y="252" fill="#60786e">输出：两条连续边界</text></g></svg>
+<div class="visual-caption">每一列预测一个纵坐标，用两条曲线描述层状组织。</div></div>
+</section>
+<div class="metrics-strip"><div><strong>2</strong><span>目标边界 / 固定标签顺序</span></div><div><strong>256²</strong><span>训练入口指定的输入尺寸</span></div><div><strong>13,643</strong><span>固定清单中的源图像对</span></div><div><strong id="hero-file-count">20</strong><span>核心源文件 / 可逐段展开</span></div></div>
+
+<section class="section" id="problem" data-title="任务与整体路线"><div class="section-head"><span class="section-num">01</span><h2>把“分割”改写成两条曲线。</h2></div>
+<p class="lead">这个项目要回答的是：在图像的每一列，真皮层在哪里结束，脂肪层又在哪里结束？</p>
+<p>灰度超声图中的层状结构可以用两条大体沿水平方向延伸的线来表达。普通语义分割会给每个像素分配类别，输出一张区域掩码；这里选择更紧凑的表示：对每条边界、每一个横坐标 x，预测纵坐标 y。这样一幅 256×256 图像的最终输出只有 2×256 个坐标。网络内部仍产生二维热图，用它来帮助模型寻找边界的位置。</p>
+<div class="math">I ∈ ℝ<sup>B×1×H×W</sup> → Z ∈ ℝ<sup>B×L×H×W</sup> → ŷ ∈ ℝ<sup>B×L×W</sup><small>B：批大小；L：边界条数，本任务为 2；H：图像高度；W：图像宽度；Z 是未归一化分数（logits）。</small></div>
+<p>标签顺序在 <code>TARGET_LABELS</code> 中写死为「真皮层下界」「脂肪层下界」，因此第 0 个通道应该在第 1 个通道上方。图像坐标的 y 轴向下增长，合理的顺序是 y₀(x) ≤ y₁(x)。两条线之间可以构造区域掩码 M(y,x)=1[y₀(x)≤y≤y₁(x)]；厚度可写为 d(x)=y₁(x)−y₀(x)。<strong>这两个式子是后续应用推导，当前训练源码没有输出区域掩码，也没有计算毫米厚度。</strong></p>
+<p>这种表示依赖“每条线在每列至多一个 y”的假设。若结构出现竖直边界、折返、多个不连通层，同一列一个数就不够表达。模型也始终输出每一列的位置，没有独立的边界存在性头；缺少标注的列只能通过有效性掩码排除监督。</p>
+<div data-diagram="data"></div>
+<div class="reading-path"><div><b>第一遍 / 讲清输入与输出</b><p>读 01—04：拿一列像素，画出标签、热图与预测坐标。</p></div><div><b>第二遍 / 追踪梯度</b><p>读 05—08：明确每项损失约束什么，梯度如何回到卷积核。</p></div><div><b>第三遍 / 闭卷实现</b><p>读源码工作台：逐段练习，再拼出完整训练循环与导出入口。</p></div></div>
+<a class="source-link" href="#code/LineDet/dataset/line_utils.py">↗ TARGET_LABELS / 标注解析</a></section>
+
+<section class="section" id="data" data-title="数据与标注"><div class="section-head"><span class="section-num">02</span><h2>数据的契约，比模型名字更重要。</h2></div>
+<p>数据目录里，<code>images/</code> 与 <code>annotations/</code> 相邻出现。扫描函数递归寻找图像及同名 JSON，过滤缺少目标标签的标注。读取时只保留指定两条线；重复标签取第一个有数据的对象，其他皮肤标签不参与本任务。标注点经过有限值、图像范围检查，横坐标四舍五入为整数。同一列存在多个 y 时取均值。</p>
+<div class="two-col"><div><h3>坐标与有效性分开存</h3><p><code>y_px[L,W]</code> 保存浮点纵坐标；<code>valid[L,W]</code> 保存布尔值。没有标注的列初始化为 0，但这个 0 不能当成“边界在图顶端”。只有 valid=True 时，它才是一个可靠监督点。丢掉掩码相当于给不存在的标签强行补零。</p></div><div><h3>重采样不是只缩放 y</h3><p>宽度改变后，目标图每一列都要查询原图位置，再对已知点做一维插值；高度改变后，y 还要乘高度比例。代码在多个已知点的首末区间内全部标为有效，因此会填补中间缺口；只有一个已知点时，实际将整幅宽度置为有效，这是需要警惕的实现选择。</p></div></div>
+<div class="math">s<sub>x</sub>=W′/W，s<sub>y</sub>=H′/H； x<sub>query</sub>=x′/s<sub>x</sub>； y′(x′)=interp(x<sub>query</sub>; x<sub>known</sub>,y<sub>known</sub>)·s<sub>y</sub><small>例：高度 594→256，原 y=200 对应约 86.2。参数尺寸是 (W,H)，张量末两维却是 (H,W)。</small></div>
+<div class="table-wrap"><table><thead><tr><th>批次字段</th><th>形状与类型</th><th>怎样被使用</th></tr></thead><tbody><tr><td>image</td><td>float32 [B,1,H,W]</td><td>灰度 → 尺寸变换 → 增强 → 标准化 → 模型</td></tr><tr><td>y_px</td><td>float32 [B,2,W]</td><td>坐标 MSE、热图重新生成、MAE</td></tr><tr><td>valid</td><td>bool [B,2,W]</td><td>筛选有监督的列；部分指标实际遗漏此掩码</td></tr><tr><td>heatmaps</td><td>float32 [B,2,H,W]</td><td>Dataset 生成并搬到设备，但当前损失内部另算，未消费它</td></tr><tr><td>name</td><td>list[str]，长度 B</td><td>源图路径，便于追踪；ann_path 没有被 collate 返回</td></tr></tbody></table></div>
+<p><code>default_collate</code> 的 <code>torch.stack</code> 在最前面新增 B 维，要求样本中每个字段形状一致。虽然命令行提供 <code>--num_lines</code>，标注提取固定为两条线，任意改成 3 并不能自动扩展任务。标签存在也不保证点有效或非空，解析与堆叠仍需检查。</p>
+<a class="source-link" href="#code/LineDet/dataset/dataset.py">↗ LineDataset / default_collate</a><a class="source-link" href="#code/LineDet/dataset/line_utils.py">↗ 坐标插值</a></section>
+
+<section class="section" id="augmentation" data-title="预处理与增强"><div class="section-head"><span class="section-num">03</span><h2>让图像变化，让几何关系保持一致。</h2></div>
+<p>训练脚本设置 <code>LINEDET_UNIFY_MODE=unify</code> 和 <code>LINEDET_UNIFY_SIZE=516,594</code>。这里 516×594 代表统一裁剪的参考比例，网络真正接收的尺寸仍由 <code>--img_size 256</code> 决定。unify 保留原图，并为足够高的图像追加裁剪副本：裁剪高度 h<sub>c</sub>=floor(w×594/516)，从底部裁掉多余部分；如果任一目标线裁完后完全没有有效点，就不追加副本。这个逻辑也会作用于验证集。</p>
+<div data-diagram="geometry"></div>
+<p>例如 422×728 的图像会尝试裁成 422×485。原图版本和裁剪版本都各自拉伸到 256×256，标注跟随各自几何变换。因此 unify 是“样本扩充 + 两种视野”，并不是把所有图先变成 516×594。目录中的源图不被改写。<code>none/crop/resize/unify</code> 四种模式不可混为一谈，环境变量在模块导入时读取。</p>
+<h3>增强分成外观与几何两类</h3><p>噪声、模糊、亮度、对比度、低分辨率模拟、Gamma 改变外观，一般不改边界坐标；左右翻转、平移和特殊纵向变形改变空间位置，必须同步改 y 与 valid。每个训练样本在标准化前有 20% 概率执行特殊外观增强；联合增强后有 30% 概率随机选择一种特殊增强，包括纵向变形与浅部亮条纹。验证不做随机训练增强，但仍做标准化以及可能的 unify 扩充。</p>
+<div class="math">I<sub>norm</sub>=(I−mean(I))/(std(I)+10<sup>−7</sup>)<small>这是逐张图像的整体标准化；不是 ImageNet 的三通道固定均值方差归一化。</small></div>
+<div class="note warn"><strong>读懂真实实现，也要能看出错误</strong><p>右侧擦除抽到 erase_width=0 时，Python 的 <code>-0:</code> 等于 <code>0:</code>，会擦掉整幅图；“向下平移”分支实际上仍 roll(-shift)，却清空顶部；特殊形变不接收 valid，也就无法同步更新掩码。几何增强必须同时验证图、坐标和有效范围，不能只看图片“像不像”。这些是现有代码问题，手册保留原码并解释，不暗中修改。</p></div>
+<a class="source-link" href="#code/LineDet/dataset/dataset_utils.py">↗ 联合增强</a><a class="source-link" href="#code/LineDet/dataset/special_dataset_utils2.py">↗ 特殊纵向形变</a></section>
+
+<section class="section" id="architecture" data-title="模型结构与张量"><div class="section-head"><span class="section-num">04</span><h2>从局部纹理，走向边界位置。</h2></div>
+<p class="lead">MobileNetV3 提取特征，两种尺度进行融合，热图头为每条线生成位置分数。</p>
+<p>浅层特征空间分辨率较高，保留局部纹理和边缘；深层特征视野更大，帮助区分组织层与噪声。把深层上采样到浅层尺寸，再沿通道拼接，卷积就能同时利用两者。这份类名虽然叫 <code>LineCoordNetFPN</code>，实现是一次双尺度拼接融合，不是完整的多层金字塔逐级相加结构。</p>
+<div data-diagram="model"></div>
+<h3>第一步：可学习的去噪，而非固定滤镜</h3><p><code>DenoiseBlock</code> 使用 5×5 高斯核初始化卷积权重，sigma=1，padding=2，默认可训练。高斯核先归一化，使初始输出像邻域加权平均；随后梯度可以把它调整为任务需要的滤波器。训练后不保证它仍是高斯核，也不保证权重和为 1。groups=channels 表示每个输入通道独立滤波，本项目灰度输入只有 1 个通道。</p>
+<h3>第二步：理解 MobileNetV3 内部的基本积木</h3><p>MobileNetV3 的倒残差块通常包含 1×1 通道扩张、逐通道空间卷积、可选的 SE 通道调节，再用 1×1 投影压缩；形状允许时加残差。逐通道卷积减少空间卷积的参数与计算，逐点卷积负责通道混合。ReLU 与 h-swish 提供非线性。此项目调用 torchvision 的现成网络，截取 features，并把第一层从三通道换成一通道卷积。官方实现可用于进一步手写这些库内模块。</p>
+<p class="references">结构依据：<a href="https://docs.pytorch.org/vision/stable/_modules/torchvision/models/mobilenetv3.html" target="_blank" rel="noopener">torchvision MobileNetV3 源码</a>；设计背景：<a href="https://arxiv.org/abs/1905.02244" target="_blank" rel="noopener">Searching for MobileNetV3</a>。</p>
+<h3>第三步：沿通道拼接，再压缩</h3><p>256×256 输入下，<code>features[:5]</code> 输出 [B,40,32,32]，其余 features 输出 [B,960,8,8]。插值把后者变为 [B,960,32,32]，<code>cat(dim=1)</code> 得到 1000 通道，3×3 卷积压到 40 通道。热图头执行 40→128 的 3×3 卷积和 128→2 的 1×1 卷积，最后双线性插值回 256×256。这些尺寸依据源码与默认 MobileNetV3 结构静态推导，未在本次制作中重新运行训练。</p>
+<p>卷积尺寸遵循 H<sub>out</sub>=floor((H+2p−d(k−1)−1)/s+1)。例如 k=3、p=1、s=1 时高宽不变；stride=2 通常近似减半。1×1 卷积在每个空间位置对通道做线性组合，所以可以把 128 个描述特征投影为两条边界各自的 logit。<a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.modules.conv.Conv2d.html" target="_blank" rel="noopener">Conv2d 参数说明</a>。</p>
+<div class="note"><strong>一个参数，要追到它真正被使用的地方</strong><p>main.py 虽然解析 --backbone_pretrained，但构造模型时没有传进去，所以实际仍按默认 pretrained=False 初始化。直接调用 build_backbone(pretrained=True) 时，替换的首层仍是新初始化权重。V4 分支依赖 timm，用 features_only 返回两个尺度，其通道来自 feature_info，不能照搬上图的 V3 数字。</p></div>
+<a class="source-link" href="#code/LineDet/model/model.py">↗ 完整网络 / forward</a></section>
+
+<section class="section" id="softargmax" data-title="热图与 Soft-argmax"><div class="section-head"><span class="section-num">05</span><h2>让“找最高点”成为可导的计算。</h2></div>
+<p>固定一个样本、一条线和一列 x，网络给 H 个纵向像素各一个分数 z<sub>y</sub>。直接 argmax 只能选一个整数索引，很难把坐标误差的梯度传回分数。Soft-argmax 先用 softmax 把这一列变成概率分布，再对高度求加权平均。它输出的是连续坐标，可以处在两个像素之间。</p>
+<div class="math">p<sub>y</sub>=exp((z<sub>y</sub>−max(z))/T) / ∑<sub>j=0</sub><sup>H−1</sup> exp((z<sub>j</sub>−max(z))/T)<br>ŷ=∑<sub>y=0</sub><sup>H−1</sup> y·p<sub>y</sub>， ∂ŷ/∂z<sub>k</sub>=p<sub>k</sub>(k−ŷ)/T<small>本实现 T=1；沿 dim=2（高度）归一化。减去最大值不改变概率，可以减少指数溢出。</small></div>
+<p>当概率集中在 80 与 81 两行，期望可能是 80.3。分布很平时，预测靠近图像中部；若存在两个峰，期望可能落在两峰之间，那里不一定是真实边界。温度小会使分布更尖，但训练中的梯度也可能更容易饱和。只改变一个位置的分数会影响整列归一化后的概率，这正是可导坐标与热图间的联系。</p>
+<div class="lab"><h3>动手观察 / 一列像素怎样变成一个坐标</h3><p>以下使用 32 行的双峰合成分数，演示原理；不是模型实际输出。</p><div class="lab-grid"><div><label>温度 T <output id="temp-value">1.00</output><input id="temp" type="range" min=".15" max="3" step=".05" value="1"></label><label>第二个峰的强度 <output id="peak-value">2.5</output><input id="peak" type="range" min="0" max="6" step=".1" value="2.5"></label><div id="soft-output" class="lab-output"></div><small>绿色柱：每行概率；黄色竖线：概率加权平均。两个峰的概率质量接近时，期望会落在两峰之间；即使两峰相距很远也会如此。</small></div><svg id="soft-chart" viewBox="0 0 430 210" role="img" aria-label="随温度和第二峰强度变化的高度概率分布"></svg></div></div>
+<h3>监督热图：给正确坐标周围也留一点余地</h3><p>损失内部根据真实坐标构造高斯目标，接近真实边界的像素得到更高值，距离越远值越小，再沿高度归一化。valid=False 的列整列置零，损失也排除它们。sigma 决定分布宽度，单位是网络输入分辨率下的像素。当前真正用于损失的 sigma 固定为 3，而非命令行默认的 2。</p>
+<div class="math">g(y;x)=m(x)·exp(−(y−y<sub>gt</sub>(x))²/(2σ²))<br>q(y;x)=g(y;x)/(∑<sub>j</sub>g(j;x)+ε)<small>m 是有效列掩码。高斯提供“附近也接近正确”的连续监督，但边缘截断会使归一化分布不再完全对称。</small></div>
+<details class="check"><summary>自测：为什么不能写 softmax(dim=1)？</summary><p>dim=1 是边界通道，会让同一像素上的两条线互相竞争；本任务需要每条线在同一列的所有高度之间竞争，因此用 dim=2。输出仍是 [B,L,H,W]，沿高度求和后才变为 [B,L,W]。</p></details>
+<a class="source-link" href="#code/LineDet/model/model.py">↗ soft_argmax / generate_gaussian_heatmap</a></section>
+
+<section class="section" id="losses" data-title="损失与优化目标"><div class="section-head"><span class="section-num">06</span><h2>一个目标负责定位，其他目标负责约束形状。</h2></div>
+<p>网络需要既准确又平滑，同时维持上下层次。代码把热图、坐标、拓扑、二阶平滑和一阶总变分组合成总损失。下面的系数是 <strong>当前类内部实际赋值</strong>，不是构造函数签名看起来给出的默认值。</p>
+<div class="math">ℒ = 1.0ℒ<sub>heatmap</sub> + 0.1ℒ<sub>coord</sub> + 0.01ℒ<sub>topo</sub> + 0.1ℒ<sub>smooth</sub> + 0.05ℒ<sub>tv</sub></div>
+<div class="table-wrap"><table><thead><tr><th>损失项</th><th>计算与直观意义</th><th>真实实现要点</th></tr></thead><tbody>
+<tr><td>坐标 MSE</td><td>∑m(ŷ−y)² / ∑m。大偏差被平方放大。</td><td>masked_select 只选有效列；单位是像素²。</td></tr>
+<tr><td>热图 BCE</td><td>−mean[q log s +(1−q) log(1−s)]，s=sigmoid(z)。逐像素拟合软目标。</td><td>默认 bce；分母为有效列数×H。此处 sigmoid 与解码时 softmax 是两种不同的归一化。</td></tr>
+<tr><td>拓扑</td><td>mean ReLU(ŷ<sub>l</sub>−ŷ<sub>l+1</sub>+margin)。上界跑到下界下面就惩罚。</td><td>margin 默认 0；软约束而非绝对禁止交叉；未使用 valid。</td></tr>
+<tr><td>二阶平滑</td><td>mean |ŷ(x−1)−2ŷ(x)+ŷ(x+1)|。减少曲率突然变化。</td><td>线性斜坡为 0；宽度不足 3 返回 0；未使用 valid。</td></tr>
+<tr><td>一阶 TV</td><td>mean |ŷ(x+1)−ŷ(x)|。减少相邻跳动。</td><td>倾斜直线仍有惩罚；宽度不足 2 返回 0；未使用 valid。</td></tr>
+</tbody></table></div>
+<div data-diagram="loss"></div>
+<p>热图项约束“分数分布应该怎样”，坐标项约束“概率期望在哪里”，二者不是重复。BCE 把每个像素视作独立概率，而 Soft-argmax 沿列竞争；即使 sigmoid 分数拟合了高斯 q，softmax(z) 也不保证恰好等于 q。因此不能把网络返回的 heatmaps 直接叫作概率图。MSE 分支先对 logits 做高度 softmax 再和 q 比较，定义又不同。</p>
+<p>以 [10,12,14] 为例，二阶差分是 10−24+14=0，TV 为 (2+2)/2=2。预测 [10,14,10] 时，二阶差分绝对值变成 8，明确惩罚突起。若上界 120、下界 100，拓扑项会产生 20 的违反量；上下界顺序正确则贡献 0。这些约束在没有标注的列仍然生效，可以平滑延伸，也可能掩盖真实的不确定性。</p>
+<div class="note warn"><strong>签名参数不等于生效参数</strong><p>HeatmapCompositeLoss 中 lambda_topo=0.5、lambda_smooth=0.01、sigma=2.0 的传入值被内部常量覆盖。旧 CompositeLoss 的 lambda_coord 也没有乘到总损失上，DiceCELossFunc 只是一个空 nn.Module，实际不计算 Dice。false_region_smooth 定义了但当前训练没有调用。修改实验参数前必须追踪赋值与调用链。</p></div>
+<a class="source-link" href="#code/LineDet/loss.py">↗ 每项损失的实现与练习</a></section>
+
+<section class="section" id="split" data-title="数据划分与复现"><div class="section-head"><span class="section-num">07</span><h2>验证集必须回答“没见过的数据会怎样”。</h2></div>
+<p>一段视频或同一采集目录里的相邻帧往往高度相似。简单逐图随机划分可能让训练与验证共享近似内容。固定清单以同时包含 images/ 与 annotations/ 的父目录为组，整个组只能进一边。它实现的是<strong>目录级隔离</strong>，只有目录恰好对应独立受试者时才能据此声称受试者级隔离；源码没有检查患者身份。</p>
+<div data-diagram="split"></div>
+<p><code>choose_validation_groups</code> 把每个组的图像数当作重量，寻找总数最接近 10% 目标的子集。它保存“可达总数→前驱总数与组名”，逐组更新并回溯选出验证组。对现有可达总数做快照，避免一次循环重复使用同一组。排序后用局部随机数生成器打乱，让相同 seed 得到一致的平局选择。它不是普通的逐图 train_test_split。</p>
+<p>每行 JSONL 记录 split、group、image、annotation，路径相对 data_root。加载器核对根路径、文件存在性、组与图像标注对的交集。meta.json 记录清单摘要及计数；摘要依据条目和路径生成，<strong>不哈希每张图的内容</strong>，也不意味着加载时自动检查全部数据是否新增或替换。更换数据应重新生成并审查清单；不能把文件名相同当作数据没变。</p>
+<div class="note warn"><strong>train100 不是独立验证协议</strong><p>不使用清单时，训练保留所有图，验证取扫描列表末尾约 10%。因此验证图已经参与训练。train90 才通过 manifest 使用互不重叠的目录组。固定 seed 减少随机差异，但不能修复验证集污染，也不保证跨设备或不同依赖版本逐位一致。</p></div>
+<a class="source-link" href="#code/generate_group_split.py">↗ 子集选择与清单生成</a><a class="source-link" href="#code/LineDet/dataset/split_manifest.py">↗ 加载与重叠检查</a></section>
+
+<section class="section" id="training" data-title="训练循环与实验管理"><div class="section-head"><span class="section-num">08</span><h2>把一个批次走完，就读懂了训练的主干。</h2></div>
+<p><code>train减脂.sh</code> 指定数据路径、unify 配置、MobileNetV3-Large、两条线、256 输入、100 epochs、batch size 48 和学习率 10⁻³；调用 run_dual_split.sh 顺序训练 train100 与 train90。后者保存代码和清单快照、种子与参数，整理日志，再汇总最优指标。脚本设置 set -euo pipefail，让未定义变量与管道失败更早暴露，但提示倒计时并不会自动确认清单已更新。</p>
+<div data-diagram="train"></div>
+<p><code>model.train()</code> 使 BatchNorm 使用训练行为。每批先把 tensor 移到 device，再 zero_grad 清除上一批梯度；前向传播得到坐标与热图；loss.backward 通过计算图累积梯度；clip_grad_norm_(…,5.0) 限制梯度整体范数；AdamW 更新参数。AdamW 在自适应梯度更新之外做权重衰减，本代码 weight_decay=10⁻⁴，没有学习率调度器、混合精度或早停。不要从保存 best 的逻辑推断存在 early stopping。</p>
+<p><code>DataLoader</code> 中 shuffle 只对训练为 True；num_workers 控制取样子进程数；pin_memory 固定 CPU 内存便于设备传输；自定义 collate 组织字典。两个 torch.Generator 使用 seed 与 seed+1。训练平均损失按 batch 数平均，而不是对所有样本数加权，因此最后一个不足整批的 batch 会得到相同权重。</p>
+<h3>验证、保存、可视化各负责一件事</h3><p><code>model.eval()</code> 切换 BatchNorm 等模块行为，<code>@torch.no_grad()</code> 关闭梯度记录，两者互不替代。验证逐批记录损失、MAE、阈值准确率和距离指标，再 nanmean。MAE 更低就保存 best.pth，并 deepcopy 当前 state_dict 防止最优权重随继续训练变化；每 10 轮还保存一次普通 checkpoint。每轮从前 5 个验证 batch 各取第一张图绘制 GT/预测和热图。MLflow 记录被 try/except 包围，日志失败不会自动终止训练。</p>
+<p>每批 loss_dict 中的 detach 只是为了记录标量时不再携带梯度图；总 loss 本身保留计算图，所以 backward 仍能工作。torch.save 保存字典里的权重、轮次与参数，不包含 optimizer.state_dict；因此现有 checkpoint 不足以精确恢复 AdamW 的动量状态。当前项目也未提供训练恢复入口。</p>
+<div class="note"><strong>两个不会真正控制流程的开关</strong><p>--use_heatmap 使用 store_true 且默认 True，没有命令行方式关闭；模型 forward 又始终返回 (y_px, heatmaps)。直接把 args.use_heatmap 改成 False 不足以得到可用的坐标单输出分支。--skip_export 会跳过导出，也会跳过导出前的最优权重加载，最终 MLflow 注册的可能是最后一轮模型。</p></div>
+<a class="source-link" href="#code/main.py">↗ main.py 训练全过程</a><a class="source-link" href="#code/run_dual_split.sh">↗ 双实验启动器</a></section>
+
+<section class="section" id="evaluation" data-title="指标与真实结果"><div class="section-head"><span class="section-num">09</span><h2>先看评价定义，再看小数点。</h2></div>
+<p>MAE 是有效列上的平均绝对坐标误差，单位为缩放后图像的像素。A@t 是误差不超过 t 像素的点所占百分比。训练优化的是包含平方项与正则项的总损失，选最优 checkpoint 用的是 MAE，两者变化趋势不必完全一致。</p>
+<div class="math">MAE=∑m·|ŷ−y| / ∑m； A@t=100·mean(1[|ŷ−y|≤t])<small>上式 A@t 对应现有未加掩码实现；建议修正为只统计有效点。t 在代码中取 2、3、5。</small></div>
+<div class="table-wrap"><table><thead><tr><th>本地实验记录</th><th>train100</th><th>train90 / 固定分组</th></tr></thead><tbody><tr><td>训练 / 验证源图</td><td>13,643 / 1,365</td><td>12,279 / 1,364</td></tr><tr><td>源图交集</td><td>1,365（全部验证源图）</td><td>0</td></tr><tr><td>unify 后训练 / 验证条目</td><td>18,720 / 1,365</td><td>17,150 / 1,570</td></tr><tr><td>最优验证 MAE</td><td><span class="result-number">0.8582 px</span></td><td><span class="result-number">1.6416 px</span></td></tr><tr><td>最优轮次 / 验证 loss</td><td>93 / 0.18472</td><td>79 / 1.17498</td></tr><tr><td>正确解读</td><td>训练覆盖了验证数据，不能当成泛化能力</td><td>目录隔离验证；不是独立最终测试集</td></tr></tbody></table></div>
+<p class="coverage-note">来源：runs/compare_减脂_20261009_105347/{train100,train90}/best_metrics.json 与 split_summary.json；清单规模来自 splits/grouped_v2/减脂无垫_20261009/meta.json。原始记录数值读取，未重新训练或核验权重质量。</p>
+<p>train90 的清单共 56 组，50 组训练、6 组验证，验证比例约 9.9978%。两次运行的验证集合和监督条件不同，不能用 1.6416−0.8582 来量化“模型退步”，也不能把 0.8582 作为临床测量误差。若需要毫米单位，必须知道原图的空间标定，并逆转各自裁剪和缩放映射；图像宽高本身并不能提供物理尺寸。</p>
+<h3>一个很容易误读的 Hausdorff 实现</h3><p>标准二维曲线距离应比较点 (x,y)。当前实现只构造 |p<sub>i</sub>−g<sub>j</sub>|，比较所有 y 值集合，忽略横坐标。预测 [0,10] 与真值 [10,0] 的 y 集合完全相同，当前 HD 会是 0，但对应列 MAE 为 10，两条二维线并未重合。HD95 是把双向最近差值合并后取 95% 分位数；这个“95”不能消除距离定义本身的问题。</p>
+<div class="note warn"><strong>评价结果的边界</strong><p>A@t 和 HD/HD95 没有 valid 掩码；验证汇总按 batch 等权平均；unify 的同源裁剪副本会改变样本权重。要正式评价，应统一有效点规则，修正二维距离，按总有效点聚合，并另设未用于选模型的测试集。这里展示的是源码及其记录，不补造没有保存的独立测试结果。</p></div>
+<a class="source-link" href="#code/main.py">↗ threshold_accuracy / hausdorff_distance</a><a class="source-link" href="#code/LineDet/loss.py">↗ line_mae</a></section>
+
+<section class="section" id="deployment" data-title="推理与端侧导出"><div class="section-head"><span class="section-num">10</span><h2>训练结束以后，还有输入契约要对齐。</h2></div>
+<p>普通推理由 infer_lines 在 eval 和 no_grad 下调用模型，返回坐标与原始热图 logits。默认还对坐标沿宽度做核大小 5、sigma=1.5 的一维高斯平滑，端点采用复制填充；因此训练中展示的线可能经过平滑，而 eval 指标和端侧导出用的是未平滑坐标。模型没有输出有效性或置信掩码，infer_lines 也没有自动把 NumPy 输入移动到模型设备。可视化不能代替数值评价。</p>
+<p>端侧导出额外加载一个独立训练的 MobileNetV3-Small 质量分类器：单通道输入，输出 bad/good 两类。它和边界网络被 ModelWithArgmax 包在一起，接收同一标准化输入。质量分类器<strong>不是此处训练的联合任务头</strong>，也不与边界模型共享骨干；训练代码只优化边界模型参数。</p>
+<div data-diagram="export"></div>
+<p><code>torch.export.export</code> 用示例输入捕获计算图，随后转为 Edge 表示、交给 XNNPACK 做适配和降低，最后写入 ExecuTorch 的 .pte 文件。这里示例输入固定 [1,1,H,W]，代码没有声明动态形状，不能假定任意 batch 或任意尺寸都能直接运行。官方流程见 <a href="https://docs.pytorch.org/executorch/stable/using-executorch-export.html" target="_blank" rel="noopener">ExecuTorch 导出文档</a>。</p>
+<div class="table-wrap"><table><thead><tr><th>输出</th><th>类型与意义</th><th>注意事项</th></tr></thead><tbody><tr><td>y_px</td><td>float32 [1,2,W]</td><td>模型输入分辨率下的坐标；返回原图需逆变换</td></tr><tr><td>score</td><td>uint8 [1]</td><td>实际是 argmax 类别索引，非概率或置信分数</td></tr></tbody></table></div>
+<div class="note warn"><strong>导出成功与推理等价是两件事</strong><p>质量 checkpoint 路径硬编码在外部 Linux 目录，本项目目录未提供该外部文件。包装器标准化没有 epsilon，常量输入可能除零；还对整个张量取均值方差，与训练逐图处理的契约需核对。导出后只用随机输入执行并打印 shape/dtype，没有 PyTorch 与 PTE 输出误差对照，也没有真实数据集端侧准确率复测。文件夹里存在 .pte 文件不等于本次验证其可用。</p></div>
+<a class="source-link" href="#code/LineDet/export.py">↗ 导出包装器与运行时验证</a><a class="source-link" href="#code/LineDet/utils.py">↗ 推理与绘图</a></section>
+
+<section class="section" id="rebuild" data-title="从读懂到手写"><div class="section-head"><span class="section-num">11</span><h2>用小闭环，建立可以独立重写的能力。</h2></div>
+<p>不要第一遍就背整份 main.py。先掌握稳定的输入输出契约，再把最小模块拼起来。右侧源码工作台的每个片段都提供“原理 → 语法 → 手写题 → 参考思路”，练习区内容和掌握状态仅保存在当前浏览器。</p>
+<div class="table-wrap"><table><thead><tr><th>阶段</th><th>闭卷写出什么</th><th>通过标准</th></tr></thead><tbody>
+<tr><td>1 / 数据结构</td><td>读 JSON、按标签取线、分配 y 与 valid、宽度插值</td><td>缺标注列不会被误当作 y=0；能画出 resize 前后坐标</td></tr>
+<tr><td>2 / 张量操作</td><td>view、unsqueeze、广播、stack、cat、masked_select</td><td>在每一步纸上写出维度，分清新建维度与合并维度</td></tr>
+<tr><td>3 / 核心解码</td><td>稳定 softmax + 高度期望 + 高斯目标</td><td>概率沿高度和为1；均匀分布预测(H−1)/2；能说明梯度方向</td></tr>
+<tr><td>4 / 网络</td><td>去噪块、骨干切片、特征融合、热图头</td><td>随机输入输出形状正确，坐标位于[0,H−1]内；张量顺序正确</td></tr>
+<tr><td>5 / 目标函数</td><td>坐标MSE、BCE、拓扑、二阶差分、TV</td><td>手算3个点并核对；分清detach用于日志、loss用于反传</td></tr>
+<tr><td>6 / 训练系统</td><td>DataLoader→forward→loss→backward→step→eval→checkpoint</td><td>可在少量合成样本上过拟合；验证不反传；恢复最优权重</td></tr>
+<tr><td>7 / 可信实验</td><td>组隔离、固定种子、正确mask和汇总、导出等价检查</td><td>独立测试不参与选模型；有可复现的参数与依赖记录</td></tr>
+</tbody></table></div>
+<h3>建议的复现顺序</h3><p>这份代码没有固定版本的依赖清单，原始数据目录也指向 Linux 外部路径。先建立适合 PyTorch 的 Python 环境并记录 torch、torchvision、numpy、Pillow、opencv-python、batchgenerators、matplotlib、alive-progress、tabulate、mlflow 等版本；V4 额外需要 timm；端侧导出再加 ExecuTorch。以下为模板，路径必须换成自己的真实目录，未在本机执行训练。</p>
+<pre class="plain-pre"><code>python generate_group_split.py --data-root /path/to/data \
+  --output-dir ./splits/my_split --name my_split --seed 20260925
+
+python main.py --data_root /path/to/data \
+  --split_mode train90 --split_manifest ./splits/my_split \
+  --num_lines 2 --img_size 256 --epochs 2 --batch_size 2 \
+  --num_workers 0 --save_dir ./runs/smoke --skip_export</code></pre>
+<p>先跳过外部质量模型导出，用小 batch 和 num_workers=0 暴露数据异常，再增加训练规模。为了保留教学依据，本网站没有替你修复原项目；重新实现时应优先修复增强错位、参数无效、valid 统计和二维距离，再讨论模型结构的提升。</p>
+<details class="check"><summary>闭卷综合题：解释一个 [4,2,256] 坐标张量怎样影响第一层卷积。</summary><p>坐标损失对 ŷ 求梯度 → ŷ 是 softmax 概率的高度期望 → 概率来自上采样后的 logits → 插值和卷积将梯度传到热图头、融合层和骨干 → 回到最前面的可学习去噪卷积。topology/smoothness/TV 也经坐标路径反传；热图损失直接对 logits 产生另一条梯度路径，两者在共享参数处相加。</p></details>
+<button class="primary" data-mode="code">进入源码，开始第一段练习 →</button></section>
+
+<section class="section references" id="reference" data-title="术语与依据"><div class="section-head"><span class="section-num">12</span><h2>建立一个不会混淆的词汇表。</h2></div>
+<div class="table-wrap"><table><thead><tr><th>词</th><th>在本项目中的含义</th></tr></thead><tbody><tr><td>logits / heatmaps</td><td>模型返回的未归一化分数；是否是概率取决于后续 sigmoid 或 softmax</td></tr><tr><td>valid</td><td>标注是否有效的布尔掩码，非预测质量分数</td></tr><tr><td>epoch / batch / step</td><td>遍历一轮数据 / 一次处理的一组样本 / 一次参数更新</td></tr><tr><td>parameter / buffer</td><td>可训练权重 / 模块状态（如 BatchNorm 运行统计）；state_dict 包括两类</td></tr><tr><td>eval / no_grad / detach</td><td>切换模块行为 / 不记录计算图 / 从现有图分离张量，各有作用</td></tr><tr><td>FPN / LRASPP 命名</td><td>应读真实结构；这里的边界模型是一次双尺度融合，旧LRASPP命名函数也不等于标准LR-ASPP</td></tr></tbody></table></div>
+<p>教学内容以当前本地源码快照和已存 JSON 记录为第一依据。网页中的数据流图、结构图和交互分布均为解释性示意，未使用患者原始图像或生成虚构实验结果。原始源码保持文件名、相对目录与行号；折叠的导入及辅助区域也可完整查看。</p>
+<ul><li><a href="https://docs.pytorch.org/vision/stable/_modules/torchvision/models/mobilenetv3.html" target="_blank" rel="noopener">torchvision · MobileNetV3 源码</a>：核对库内骨干结构，项目的训练环境版本未锁定。</li><li><a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.modules.activation.Softmax.html" target="_blank" rel="noopener">PyTorch · Softmax</a> 与 <a href="https://docs.pytorch.org/docs/stable/generated/torch.nn.modules.conv.Conv2d.html" target="_blank" rel="noopener">Conv2d</a>：维度和参数定义。</li><li><a href="https://arxiv.org/abs/1905.02244" target="_blank" rel="noopener">MobileNetV3 原论文</a>：理解移动端骨干设计背景。</li><li><a href="https://docs.pytorch.org/executorch/stable/using-executorch-export.html" target="_blank" rel="noopener">ExecuTorch · Model Export and Lowering</a>：理解端侧导出流程。</li></ul>
+<button onclick="window.print()">打印 / 另存为 PDF</button></section>
+
+
