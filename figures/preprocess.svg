@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1100 800" role="img" aria-labelledby="pre-title pre-desc">
+<title id="pre-title">保留原图并额外生成裁剪副本的尺寸处理</title><desc id="pre-desc">422乘728的示意图保留原始版本，另外尝试从底部裁成422乘485的副本。原始版本和裁剪版本分别缩放为256乘256，边界坐标同步缩放。若裁剪导致任一目标线完全失去有效标注，就不加入裁剪副本。这一扩充规则也用于验证集，源图文件不修改。</desc>
+<defs>
+<marker id="pre-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#147c6a"/></marker>
+<pattern id="pre-grain" width="30" height="24" patternUnits="userSpaceOnUse"><path d="M2 6h12m9 12h6M4 21h7" stroke="#b9c8be" stroke-width="3" opacity=".2"/><circle cx="24" cy="3" r="2" fill="#edf3e9" opacity=".25"/></pattern>
+<pattern id="pre-hatch" width="23" height="23" patternUnits="userSpaceOnUse"><path d="M-5 5L18 28M7-7L30 16" stroke="#edf3e9" stroke-width="3" opacity=".4"/></pattern>
+<g id="pre-scan"><rect width="422" height="728" fill="#142f32"/><rect width="422" height="728" fill="url(#pre-grain)"/><path d="M0 90C100 68 180 117 278 91S370 91 422 102M0 240C100 218 180 267 278 241S370 241 422 252M0 427C100 405 180 454 278 428S370 428 422 439M0 600C100 578 180 627 278 601S370 601 422 612" stroke="#c3d4c7" stroke-width="8" fill="none" opacity=".2"/><path d="M0 158C100 130 180 188 278 160S370 155 422 177L422 364C370 340 340 370 278 350S100 350 0 329Z" fill="#d6e879" opacity=".14"/><path d="M0 158C100 130 180 188 278 160S370 155 422 177" stroke="#75dbb6" stroke-width="9" fill="none"/><path d="M0 329C100 350 180 322 278 350S370 340 422 364" stroke="#d6e879" stroke-width="9" fill="none"/></g>
+<style>text{font-family:"Microsoft YaHei","PingFang SC",sans-serif;fill:#142f32}.heading{font-size:25px;font-weight:700}.label{font-size:17px;font-weight:700}.small{font-size:14px}.muted{fill:#526c63}.arrow{fill:none;stroke:#147c6a;stroke-width:2.5;marker-end:url(#pre-arrow)}</style>
+</defs>
+<rect width="1100" height="800" rx="20" fill="#fff"/>
+<text x="32" y="42" class="heading">同一源图，保留原版，再有条件地增加一个裁剪视野</text>
+<text x="32" y="70" class="small muted">尺寸按“宽 × 高”标注；两种视野都最终进入 256 × 256 的网络输入</text>
+<rect x="359" y="102" width="704" height="304" rx="18" fill="#edf3e9"/>
+<rect x="359" y="444" width="704" height="271" rx="18" fill="#f4f6ee"/>
+<text x="385" y="130" class="label">分支 A · 原图始终保留</text>
+<text x="385" y="472" class="label">分支 B · 额外裁剪副本</text>
+<!-- 源图：精确的422:728比例 -->
+<text x="52" y="214" class="label">源图 422 × 728</text>
+<svg x="65" y="245" width="154" height="266" viewBox="0 0 422 728" preserveAspectRatio="none" overflow="hidden"><use href="#pre-scan"/><rect y="485" width="422" height="243" fill="url(#pre-hatch)"/><path d="M0 485H422" stroke="#fff" stroke-width="4" stroke-dasharray="15 9"/></svg>
+<path d="M55 245V422M51 245h8M51 422h8" stroke="#147c6a" stroke-width="1.5"/>
+<text x="53" y="540" class="small muted">虚线以下：候选裁掉的底部</text>
+<text x="79" y="469" class="small" style="fill:#fff">底部 243 像素</text>
+<text x="52" y="578" class="small">裁剪高度 =</text><text x="52" y="603" class="label">⌊422 × 594 / 516⌋</text><text x="52" y="629" class="label" style="fill:#147c6a">= 485 像素</text>
+<text x="52" y="661" class="small muted">参考的是宽高比例，</text><text x="52" y="684" class="small muted">不把源图改写为 516 × 594。</text>
+<!-- 一个源图分成两个取样分支 -->
+<path d="M228 371H285V266H394" class="arrow"/><path d="M285 371V574H394" class="arrow"/><circle cx="285" cy="371" r="5" fill="#147c6a"/>
+<text x="292" y="251" class="small muted">保留</text><text x="292" y="558" class="small muted">追加</text>
+<!-- 原图分支 -->
+<svg x="410" y="151" width="132" height="228" viewBox="0 0 422 728" preserveAspectRatio="none" overflow="hidden"><use href="#pre-scan"/></svg>
+<text x="553" y="184" class="small muted">422 × 728</text>
+<path d="M555 265H746" class="arrow"/>
+<text x="588" y="238" class="small">整幅缩放</text><text x="568" y="299" class="small muted">纵向缩放 256 / 728</text><text x="568" y="325" class="small muted">两条边界同步变换</text>
+<svg x="770" y="155" width="220" height="220" viewBox="0 0 422 728" preserveAspectRatio="none" overflow="hidden"><use href="#pre-scan"/></svg>
+<text x="805" y="394" class="label">256 × 256</text>
+<!-- 裁剪分支，viewBox只保留顶部485像素 -->
+<svg x="410" y="497" width="132" height="152" viewBox="0 0 422 485" preserveAspectRatio="none" overflow="hidden"><use href="#pre-scan"/></svg>
+<path d="M410 659H542" stroke="#147c6a" stroke-width="1.5"/><text x="406" y="682" class="small">422 × 485</text>
+<path d="M555 574H746" class="arrow"/>
+<text x="588" y="545" class="small">裁后再缩放</text><text x="568" y="608" class="small muted">纵向缩放 256 / 485</text><text x="568" y="634" class="small muted">视野不同，边界位置也不同</text>
+<svg x="770" y="481" width="220" height="220" viewBox="0 0 422 485" preserveAspectRatio="none" overflow="hidden"><use href="#pre-scan"/></svg>
+<text x="1003" y="562" class="small muted"><tspan x="1003">256</tspan><tspan x="1014" dy="23">×</tspan><tspan x="1003" dy="23">256</tspan></text>
+<!-- 几何契约与实现条件 -->
+<rect x="32" y="737" width="1031" height="46" rx="12" fill="#edf3e9"/>
+<text x="47" y="756" class="small">只有裁后每条目标线仍有有效标注时，才加入副本；若整条线被裁没，则仅保留原图。</text>
+<text x="47" y="776" class="small">验证集也使用这条扩充规则，因此“数据条目数”可能大于“唯一源图数”；原始文件不被改写。</text>
+</svg>

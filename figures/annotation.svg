@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1100 700" role="img" aria-labelledby="ann-title ann-desc">
+<title id="ann-title">两条边界如何表示为逐列坐标和有效掩码</title><desc id="ann-desc">灰度图中两条边界带有采样点，横轴 x 向右、纵轴 y 向下。同一列抽取上界与下界两个纵坐标。缺少标注的列没有标注点，有效掩码为零，不能当成边界纵坐标等于零。示意图展示原始标注的缺失状态，后续插值可能填补内部缺口。</desc>
+<defs>
+<marker id="ann-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#526c63"/></marker>
+<pattern id="ann-grain" width="32" height="25" patternUnits="userSpaceOnUse"><path d="M2 7h11m8 10h8M8 22h7" stroke="#aabbb1" stroke-width="2" opacity=".2"/><circle cx="24" cy="4" r="1.5" fill="#edf3e9" opacity=".25"/></pattern>
+<pattern id="ann-missing" width="9" height="9" patternUnits="userSpaceOnUse"><path d="M-1 1l10 10M5-5l10 10" stroke="#adbbb3" stroke-width="1.5"/></pattern>
+<style>text{font-family:"Microsoft YaHei","PingFang SC",sans-serif;fill:#142f32}.heading{font-size:25px;font-weight:700}.label{font-size:17px;font-weight:700}.small{font-size:14px}.muted{fill:#526c63}</style>
+</defs>
+<rect width="1100" height="700" rx="20" fill="#fff"/>
+<text x="32" y="42" class="heading">不必给每个像素分类：每一列只需记录两个高度</text>
+<text x="32" y="70" class="small muted">先理解原始标注的“坐标 + 有效性”；再理解插值怎样补充监督</text>
+<text x="95" y="112" class="label">灰度图像与人工采样点</text><text x="706" y="112" class="label">抽取同一列 x = 160</text>
+<rect x="100" y="150" width="480" height="320" rx="8" fill="#142f32"/><rect x="100" y="150" width="480" height="320" rx="8" fill="url(#ann-grain)"/>
+<g fill="none" stroke="#a9bcb0" opacity=".23"><path d="M110 190C220 173 300 210 400 198S510 187 570 207" stroke-width="4"/><path d="M110 220C220 204 300 260 400 250S510 231 570 248" stroke-width="7"/><path d="M110 323C220 346 300 334 400 360S510 337 570 366" stroke-width="8"/><path d="M110 407C220 385 300 415 400 411S510 425 570 417" stroke-width="5"/></g>
+<!-- 轮廓之间是层状组织，标注在缺失带内断开 -->
+<path d="M110 220C220 204 300 260 400 250S510 231 570 248L570 366C510 337 480 383 400 360S220 346 110 323Z" fill="#d6e879" opacity=".08"/>
+<rect x="270" y="150" width="55" height="320" fill="#edf3e9" opacity=".11"/><rect x="270" y="150" width="55" height="320" fill="url(#ann-missing)" opacity=".5"/>
+<path d="M110 220C165 212 215 219 270 238M325 251C351 254 379 252 400 250S510 231 570 248" fill="none" stroke="#75dbb6" stroke-width="3"/>
+<path d="M110 323C165 335 220 337 270 340M325 346C352 350 375 353 400 360S510 337 570 366" fill="none" stroke="#d6e879" stroke-width="3"/>
+<g fill="#142f32" stroke="#75dbb6" stroke-width="3"><circle cx="130" cy="218" r="4.5"/><circle cx="180" cy="216" r="4.5"/><circle cx="230" cy="226" r="4.5"/><circle cx="350" cy="253" r="4.5"/><circle cx="400" cy="250" r="5.5"/><circle cx="455" cy="242" r="4.5"/><circle cx="510" cy="240" r="4.5"/><circle cx="555" cy="245" r="4.5"/></g>
+<g fill="#142f32" stroke="#d6e879" stroke-width="3"><circle cx="130" cy="327" r="4.5"/><circle cx="180" cy="334" r="4.5"/><circle cx="230" cy="338" r="4.5"/><circle cx="350" cy="350" r="4.5"/><circle cx="400" cy="360" r="5.5"/><circle cx="455" cy="363" r="4.5"/><circle cx="510" cy="356" r="4.5"/><circle cx="555" cy="361" r="4.5"/></g>
+<!-- 坐标方向与选中的一列 -->
+<path d="M88 150V493M100 487H599" stroke="#526c63" stroke-width="1.8" fill="none" marker-end="url(#ann-arrow)"/>
+<text x="65" y="147" class="small">0</text><text x="57" y="512" class="small">y 向下</text><text x="537" y="514" class="small">x 向右</text>
+<path d="M400 144V477" stroke="#fff" stroke-width="1.6" stroke-dasharray="6 5"/><text x="376" y="138" class="small" fill="#147c6a">x = 160</text>
+<text x="119" y="188" class="small" style="fill:#b9e7d2">圆点：实际标注样本</text><text x="348" y="437" class="small" style="fill:#d6e879">每条边界，每列至多一个 y</text>
+<path d="M586 310H668" fill="none" stroke="#147c6a" stroke-width="2.5" marker-end="url(#ann-arrow)"/><text x="592" y="291" class="small muted">抽取这一列</text>
+<!-- 一列上的两个高度 -->
+<rect x="691" y="130" width="374" height="365" rx="16" fill="#edf3e9"/>
+<rect x="739" y="160" width="34" height="320" rx="5" fill="#142f32"/><rect x="739" y="160" width="34" height="320" rx="5" fill="url(#ann-grain)"/>
+<path d="M725 160V480" stroke="#526c63" stroke-width="1.5" marker-end="url(#ann-arrow)"/>
+<text x="704" y="166" class="small">0</text><text x="703" y="475" class="small">y</text>
+<path d="M739 260h34" stroke="#147c6a" stroke-width="6"/><circle cx="756" cy="260" r="7" fill="#75dbb6" stroke="#142f32" stroke-width="2"/>
+<path d="M739 370h34" stroke="#d6e879" stroke-width="6"/><circle cx="756" cy="370" r="7" fill="#d6e879" stroke="#142f32" stroke-width="2"/>
+<path d="M780 260H806M780 370H806" stroke="#526c63" stroke-width="1.5"/>
+<text x="818" y="245" class="label">真皮层下界</text><text x="818" y="272" font-size="22" font-weight="700" style="fill:#147c6a">y上 = 80</text>
+<text x="818" y="355" class="label">脂肪层下界</text><text x="818" y="382" font-size="22" font-weight="700">y下 = 168</text>
+<text x="807" y="438" class="small muted">数值单位：图像像素</text><text x="807" y="462" class="small muted">上方 y 小，下方 y 大</text>
+<!-- 有效性条带 -->
+<text x="32" y="562" class="label">上界有效性</text><text x="32" y="596" class="label">下界有效性</text>
+<g stroke="#fff" stroke-width="2"><rect x="151" y="544" width="429" height="22" rx="3" fill="#147c6a"/><rect x="151" y="578" width="429" height="22" rx="3" fill="#a7bf47"/><rect x="303" y="544" width="49" height="22" fill="#d7dfd7"/><rect x="303" y="578" width="49" height="22" fill="#d7dfd7"/></g>
+<path d="M297 474V527H328V539" stroke="#9baba0" stroke-width="1.3" fill="none"/>
+<text x="172" y="561" class="small" style="fill:#fff">1 = 有标注</text><text x="309" y="561" class="small">0</text><text x="310" y="595" class="small">0</text>
+<text x="620" y="560" class="label">缺标注 ≠ 边界位于图像顶端</text><text x="620" y="588" class="small muted">缺失列用“无效”表示，不应直接当作 y = 0 学习。</text>
+<rect x="32" y="626" width="1033" height="50" rx="12" fill="#edf3e9"/>
+<text x="48" y="647" class="small">这里画的是原始缺失标注。当前项目的后续插值会填补首末已知点之间的缺口，</text><text x="48" y="668" class="small">并将这些内部列设为有效；只有一个已知点时甚至会扩展到全宽，需要单独审查这个假设。</text>
+</svg>
