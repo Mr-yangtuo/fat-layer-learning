@@ -56,6 +56,31 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){const opened=docume
 function download(text,name,type){const a=document.createElement('a'),url=URL.createObjectURL(new Blob([text],{type}));a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 async function copy(text){try{await navigator.clipboard.writeText(text);toast('已复制完整源码')}catch{const t=document.createElement('textarea');t.value=text;document.body.append(t);t.select();const ok=document.execCommand('copy');t.remove();toast(ok?'已复制完整源码':'当前浏览器限制复制，请使用下载文件')}}
 function softDemo(){const t=Number($('#temp').value),peak=Number($('#peak').value);$('#temp-value').textContent=t.toFixed(2);$('#peak-value').textContent=peak.toFixed(1);const z=Array.from({length:32},(_,y)=>5*Math.exp(-((y-9)**2)/8)+peak*Math.exp(-((y-23)**2)/8)),max=Math.max(...z),ex=z.map(a=>Math.exp((a-max)/t)),sum=ex.reduce((a,b)=>a+b,0),p=ex.map(a=>a/sum),expected=p.reduce((a,b,i)=>a+b*i,0),arg=z.indexOf(max),scale=150/Math.max(...p);let html='<path d="M20 175H410" stroke="#52716d"/>';p.forEach((a,i)=>html+='<rect x="'+(22+i*12)+'" y="'+(175-a*scale)+'" width="9" height="'+(a*scale)+'" rx="2" fill="#81ba9f"/>');const x=26+expected*12;html+='<path d="M'+x+' 15V180" stroke="#d6e879" stroke-width="2" stroke-dasharray="4 4"/><g fill="#a4beb4" font-size="11"><text x="20" y="197">0</text><text x="355" y="197">高度 y → 31</text></g>';$('#soft-chart').innerHTML=html;$('#soft-output').textContent='加权平均 '+expected.toFixed(2)+' 像素 / 最大峰 '+arg+' 像素'}
+
+function interpolationDemo(){
+const n=Number($('#interp-column').value),x=n/2,valid=x>=1&&x<=6;
+let y,detail;
+if(x<1){y=6;detail='首点之外 → 暂填端点高度 6';}
+else if(x>6){y=8;detail='末点之外 → 暂填端点高度 8';}
+else if(x<=3){const t=(x-1)/2;y=6+t*4;detail='t = ('+x+' − 1) / 2 = '+t.toFixed(3)+'<br>y = 6 + t × 4 = '+y.toFixed(3);}
+else{const t=(x-3)/3;y=10-t*2;detail='t = ('+x+' − 3) / 3 = '+t.toFixed(3)+'<br>y = 10 − t × 2 = '+y.toFixed(3);}
+const label=y/2;
+$('#interp-column-value').textContent=n;
+$('#interp-calculation').innerHTML='新列 '+n+' → 原位置 '+x.toFixed(1)+'<br>'+detail+'<br>新高度 = '+y.toFixed(3)+' × 0.5 = <strong>'+label.toFixed(3)+'</strong>';
+$('#interp-calculation').dataset.height=String(label);
+$('#interp-validity').textContent=valid?'有效：查询位置在 [1,6] 内，参与坐标监督。':'无效：填充值保留在数组里，但不参与坐标监督。';
+$('#interp-validity').dataset.valid=String(valid);
+const px=v=>35+v*48,py=v=>35+v*14,col=valid?'#d6e879':'#f0ab73';
+let svg='<g stroke="#426461" stroke-width=".5">';
+for(let k=0;k<=7;k++)svg+='<path d="M'+px(k)+' 35V210"/>';
+for(let k=0;k<=12;k+=2)svg+='<path d="M35 '+py(k)+'H405"/>';
+svg+='</g><path d="M35 25V210H410" fill="none" stroke="#a7c3b4"/><path d="M'+px(1)+' '+py(6)+'L'+px(3)+' '+py(10)+'L'+px(6)+' '+py(8)+'" fill="none" stroke="#8dd6b6" stroke-width="3"/><path d="M35 '+py(6)+'H'+px(1)+'M'+px(6)+' '+py(8)+'H405" stroke="#d09569" stroke-dasharray="5 4"/>';
+[[1,6],[3,10],[6,8]].forEach(a=>{svg+='<circle cx="'+px(a[0])+'" cy="'+py(a[1])+'" r="4" fill="#8dd6b6"/><text x="'+(px(a[0])+8)+'" y="'+(py(a[1])-7)+'" fill="#d5e8df" font-size="11">('+a.join(',')+')</text>'});
+svg+='<path d="M'+px(x)+' 35V'+py(y)+'" stroke="'+col+'" stroke-width="2" stroke-dasharray="4 4"/><circle cx="'+px(x)+'" cy="'+py(y)+'" r="6" fill="'+col+'" stroke="#142f32" stroke-width="2"/><g fill="#bfd3c9" font-size="11"><text x="8" y="20">y↓</text><text x="35" y="230">0</text><text x="347" y="230">原图 x →</text><text x="'+Math.min(340,Math.max(38,px(x)-20))+'" y="25">查询 x='+x+'</text></g>';
+$('#interp-chart').innerHTML=svg;
+}
+$('#interp-column').oninput=interpolationDemo;interpolationDemo();
+
 $('#temp').oninput=softDemo;$('#peak').oninput=softDemo;softDemo();updateProgress();navigate();
 let scrollPending=false;window.addEventListener('scroll',()=>{if(mode!=='report'||scrollPending)return;scrollPending=true;requestAnimationFrame(()=>{let active='intro';sections.forEach(s=>{if(s.getBoundingClientRect().top<180)active=s.id});$$('#toc a').forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#report/'+active));scrollPending=false})},{passive:true});
 })();
