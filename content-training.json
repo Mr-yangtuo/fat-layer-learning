@@ -1,574 +1,4059 @@
 [
   {
     "path": "main.py",
-    "title": "训练总控：把数据、网络、损失与实验记录连成闭环",
-    "overview": "这个文件承担实验编排。一次 epoch 先遍历训练批次更新参数，再遍历验证集测量误差，按验证 MAE 保存最佳权重。它没有学习率调度器、早停或自动恢复训练，末尾可把最佳边界模型和外部质量分类器一起导出。理解它的关键不是背下打印代码，而是跟踪数据、梯度、状态和文件分别在什么时刻改变。",
+    "title": "训练主程序：把数据、网络、损失和实验产物连起来",
+    "overview": "main.py 是一次完整训练的调度入口。它不在这里定义卷积网络或插值算法，而是先解析运行配置、建立训练与验证数据，再反复执行“训练一轮 → 验证一轮 → 记录指标 → 保存较好的权重 → 画检查图”。它还定义了随机种子、数据划分审计和几种评估指标。训练结束后可以把最佳权重交给导出模块，并把实验产物交给 MLflow 记录。要读懂这个文件，关键是追踪一批数据如何变成损失、损失如何更新参数，以及验证结果如何决定保存哪一份模型。",
     "segments": [
       {
         "start": 1,
         "end": 20,
         "title": "导入模块：分清计算依赖、展示依赖和项目接口",
         "principle": [
-          "torch 与 torch.nn 提供张量、自动求导、网络和优化器；DataLoader 把单个样本组装成一批。numpy 在这里主要处理验证指标平均值与无效数值，并不承担网络前向计算。",
-          "LineDet 的四组入口分别是模型、数据集、损失和推理可视化。MLflow 用于记录实验，alive_progress 与 tabulate 只影响终端展示。先按职责理解导入，就能从 main.py 反向找到真正实现。"
+          "训练入口需要“能拿到数据、能调用网络、能计算损失、能保存结果”四类能力。import 在这里只把这些名字绑定到当前模块，不会立即启动训练。真正启动由文件末尾的 main() 调用控制。",
+          "外部库分三类：NumPy/PyTorch 负责数值与张量计算；alive_progress/tabulate 负责终端展示；MLflow 负责记录实验。LineDet 下的导入则连接本项目已经实现的数据、模型、损失和可视化。"
         ],
         "syntax": [
-          "import torch.nn as nn 给模块一个简短别名；from ... import ... 直接把指定名字放进当前命名空间。",
-          "copy.deepcopy 用于复制最佳参数快照；json 保存可读摘要；os 管理路径；argparse 将命令行字符串解析为 args 属性。",
-          "mlflow 在文件顶部直接导入；下方捕获日志异常不代表缺少 mlflow 包时也能运行，导入阶段仍会直接失败。"
+          "import numpy as np 中 as 只是取短名字，不会复制一个模块。from torch.utils.data import DataLoader 则把该类直接绑定为当前作用域的 DataLoader。",
+          "from LineDet.model import LineCoordNetFPN 会先执行相应包的 __init__.py，再取得它重新导出的类。文件头的编码声明表明源码按 UTF-8 理解；三引号文本是模块文档字符串。"
         ],
-        "shapes": "",
-        "pitfall": "不要把实验跟踪服务异常与 Python 包缺失混为一谈：前者大多被 try/except 吸收，后者发生在 main 调用之前。",
-        "exercise": "不看源码，列出训练主程序必须连接的四个项目接口。",
-        "answer": "Dataset/DataLoader 供给样本；model 输出预测；loss_fn 计算目标；optimizer 根据梯度更新参数。推理可视化是诊断接口。",
-        "diagram": "train"
+        "shapes": "此处尚未创建训练张量。后续 image 为 [B,1,H,W]，边界坐标为 [B,L,W]。",
+        "pitfall": "MLflow 在文件顶部直接导入；后面记录失败的 try/except 不能兜住“没有安装 mlflow”导致的导入错误。",
+        "summary": "把外部库与项目内部接口引入训练脚本，明确算法实现在哪一层。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "os / argparse / copy / json / random",
+            "type": "Python 标准库模块",
+            "meaning": "分别处理路径与目录、命令行参数、权重深拷贝、JSON 序列化、Python 随机数。"
+          },
+          {
+            "name": "np / torch / nn",
+            "type": "模块别名",
+            "meaning": "np 是 NumPy；torch 提供 Tensor、优化器与保存接口；nn 指 torch.nn，本文件用其梯度裁剪工具。"
+          },
+          {
+            "name": "DataLoader",
+            "type": "类",
+            "meaning": "把 Dataset 的逐样本结果按 batch_size 收集，交给 default_collate 堆叠为张量批次。"
+          },
+          {
+            "name": "alive_bar / tabulate",
+            "type": "函数",
+            "meaning": "分别提供批次进度条上下文和指标表格格式化；不参与梯度计算。"
+          },
+          {
+            "name": "mlflow / mlflow.pytorch",
+            "type": "模块",
+            "meaning": "前者记录指标与文件，后者序列化并记录 PyTorch 模型。"
+          },
+          {
+            "name": "LineCoordNetFPN / LineDataset / default_collate",
+            "type": "项目类与函数",
+            "meaning": "分别创建边界网络、提供样本、组织样本批次。"
+          },
+          {
+            "name": "CompositeLoss / HeatmapCompositeLoss / line_mae",
+            "type": "项目损失与指标接口",
+            "meaning": "热图训练实际使用 HeatmapCompositeLoss；line_mae 用来评估有效列的绝对坐标误差。"
+          },
+          {
+            "name": "infer_lines / visualize_pred_gt / visualize_heatmaps",
+            "type": "项目推理与绘图接口",
+            "meaning": "分别执行带可选坐标平滑的推理、画图像叠线对照、画原始热图评分。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "先加载基础依赖",
+            "detail": "L3–15 导入标准库、数值计算库、展示库与实验记录库。"
+          },
+          {
+            "title": "再连接项目模块",
+            "detail": "L17–20 从包的公开接口导入训练将使用的对象。"
+          }
+        ],
+        "returns": [
+          "模块导入没有本段自定义返回值；效果是建立后续语句可以使用的名称。"
+        ]
       },
       {
         "start": 23,
         "end": 30,
         "title": "固定随机性：可复现不是只设置一个 seed",
         "principle": [
-          "数据增强、打乱顺序、网络初始化可能分别使用 Python、NumPy、PyTorch 的随机数生成器，所以三者都要设置。CUDA 设备也有自己的随机状态。",
-          "关闭 cuDNN benchmark，避免每次按运行速度挑不同卷积算法；打开 deterministic，让 cuDNN 尽量使用确定性算法。这提高可重复性，但不能保证不同硬件、库版本和所有算子得到逐位相同的结果。"
+          "一个 seed 不会自动控制所有库。网络参数初始化主要使用 PyTorch 的随机状态，增强可能使用 Python random 或 NumPy，因此三个来源都要设置。CUDA 设备又有各自的随机状态，需要额外处理。",
+          "benchmark 会根据输入测试候选算法以争取速度，确定性设置则偏向重复运行结果一致。这里关闭 benchmark 并开启 deterministic，以减少 GPU 算法选择带来的变化，但没有保证所有平台、库版本和算子都逐位相同。"
         ],
         "syntax": [
-          "random.seed、np.random.seed、torch.manual_seed 分别设置三个库的全局随机种子。",
-          "torch.cuda.is_available() 是布尔检查；manual_seed_all 对所有可见 GPU 设置种子。",
-          "torch.backends.cudnn.benchmark 和 deterministic 是后端配置属性，不是损失或网络参数。"
+          "random.seed(seed) 与 np.random.seed(seed) 都修改对应库的全局随机状态；torch.manual_seed(seed) 返回生成器，但这里不接收返回值。",
+          "if 分支只执行缩进内两行；torch.cuda.manual_seed_all 的 all 表示所有 CUDA 设备，并不等于固定了所有第三方库。"
         ],
-        "shapes": "",
-        "pitfall": "相同 seed 不会让 train100 与 train90 看到同一批数据；划分不同导致随机数消耗和训练轨迹仍不同。",
-        "exercise": "为什么只调用 torch.manual_seed 还不够？",
-        "answer": "本项目的增强包含 Python random 和 NumPy 操作；这些库的随机状态需要单独设置。",
-        "diagram": "train"
+        "shapes": "输入为一个整数，不改变图像或标签张量形状。",
+        "pitfall": "固定种子不是数据划分正确性的证明，也不能弥补训练/验证共用原图。多进程加载还受 DataLoader 的 generator 和采样顺序影响。",
+        "summary": "统一设置多个随机数发生器，并要求 cuDNN 尽量采用确定性计算。",
+        "parameters": [
+          {
+            "name": "seed",
+            "type": "int",
+            "default": "必填",
+            "meaning": "随机种子的起始值；相同环境与调用顺序下，使伪随机序列可重复。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "torch.cuda.is_available()",
+            "type": "bool",
+            "meaning": "判断是否存在可用 CUDA 运行环境；为真才给所有 GPU 设置种子。"
+          },
+          {
+            "name": "torch.backends.cudnn.benchmark",
+            "type": "bool，写为 False",
+            "meaning": "禁止 cuDNN 通过基准测试自动选取可能变化的算法。"
+          },
+          {
+            "name": "torch.backends.cudnn.deterministic",
+            "type": "bool，写为 True",
+            "meaning": "要求 cuDNN 在其支持范围内使用确定性实现。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "固定 CPU 侧随机源",
+            "detail": "L24–26 顺序设置 random、np.random 和 torch 的种子。"
+          },
+          {
+            "title": "处理 GPU",
+            "detail": "L27–28 检查 CUDA，再调用 manual_seed_all 给全部 GPU 的生成器设种子。"
+          },
+          {
+            "title": "调整底层卷积策略",
+            "detail": "L29–30 设置 cuDNN 行为，随后函数结束。"
+          }
+        ],
+        "returns": [
+          "None；通过修改随机状态和后端设置影响后续计算。"
+        ]
       },
       {
         "start": 33,
         "end": 47,
         "title": "划分审计：样本条目数不等于原图数",
         "principle": [
-          "同一源图可能有原图版和裁剪版两个数据集条目。len(dataset) 衡量模型看到多少条目，唯一 img_path 数量衡量多少张源图。两者需要同时记录。",
-          "把训练和验证的真实路径分别放进集合，交集大小就是按路径识别的源图重叠量。它能发现同一张文件同时出现在两侧，但不能发现不同文件名下内容完全相同的图片，也不能证明患者完全隔离。"
+          "Dataset 中同一张原图可以生成“原图版本”和“裁剪版本”等多个条目。因此 len(dataset) 表示条目数量，不能直接当成独立原图数量。将 img_paths 转为集合后，才能统计独立来源。",
+          "使用 realpath 统一路径表达，再做集合交集，检查同一源图是否同时进入训练和验证。这项审计与模型性能无关，却决定验证成绩能否用于讨论未见图像上的表现。"
         ],
         "syntax": [
-          "{... for item in ...} 是集合推导式，自动去重；os.path.realpath 规范化路径及符号链接。",
-          "train_sources & val_sources 是集合交集；len 得到交集元素个数。payload 是字符串键到数值、字符串或 None 的字典。",
-          "with open(..., encoding=\"utf-8\") 确保文件最终关闭；ensure_ascii=False 保留中文；indent=2 让 JSON 缩进可读。"
+          "{os.path.realpath(item) for item in ...} 是集合推导式，重复路径只留一个。& 对 set 求交集，不是对字符串进行比较。",
+          "A if condition else B 是条件表达式：没有清单时写入 None，JSON 中表现为 null。ensure_ascii=False 保留中文，indent=2 使 JSON 缩进便于人工检查。"
         ],
-        "shapes": "train_items / val_items：条目数；unique_source_images：不同文件路径数。",
-        "pitfall": "这里仅记录重叠，不因重叠大于 0 而中止训练。train100 的重叠会如实写进文件。",
-        "exercise": "1364 张验证原图扩充为 1570 条目时，应该报告哪一个数？",
-        "answer": "两个都报告：1364 张独立源图、1570 个实际评估条目。否则会把增强副本误当新增独立数据。",
-        "diagram": "split"
+        "shapes": "img_paths 是路径列表；集合不保留数据加载顺序；payload 是若干字符串与整数组成的字典。",
+        "pitfall": "交集为 0 只说明源图文件路径不相交；同一患者的不同帧或同图不同文件名仍可能跨组。train100 的设计本来就会与验证源图重叠，不能把该成绩解释为严格留出验证。",
+        "summary": "统计增强后的条目数与原图去重数，并写出训练/验证是否共用源图的审计记录。",
+        "parameters": [
+          {
+            "name": "path",
+            "type": "str / 路径对象",
+            "default": "必填",
+            "meaning": "审计 JSON 的输出位置，父目录必须已经存在。"
+          },
+          {
+            "name": "args",
+            "type": "argparse.Namespace",
+            "default": "必填",
+            "meaning": "本次命令行配置；此函数读取 split_mode 和 split_manifest。"
+          },
+          {
+            "name": "train_set",
+            "type": "LineDataset",
+            "default": "必填",
+            "meaning": "训练数据对象；读取其 img_paths 和长度。"
+          },
+          {
+            "name": "val_set",
+            "type": "LineDataset",
+            "default": "必填",
+            "meaning": "验证数据对象；读取其 img_paths 和长度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "train_sources / val_sources",
+            "type": "set[str]",
+            "meaning": "对各自 img_paths 中的原图路径调用 realpath，再去重得到源图集合。"
+          },
+          {
+            "name": "payload",
+            "type": "dict",
+            "meaning": "将统计结果组织为 JSON 可序列化字典。"
+          },
+          {
+            "name": "split_mode / split_manifest",
+            "type": "str / str 或 None",
+            "meaning": "记录协议名称与规范化后的清单目录，方便追溯。"
+          },
+          {
+            "name": "train_items / val_items",
+            "type": "int",
+            "meaning": "Dataset 条目数量，可能包含同一原图派生的多个视野。"
+          },
+          {
+            "name": "train_unique_source_images / val_unique_source_images",
+            "type": "int",
+            "meaning": "原图路径去重后的数量，不是患者数量。"
+          },
+          {
+            "name": "source_image_overlap",
+            "type": "int",
+            "meaning": "len(train_sources & val_sources)，表示交集中的原图数量。"
+          },
+          {
+            "name": "handle",
+            "type": "文本文件句柄",
+            "meaning": "with 管理的写入目标；离开代码块自动关闭。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "归一化并去重路径",
+            "detail": "L34–35 用集合推导式收集两侧源图。"
+          },
+          {
+            "title": "同时保留两种计数",
+            "detail": "L36–44 记录条目数、源图数、协议信息及源图交集。"
+          },
+          {
+            "title": "写入审计材料",
+            "detail": "L45–47 将字典保存为可读 JSON，并打印同一份结果。"
+          }
+        ],
+        "returns": [
+          "None；写出 split_summary.json 并打印摘要。"
+        ]
       },
       {
         "start": 50,
         "end": 57,
         "title": "A@2 / A@3 / A@5：误差容忍度内有多少点",
         "principle": [
-          "先计算每条线、每列预测 y 与真实 y 的绝对误差，再统计误差不超过阈值的点的比例。例如 A@2=90 表示参与统计的点中 90% 在 2 像素误差内。",
-          "公式是 A@t = 100 × mean( |预测y−真实y| ≤ t )。这是坐标误差命中率，不是分割区域的像素分类准确率，也不是 Dice 或 IoU。"
+          "该指标先把预测高度与标签高度逐位置相减，再取绝对值；随后检查每个误差是否小于等于阈值。例如误差 [1,2,4] 在阈值 2 下有两个合格点，A@2 为 66.67%。",
+          "A@2、A@3、A@5 的阈值单位是网络输入尺寸下的像素。百分比越大表示更多位置落在允许误差内，但它不表达误差超限后究竟偏了多远。"
         ],
         "syntax": [
-          "pred 和 gt 广播前要求同形状；torch.abs 得到非负误差张量。thresholds=(2,3,5) 是不可变元组。",
-          "比较生成 bool 张量，.float() 把真/假变为 1/0，.mean() 对所有维度求平均，.item() 把零维张量变为 Python 数。",
-          "f\"A@{t}\" 通过格式化字符串生成字典键。"
+          "比较运算 errors <= t 返回布尔 Tensor；.float() 将 True/False 转成 1/0，所以 mean() 就是命中比例。",
+          "不指定 dim 的 mean() 会同时平均 B、L、W 所有维度；.item() 将单元素 Tensor 转为 Python 数值。f\"A@{t}\" 动态构造字典键。"
         ],
-        "shapes": "pred, gt, errors：[B,L,W] → mean 后标量。",
-        "pitfall": "函数没有 valid 参数，无效标注列也进入分母。它与使用 valid 的 MAE 并非相同统计口径。修正时应先用 valid 选择误差，并定义没有有效点时返回什么。",
-        "exercise": "误差为 [1,2,4,6] 时 A@2 与 A@5 分别是多少？",
-        "answer": "A@2=50%，A@5=75%；边界条件使用 ≤，误差正好等于阈值也算命中。",
-        "diagram": "loss"
+        "shapes": "[B,L,W] 坐标 → [B,L,W] 误差 / 命中矩阵 → 每个阈值一个标量百分数。",
+        "pitfall": "函数没有 valid 参数，未标注列的占位值也会被统计；本项目 eval_one_epoch 没有在调用前过滤这些位置。",
+        "summary": "按逐列预测误差计算“误差在阈值以内”的百分比。",
+        "parameters": [
+          {
+            "name": "pred",
+            "type": "Tensor[B,L,W]",
+            "default": "必填",
+            "meaning": "网络预测的逐列高度坐标，通常为浮点数。"
+          },
+          {
+            "name": "gt",
+            "type": "Tensor[B,L,W]",
+            "default": "必填",
+            "meaning": "与预测对应的逐列标签坐标。"
+          },
+          {
+            "name": "thresholds",
+            "type": "tuple / 可迭代数字序列",
+            "default": "(2, 3, 5)",
+            "meaning": "逐一使用的绝对误差阈值，单位为输入图像像素。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "errors",
+            "type": "Tensor[B,L,W]",
+            "meaning": "abs(pred-gt)，每张图、每条边界、每列一个绝对误差。"
+          },
+          {
+            "name": "t",
+            "type": "int / float",
+            "meaning": "当前循环阈值。"
+          },
+          {
+            "name": "acc",
+            "type": "Python float",
+            "meaning": "布尔命中矩阵转 float 后求均值，再乘 100 得到百分数。"
+          },
+          {
+            "name": "metrics",
+            "type": "dict[str,float]",
+            "meaning": "键是 A@2 等字符串，值是对应命中百分比。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "获得逐位置误差",
+            "detail": "L52 逐元素相减取绝对值，保持 [B,L,W]。"
+          },
+          {
+            "title": "依次应用阈值",
+            "detail": "L54–56 比较 errors <= t，并把所有位置合并求平均。"
+          },
+          {
+            "title": "返回指标集合",
+            "detail": "L57 返回一个包含全部阈值结果的字典。"
+          }
+        ],
+        "returns": [
+          "例如 {\"A@2\": 82.3, \"A@3\": 90.1, \"A@5\": 96.4}；这些数字只是结构示例。"
+        ]
       },
       {
         "start": 60,
         "end": 82,
         "title": "当前 HD / HD95：比较的是高度集合，并非二维曲线",
         "principle": [
-          "对一条线，代码构建任意预测高度与任意真实高度的差值矩阵。每个预测高度找最近真实高度，每个真实高度也找最近预测高度，再取双向最大距离或把双向距离合并后取 95% 分位数。",
-          "这里丢掉了横坐标 x。预测 [0,10] 与真实 [10,0] 在同列误差都是 10，但两组高度集合相同，当前 HD 会得到 0。因此这个函数不能作为标准二维边界 Hausdorff 距离解释。",
-          "若要衡量二维曲线，应构造点 (x,y)，计算欧氏距离 sqrt((x_i−x_j)²+(y_i−y_j)²)，并筛除无效点；若只有同列定位偏差的需求，MAE/A@ 指标更直接。"
+          "对一张图的一条边界，预测包含 W 个高度，标签也包含 W 个高度。代码把任意预测高度与任意标签高度都配对，得到 W×W 的绝对差矩阵。每个预测高度选一个最近的标签高度，反过来也做一次。",
+          "HD 取双向最近邻距离中的最大值；HD95 取两组距离合并后的第 95 百分位。最后对全部图和边界平均。分位数相比最大值不容易被极少数极端距离支配。",
+          "这里比较的是“高度值集合”。例如预测 [1,2] 与标签 [2,1] 的高度集合相同，该实现可给出 0 距离，但逐列位置其实全部错位。因此它不能直接称为完整二维边界曲线的 Hausdorff 距离。"
         ],
         "syntax": [
-          "p[:,None] 把 [W] 变成 [W,1]，g[None,:] 变成 [1,W]；广播相减生成 [W,W]。",
-          "diff.min(dim=1)[0] 取每行最小值；返回元组的第 0 项是最小值、第 1 项是索引。反向距离沿 dim=0 求最小。",
-          "torch.cat([d1,d2],dim=0) 合并为 [2W]，torch.quantile(...,0.95) 求经验分位数；最终再对 B×L 条线平均。"
+          "p[:, None] 把 [W] 变成 [W,1]；g[None,:] 变成 [1,W]，相减时广播为 [W,W]。",
+          "Tensor.min(dim=...) 返回“最小值、索引”二元结果，[0] 取得最小值。torch.cat 在给定维度拼接，torch.quantile(...,0.95) 计算 95% 分位位置并可进行插值。"
         ],
-        "shapes": "每条线：[W] × [W] → [W,W] → 双向 [W] → HD/HD95 标量。",
-        "pitfall": "未使用 valid；复杂度随 W² 增长。报告中若引用这两个数，必须标明是当前代码的“一维高度集合距离”，不能等同标准二维 HD。",
-        "exercise": "构造一个同列误差很大而当前 HD 为 0 的例子。",
-        "answer": "预测 [0,10]、真实 [10,0]；两侧高度集合完全相同，所以每个高度都能找到距离为 0 的匹配。",
-        "diagram": "loss"
+        "shapes": "每条边界 [W] → 配对距离 [W,W] → 双向最近距离各 [W] → 两个标量；计算量随 W² 增长。",
+        "pitfall": "没有 valid 掩码，也没有二维点 (x,y) 的横向距离。不能用它证明完整曲线的几何误差；空批次或零条边界还会导致最终除以零。",
+        "summary": "用预测高度集合与标签高度集合的双向最近邻距离，计算当前实现的 HD 和 HD95。",
+        "parameters": [
+          {
+            "name": "pred",
+            "type": "Tensor[B,L,W]",
+            "default": "必填",
+            "meaning": "预测的逐列高度。"
+          },
+          {
+            "name": "gt",
+            "type": "Tensor[B,L,W]",
+            "default": "必填",
+            "meaning": "标签的逐列高度。"
+          },
+          {
+            "name": "percentile",
+            "type": "int / float",
+            "default": "95",
+            "meaning": "分位数百分比；内部除以 100 后传给 torch.quantile。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "B / L / W",
+            "type": "int",
+            "meaning": "批量大小、边界条数和列数，从 pred.shape 解包获得。"
+          },
+          {
+            "name": "b / l",
+            "type": "int",
+            "meaning": "两层循环中的样本索引和边界索引。"
+          },
+          {
+            "name": "p / g",
+            "type": "Tensor[W]",
+            "meaning": "当前边界的预测高度和标签高度。"
+          },
+          {
+            "name": "diff",
+            "type": "Tensor[W,W]",
+            "meaning": "第 i,j 项是 abs(p[i]-g[j])，不含横坐标距离。"
+          },
+          {
+            "name": "d1 / d2",
+            "type": "Tensor[W]",
+            "meaning": "沿矩阵不同维度取最小值，分别表示预测到标签、标签到预测的最近距离。"
+          },
+          {
+            "name": "hd",
+            "type": "float",
+            "meaning": "两组最近距离中的最大值。"
+          },
+          {
+            "name": "both",
+            "type": "Tensor[2W]",
+            "meaning": "按第 0 维连接 d1 和 d2，用于求分位数。"
+          },
+          {
+            "name": "hd95",
+            "type": "float",
+            "meaning": "both 的指定分位数；变量名固定为 hd95，即使 percentile 不是 95。"
+          },
+          {
+            "name": "hd_list / hd95_list",
+            "type": "list[float]",
+            "meaning": "收集 B×L 条边界的结果，最后做算术平均。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "取出一条边界",
+            "detail": "L62–68 遍历批次和边界，展平成长度 W 的向量。"
+          },
+          {
+            "title": "建立全部高度配对",
+            "detail": "L70 通过广播得到 W×W 距离矩阵。"
+          },
+          {
+            "title": "取双向最近邻",
+            "detail": "L71–72 分别沿标签轴和预测轴求最小值。"
+          },
+          {
+            "title": "汇总该条边界",
+            "detail": "L73–77 得到最大距离与指定分位数，并加入列表。"
+          },
+          {
+            "title": "跨图、跨边界平均",
+            "detail": "L79–82 对两个列表分别求均值。"
+          }
+        ],
+        "returns": [
+          "字典 {\"Hausdorff\": 平均HD, \"HD95\": 平均指定分位距离}，数值单位为输入图像像素。"
+        ],
+        "flow": {
+          "title": "当前 HD / HD95 如何计算",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "一条预测线与标签线",
+              "detail": "两个长度 W 的高度向量",
+              "kind": "input"
+            },
+            {
+              "id": "matrix",
+              "title": "全部高度两两比较",
+              "detail": "构造 W×W 绝对差矩阵",
+              "kind": "process"
+            },
+            {
+              "id": "p",
+              "title": "预测到标签",
+              "detail": "每一行取最小值，得到 d1",
+              "kind": "process"
+            },
+            {
+              "id": "g",
+              "title": "标签到预测",
+              "detail": "每一列取最小值，得到 d2",
+              "kind": "process"
+            },
+            {
+              "id": "max",
+              "title": "最大最近距离",
+              "detail": "max(max(d1), max(d2))",
+              "kind": "process"
+            },
+            {
+              "id": "q",
+              "title": "分位最近距离",
+              "detail": "连接 d1、d2，再求 95% 分位",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "跨 B×L 条边界平均",
+              "detail": "返回 Hausdorff 与 HD95",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "in",
+              "to": "matrix",
+              "label": ""
+            },
+            {
+              "from": "matrix",
+              "to": "p",
+              "label": ""
+            },
+            {
+              "from": "matrix",
+              "to": "g",
+              "label": ""
+            },
+            {
+              "from": "p",
+              "to": "max",
+              "label": ""
+            },
+            {
+              "from": "g",
+              "to": "max",
+              "label": ""
+            },
+            {
+              "from": "p",
+              "to": "q",
+              "label": ""
+            },
+            {
+              "from": "g",
+              "to": "q",
+              "label": ""
+            },
+            {
+              "from": "max",
+              "to": "out",
+              "label": ""
+            },
+            {
+              "from": "q",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "两条路线共享同一个距离矩阵；该矩阵只比较高度，不比较横坐标。"
+        }
       },
       {
         "start": 85,
         "end": 104,
         "title": "训练前向：把一批图像变成可微分的总损失",
         "principle": [
-          "model.train() 切换训练行为，尤其使 BatchNorm 使用当前批次统计并更新运行均值。它不会自动启动优化，也不会清空旧梯度。",
-          "一次迭代取出 image、y_px、valid 放到计算设备，前向得到坐标和热图，再把它们交给复合损失。损失必须保留通向模型参数的计算图，后续 backward 才能沿图求导。",
-          "数据集生成的 heatmaps 在这里被搬到设备，但没有传给 loss_fn；HeatmapCompositeLoss 会用 gt_y 和 valid 自己重新生成目标热图。这是冗余开销，而且数据集 sigma 与损失中实际 sigma 可能不同。"
+          "一次 epoch 是把 loader 中所有批次处理一遍；一个 batch 则是一次参数更新所用的若干张图。模型前向用图像产生预测，损失函数再把预测与标签比较，形成连接到模型参数的计算图。",
+          "model.train() 控制 BatchNorm 等模块的训练行为，不等于执行训练更新。真正更新仍需要后续 backward 与 optimizer.step。zero_grad() 必须在新一批反向传播前清掉旧梯度，否则 PyTorch 会把多批梯度累加。"
         ],
         "syntax": [
-          "batch 是字典，.to(device) 返回位于 CPU 或 GPU 的张量；pred_y,pred_heatmaps = model(img) 是二元组解包。",
-          "optimizer.zero_grad() 在每批开始清除累积梯度；PyTorch 的 backward 默认把新梯度加到现有 .grad。",
-          "loss_fn(...) 调用 nn.Module 的 __call__，间接执行 forward；返回 loss 标量及记录分量的字典 loss_dict。"
+          "Tensor.to(device) 让张量与网络位于同一设备；赋值接收返回结果，不能假定所有 to 都原地修改。",
+          "pred_y, pred_heatmaps = model(img) 是二元返回值解包；调用 nn.Module 对象会经由其调用机制进入 forward。",
+          "with alive_bar(... ) as bar 在进入和离开作用域时管理进度条显示；force_tty=True 强制终端式输出，title 设置标签。"
         ],
-        "shapes": "image [B,1,H,W] → pred_y [B,L,W] + logits [B,L,H,W] → loss 标量。",
-        "pitfall": "else 分支假定 model(img) 只返回坐标，但当前 LineCoordNetFPN 始终返回二元组。只把 use_heatmap 改为 False 不能得到可运行的无热图版本。",
-        "exercise": "不看源码写出取 batch 到计算 loss 的四步。",
-        "answer": "取 image/gt/valid → .to(device) → model(image) → loss_fn(pred_y,gt,valid,pred_heatmaps)。",
-        "diagram": "train"
+        "shapes": "image [B,1,H,W] → 网络 → 坐标 [B,L,W] 与原始分数 [B,L,H,W] → 标量总损失。",
+        "pitfall": "批次中的 gt_heatmaps 被取出却未使用；损失函数自己重建目标，实际 sigma 也以损失内部为准。use_heatmap=False 不是已验证可用的替代模式：当前模型默认仍返回坐标与热图二元组。",
+        "summary": "切换训练状态，从批次中取得张量，清空旧梯度，再执行网络与损失的前向计算。",
+        "parameters": [
+          {
+            "name": "model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "待训练网络；热图路径返回 (pred_y, pred_heatmaps)。"
+          },
+          {
+            "name": "loader",
+            "type": "DataLoader",
+            "default": "必填",
+            "meaning": "迭代得到训练 batch 字典；len(loader) 是批次数。"
+          },
+          {
+            "name": "optimizer",
+            "type": "torch.optim.Optimizer",
+            "default": "必填",
+            "meaning": "持有模型参数并按梯度更新；主程序使用 AdamW。"
+          },
+          {
+            "name": "loss_fn",
+            "type": "可调用损失对象",
+            "default": "必填",
+            "meaning": "接受预测、标签和有效掩码，返回可求导总损失与日志字典。"
+          },
+          {
+            "name": "device",
+            "type": "str / torch.device",
+            "default": "必填",
+            "meaning": "图像与标签要搬到的计算设备，例如 cuda 或 cpu。"
+          },
+          {
+            "name": "use_heatmap",
+            "type": "bool",
+            "default": "True",
+            "meaning": "决定训练循环如何解包网络结果以及调用哪种损失接口。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "total_loss",
+            "type": "Python 数值累加器",
+            "meaning": "记录每批 loss.item() 的和，用于训练日志，不参与反向传播。"
+          },
+          {
+            "name": "batch",
+            "type": "dict[str,Tensor]",
+            "meaning": "至少包含 image、y_px、valid；热图模式还读取 heatmaps。"
+          },
+          {
+            "name": "img",
+            "type": "float Tensor[B,1,H,W]",
+            "meaning": "灰度输入图像；从 batch 取出并搬到 device。"
+          },
+          {
+            "name": "gt_y",
+            "type": "float Tensor[B,L,W]",
+            "meaning": "逐列边界标签，高度可为小数。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor[B,L,W]",
+            "meaning": "哪些边界、哪些列参与有标签监督。"
+          },
+          {
+            "name": "gt_heatmaps",
+            "type": "float Tensor[B,L,H,W]",
+            "meaning": "从 Dataset 取来的热图，被搬到设备但没有传入 loss_fn，随后并未使用。"
+          },
+          {
+            "name": "pred_y",
+            "type": "float Tensor[B,L,W]",
+            "meaning": "网络通过 Soft-argmax 得到的坐标预测。"
+          },
+          {
+            "name": "pred_heatmaps",
+            "type": "float Tensor[B,L,H,W]",
+            "meaning": "网络输出的原始热图分数，尚不是 Sigmoid 或 Softmax 概率。"
+          },
+          {
+            "name": "loss / loss_dict",
+            "type": "标量 Tensor / dict[str,Tensor]",
+            "meaning": "前者用于 backward，后者记录各损失分量；本函数未进一步读取 loss_dict。"
+          },
+          {
+            "name": "bar",
+            "type": "进度条更新函数",
+            "meaning": "alive_bar 上下文提供，每处理完一批调用一次。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "进入训练状态",
+            "detail": "L86–89 调用 model.train()，初始化总损失，建立批次进度条。"
+          },
+          {
+            "title": "取一批并统一设备",
+            "detail": "L90–93 搬运图像、坐标和有效掩码。"
+          },
+          {
+            "title": "清除上批梯度",
+            "detail": "L95 optimizer.zero_grad() 清空参数的已有梯度。"
+          },
+          {
+            "title": "热图路径前向",
+            "detail": "L97–100 解包两种预测，再交给复合损失；其内部会从 gt_y 重建真正使用的高斯目标。"
+          },
+          {
+            "title": "保留的旧接口分支",
+            "detail": "L101–103 假设模型只返回坐标并调用旧式损失；当前默认训练不会走这里。"
+          }
+        ],
+        "returns": [
+          "本段尚未 return；保留可求导的 loss，交给紧接着的反向传播段。"
+        ],
+        "flow": {
+          "title": "一个训练批次的数据与梯度路线",
+          "nodes": [
+            {
+              "id": "batch",
+              "title": "读取 batch",
+              "detail": "image / y_px / valid 搬到同一设备",
+              "kind": "input"
+            },
+            {
+              "id": "zero",
+              "title": "清空旧梯度",
+              "detail": "optimizer.zero_grad()",
+              "kind": "process"
+            },
+            {
+              "id": "net",
+              "title": "网络前向",
+              "detail": "图像 → 坐标与原始热图评分",
+              "kind": "process"
+            },
+            {
+              "id": "loss",
+              "title": "计算复合损失",
+              "detail": "预测与标签比较，并加几何正则",
+              "kind": "process"
+            },
+            {
+              "id": "back",
+              "title": "反向传播",
+              "detail": "loss.backward() 产生参数梯度",
+              "kind": "process"
+            },
+            {
+              "id": "clip",
+              "title": "裁剪梯度总范数",
+              "detail": "最大范数设置为 5",
+              "kind": "process"
+            },
+            {
+              "id": "step",
+              "title": "AdamW 更新参数",
+              "detail": "optimizer.step()",
+              "kind": "process"
+            },
+            {
+              "id": "next",
+              "title": "记录并取下一批",
+              "detail": "loss.item() 累加，更新进度",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "batch",
+              "to": "zero",
+              "label": ""
+            },
+            {
+              "from": "zero",
+              "to": "net",
+              "label": ""
+            },
+            {
+              "from": "net",
+              "to": "loss",
+              "label": ""
+            },
+            {
+              "from": "batch",
+              "to": "loss",
+              "label": "标签与掩码"
+            },
+            {
+              "from": "loss",
+              "to": "back",
+              "label": ""
+            },
+            {
+              "from": "back",
+              "to": "clip",
+              "label": ""
+            },
+            {
+              "from": "clip",
+              "to": "step",
+              "label": ""
+            },
+            {
+              "from": "step",
+              "to": "next",
+              "label": ""
+            }
+          ],
+          "caption": "前向建立计算关系，反向计算梯度，优化器才实际改变模型参数。"
+        }
       },
       {
         "start": 105,
         "end": 112,
         "title": "反向传播、梯度裁剪、AdamW 更新：顺序不能颠倒",
         "principle": [
-          "loss.backward() 使用链式法则计算每个可训练参数对损失的导数。梯度告诉优化器当前参数向哪个方向改变会提高或降低损失，backward 自己不更新参数。",
-          "clip_grad_norm_ 把所有参数梯度视为一个向量，范数超过 5 时按同一比例缩小，限制单步更新受到极大梯度冲击。之后 optimizer.step() 才按 AdamW 规则修改参数。",
-          "总损失通过 .item() 变成 Python 数后累加，避免为了日志保留所有批次计算图。返回的是批次损失的算术平均。"
+          "loss.backward() 根据链式法则计算每个可学习参数对总损失的导数，并累加到参数的 .grad 属性；它本身不会更新参数值。optimizer.step() 才使用这些梯度与优化器内部状态改变权重。",
+          "clip_grad_norm_(...,5.0) 限制所有传入参数梯度拼在一起的范数。若总范数为 10，会把梯度整体约缩小为原来的一半；它不是逐元素限制到 [-5,5]，也不是把参数值裁剪。",
+          "训练损失日志只取 scalar 的数值，避免把历次 batch 的计算图保存在累加器中。最后除以批次数，得到“每批损失的平均”。"
         ],
         "syntax": [
-          "clip_grad_norm_(model.parameters(),5.0) 中尾部下划线表示原地修改梯度；它裁剪梯度范数，不是把所有参数限制到 ±5。",
-          "model.parameters() 返回参数迭代器；optimizer 持有这些参数及每个参数的优化状态。",
-          "len(loader) 是批次数，最后一个批次可能不足 batch_size。bar() 只更新进度条。"
+          "函数名末尾的 _ 通常表示就地修改；这里修改的是梯度张量。model.parameters() 返回参数迭代器，不是参数梯度的数值列表。",
+          ".item() 将单元素张量取为 Python 数；若该张量在 GPU 上，取值需要与设备计算同步。"
         ],
-        "shapes": "",
-        "pitfall": "批次平均不等于全体有效点平均；小末批次与大批次权重相同。loader 为空时还会发生除零。",
-        "exercise": "请排列：step、zero_grad、backward、forward、clip_grad_norm_。",
-        "answer": "zero_grad → forward/计算 loss → backward → clip_grad_norm_ → step。",
-        "diagram": "train"
+        "shapes": "标量 loss → 各参数同形状的 .grad → 更新后的同形状参数；函数返回 Python float。",
+        "pitfall": "最后一个 batch 可能比其他 batch 小，但这里与大 batch 权重相同。loader 为空会除以零；本函数也没有混合精度 GradScaler 或学习率 scheduler。",
+        "summary": "把总损失反传为参数梯度，限制梯度总范数，再由 AdamW 更新权重并汇总日志。",
+        "parameters": [
+          {
+            "name": "model.parameters()",
+            "type": "可迭代 Parameter",
+            "default": "调用参数",
+            "meaning": "向梯度裁剪工具提供本网络所有可学习参数。"
+          },
+          {
+            "name": "max_norm",
+            "type": "float",
+            "default": "本次传 5.0",
+            "meaning": "允许的梯度总范数上限；默认 norm_type=2，采用二范数。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "loss",
+            "type": "可求导标量 Tensor",
+            "meaning": "上一段复合损失的输出；backward 从它开始反向遍历计算图。"
+          },
+          {
+            "name": "parameter.grad",
+            "type": "与参数同形状的 Tensor",
+            "meaning": "反向传播写入的梯度，优化器据此更新。"
+          },
+          {
+            "name": "optimizer",
+            "type": "AdamW 实例",
+            "meaning": "保存参数引用、一阶与二阶梯度统计等内部状态。"
+          },
+          {
+            "name": "total_loss",
+            "type": "float",
+            "meaning": "累加每批 loss.item()；不保留梯度关系。"
+          },
+          {
+            "name": "len(loader)",
+            "type": "int",
+            "meaning": "这一轮实际 batch 数，通常为 ceil(样本数/batch_size)。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "求梯度",
+            "detail": "L105 调用 loss.backward()。"
+          },
+          {
+            "title": "限制更新前的梯度大小",
+            "detail": "L106 就地裁剪总梯度范数。"
+          },
+          {
+            "title": "更新权重",
+            "detail": "L107 optimizer.step() 使用裁剪后的梯度。"
+          },
+          {
+            "title": "记录当前批次",
+            "detail": "L109–110 累加标量损失并推进进度条。"
+          },
+          {
+            "title": "返回整轮摘要",
+            "detail": "L112 批次损失和除以批次数。"
+          }
+        ],
+        "returns": [
+          "一轮内所有 batch 总损失的算术平均，供主循环显示为 Train Loss。"
+        ]
       },
       {
         "start": 115,
         "end": 154,
         "title": "验证：关闭求导，保持评估状态，再按批次汇总",
         "principle": [
-          "@torch.no_grad() 不建立反向图，减少验证时内存和计算；model.eval() 切换 BatchNorm 等模块行为。两者作用不同，通常要同时使用。",
-          "每个验证批次计算总损失和 MAE，再加上 A@ 与当前 HD。loss_dict 的各项已在损失内部 detach，因此适合日志读取；这里没有 backward 或 optimizer.step，参数不会因验证而学习。",
-          "最后对每个指标在所有批次上的数值使用 nanmean。无有效点导致的 MAE=NaN 被跳过，但整批的样本数和有效点数没有作为权重。结果是“批次指标平均”，不是严格的全数据有效点平均。"
+          "model.eval() 和 no_grad 解决不同问题：eval 改变 BatchNorm 等层的行为，no_grad 关闭自动求导记录以节省内存。只有同时正确使用，验证过程才不会像训练一样更新归一化运行统计或保留不必要的计算图。",
+          "验证仍然运行完整前向与损失计算，只是不做 backward 和 optimizer.step。MAE 使用 valid，只平均有标签的坐标误差；其他两个指标函数没有接收掩码，含义和监督范围不完全相同。",
+          "每个 batch 产生一条 log_entry，最后对相同键用 nanmean 求均值。nanmean 忽略 NaN，但不会按样本数或有效点数给批次加权，也不会忽略正负无穷。"
         ],
         "syntax": [
-          "装饰器 @torch.no_grad() 包裹整个函数；.eval() 等价于 .train(False)。",
-          "字典中的 **TA、**HD 解包并合并多个键值对；out 的字典推导式遍历 logs[0].keys()。",
-          "[d[k] for d in logs] 收集各批次同一指标；np.nanmean 忽略 NaN，float 转为可序列化的 Python 浮点数。"
+          "@torch.no_grad() 是函数装饰器；调用 eval_one_epoch 时自动进入不记录梯度的上下文。",
+          "字典中的 **TA、**HD 把两个字典的键值展开加入 log_entry。若存在相同键，后面的定义会覆盖前面的。",
+          "{k: float(np.nanmean([d[k] for d in logs])) for k in logs[0].keys()} 同时使用列表推导式与字典推导式：内层收集一个指标，外层遍历所有指标。"
         ],
-        "shapes": "每批一份 dict[str,float] → logs 列表 → 指标名到平均值的字典。",
-        "pitfall": "验证集为空时 logs[0] 越界；全 NaN 指标仍为 NaN。MAE 有 valid，A@/HD 没有，指标间不应不加说明地直接比较。",
-        "exercise": "eval 和 no_grad 能互相替代吗？",
-        "answer": "不能。eval 改变模块运行方式；no_grad 改变自动求导记录。eval 下仍能求梯度，no_grad 下训练模式 BatchNorm 仍可能更新运行统计。",
-        "diagram": "train"
+        "shapes": "每批预测坐标 [B,L,W] → 各标量指标 → logs 长度等于批次数 → 一个汇总字典。",
+        "pitfall": "空验证集会在 logs[0] 处出错。各批同权平均与按所有有效点统一求平均不同；MAE 与 A@/HD 的掩码范围也不同。验证直接使用原始 pred_y，而后续可视化 infer_lines 默认还会平滑坐标，两者可能不完全一致。",
+        "summary": "在不更新参数的情况下，计算验证损失、MAE、阈值准确率及当前 HD 指标，再跨批次汇总。",
+        "parameters": [
+          {
+            "name": "model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "当前待评估的网络，不会在此函数更新权重。"
+          },
+          {
+            "name": "loader",
+            "type": "DataLoader",
+            "default": "必填",
+            "meaning": "验证批次来源。"
+          },
+          {
+            "name": "loss_fn",
+            "type": "可调用对象",
+            "default": "必填",
+            "meaning": "与训练相同的复合损失，用于计算验证损失及分量。"
+          },
+          {
+            "name": "device",
+            "type": "str / torch.device",
+            "default": "必填",
+            "meaning": "验证计算设备。"
+          },
+          {
+            "name": "use_heatmap",
+            "type": "bool",
+            "default": "True",
+            "meaning": "决定解包网络输出与损失调用方式。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "logs",
+            "type": "list[dict]",
+            "meaning": "保存每个验证 batch 的指标字典。"
+          },
+          {
+            "name": "batch / img / gt_y / valid",
+            "type": "字典与 Tensor",
+            "meaning": "结构与训练一致；img=[B,1,H,W]，坐标及掩码=[B,L,W]。"
+          },
+          {
+            "name": "gt_heatmaps",
+            "type": "Tensor[B,L,H,W]",
+            "meaning": "从 batch 搬到设备，但仍未传入损失，是未使用的中间变量。"
+          },
+          {
+            "name": "pred_y / pred_heatmaps",
+            "type": "Tensor[B,L,W] / Tensor[B,L,H,W]",
+            "meaning": "当前模型对验证图像的预测。"
+          },
+          {
+            "name": "mae",
+            "type": "float",
+            "meaning": "line_mae 返回有效位置的平均绝对坐标误差。"
+          },
+          {
+            "name": "TA / HD",
+            "type": "dict[str,float]",
+            "meaning": "分别包含 A@2/A@3/A@5 与 Hausdorff/HD95。"
+          },
+          {
+            "name": "loss_dict",
+            "type": "dict[str,Tensor]",
+            "meaning": "复合损失分量；本函数取 coord、topo、smooth 和可选 heatmap，未把 tv 单独加入日志。"
+          },
+          {
+            "name": "log_entry",
+            "type": "dict[str,float]",
+            "meaning": "当前 batch 的 loss、mae、各损失分量和评估指标。"
+          },
+          {
+            "name": "k / d / out",
+            "type": "键名 / 单批字典 / 汇总字典",
+            "meaning": "按 logs[0] 的键收集各 batch 同名数值，得到最终 out。"
+          },
+          {
+            "name": "bar",
+            "type": "可调用的进度条更新对象",
+            "meaning": "alive_bar 上下文创建的验证进度条；每处理一个 batch 调用 bar()，只更新终端显示，不改变指标或模型。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "关闭求导并进入评估模式",
+            "detail": "L115 装饰器覆盖整个函数；L117 调用 model.eval()。"
+          },
+          {
+            "title": "逐批计算预测与损失",
+            "detail": "L120–132 复制训练前向逻辑，但无清梯度、反向和参数更新。"
+          },
+          {
+            "title": "计算三组指标",
+            "detail": "L134–136 调用 MAE、阈值命中率与当前 HD 实现。"
+          },
+          {
+            "title": "组织每批日志",
+            "detail": "L138–150 把标量值和两个指标字典合并；热图项存在时追加。"
+          },
+          {
+            "title": "跨批次求均值",
+            "detail": "L153–154 按键汇总，返回字典。"
+          }
+        ],
+        "returns": [
+          "例如包含 loss、mae、coord_loss、topo_loss、smooth_loss、A@2、A@3、A@5、Hausdorff、HD95 和 heatmap_loss 的 Python 浮点数字典。"
+        ],
+        "flow": {
+          "title": "验证中的指标分支与汇总",
+          "nodes": [
+            {
+              "id": "mode",
+              "title": "eval + no_grad",
+              "detail": "切换模块行为并关闭梯度记录",
+              "kind": "input"
+            },
+            {
+              "id": "net",
+              "title": "批次前向",
+              "detail": "图像 → 坐标与热图评分",
+              "kind": "process"
+            },
+            {
+              "id": "loss",
+              "title": "复合损失",
+              "detail": "得到总损失及分项",
+              "kind": "process"
+            },
+            {
+              "id": "mae",
+              "title": "有效点 MAE",
+              "detail": "使用 valid 过滤坐标误差",
+              "kind": "process"
+            },
+            {
+              "id": "other",
+              "title": "A@ 与 HD",
+              "detail": "当前实现不使用 valid",
+              "kind": "process"
+            },
+            {
+              "id": "log",
+              "title": "合并单批日志",
+              "detail": "loss / mae / 分项 / 其他指标",
+              "kind": "process"
+            },
+            {
+              "id": "more",
+              "title": "还有验证 batch 吗",
+              "detail": "逐批收集字典",
+              "kind": "decision"
+            },
+            {
+              "id": "out",
+              "title": "按键 nanmean",
+              "detail": "返回所有 batch 的均值",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "mode",
+              "to": "net",
+              "label": ""
+            },
+            {
+              "from": "net",
+              "to": "loss",
+              "label": ""
+            },
+            {
+              "from": "net",
+              "to": "mae",
+              "label": ""
+            },
+            {
+              "from": "net",
+              "to": "other",
+              "label": ""
+            },
+            {
+              "from": "loss",
+              "to": "log",
+              "label": ""
+            },
+            {
+              "from": "mae",
+              "to": "log",
+              "label": ""
+            },
+            {
+              "from": "other",
+              "to": "log",
+              "label": ""
+            },
+            {
+              "from": "log",
+              "to": "more",
+              "label": ""
+            },
+            {
+              "from": "more",
+              "to": "net",
+              "label": "有"
+            },
+            {
+              "from": "more",
+              "to": "out",
+              "label": "没有"
+            }
+          ],
+          "caption": "所有分支只测量当前模型；本函数中没有参数更新。"
+        }
       },
       {
         "start": 157,
         "end": 164,
         "title": "尺寸解析：命令行 W,H 与张量 H,W 的转换点",
         "principle": [
-          "用户可以写 256，表示正方形，也可以写 516,594，表示宽 516、高 594。解析后的元组传给数据集和导出函数，项目中 PIL 使用宽高顺序，而 PyTorch 图像张量使用通道、高、宽。"
+          "图像库常按 (W,H) 表示尺寸，而张量的空间维度通常是 [...,H,W]。这里规定命令行写“宽,高”，统一转成二元组，后续 Dataset 再使用对应位置。",
+          "只输入一个整数表示正方形。例如 \"256\" → (256,256)；输入 \"516,594\" → (516,594)，对应张量高度 594、宽度 516。"
         ],
         "syntax": [
-          "str(s).strip() 把输入变为去除两端空格的字符串；split(\",\") 按逗号拆分。",
-          "return int(w.strip()),int(h.strip()) 返回二元组；单值路径 return v,v。"
+          "s.split(\",\") 返回字符串列表，w,h = ... 要求列表恰有两个元素。return int(...),int(...) 会隐式构造 tuple。",
+          "strip() 只清除首尾空白，不会删除数字中间的字符。"
         ],
-        "shapes": "\"516,594\" → (W=516,H=594)；批张量为 [B,1,594,516]。",
-        "pitfall": "没有检查尺寸为正数，多个逗号或非整数输入会直接抛异常。学习时要记住 img_size[1] 才是高度。",
-        "exercise": "输入 \"320,240\" 时，模型输入 batch 的后两维是什么？",
-        "answer": "[240,320]，因为张量采用 H,W。",
-        "diagram": "train"
+        "shapes": "\"W,H\" 字符串 → tuple[int,int]，顺序固定为 (W,H)。",
+        "pitfall": "这里没有检查宽高必须大于零。多个逗号、非整数字符会抛异常；这也不意味着后续所有代码都支持任意非方形输入尺寸。",
+        "summary": "将命令行输入尺寸字符串规范为 (宽,高) 整数二元组。",
+        "parameters": [
+          {
+            "name": "s",
+            "type": "str 或可转字符串对象",
+            "default": "必填",
+            "meaning": "用户输入的尺寸，例如 \"256\" 或 \"516,594\"。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "s",
+            "type": "str",
+            "meaning": "经过 str(...).strip() 去除首尾空白的输入。"
+          },
+          {
+            "name": "w / h",
+            "type": "str，随后转 int",
+            "meaning": "逗号左侧为宽，右侧为高。"
+          },
+          {
+            "name": "v",
+            "type": "int",
+            "meaning": "没有逗号时的单一尺寸，同时用于宽和高。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "规范文本",
+            "detail": "L159 先转换为字符串并去除两端空白。"
+          },
+          {
+            "title": "检查矩形写法",
+            "detail": "L160–162 有逗号就拆为两个值，各自去空白并转整数。"
+          },
+          {
+            "title": "处理正方形写法",
+            "detail": "L163–164 无逗号则只转一个整数，返回两次。"
+          }
+        ],
+        "returns": [
+          "(宽,高) 二元组。"
+        ]
       },
       {
         "start": 167,
         "end": 192,
         "title": "命令行配置：声明参数并验证实验协议",
         "principle": [
-          "argparse 把命令行选项收敛成统一 args 对象，使同一训练程序可复用不同数据、模型和批大小。split_mode 本身并不执行切分，真正改变数据来源的是 split_manifest 是否传给 Dataset。",
-          "train90 必须提供清单，train100 禁止提供清单，这样两种协议的命令含义不会混淆。数据集内无清单的 train 路径保留全部数据，而 val 取发现顺序中的末尾约 10%。"
+          "argparse 把启动命令转换成一个 Namespace 对象 args，使后续代码通过 args.lr 等属性取配置。默认值只在调用者没有提供该参数时生效，因此需要把 main 的默认值与 Shell 启动脚本实际传入的值分开阅读。",
+          "split_mode 本身没有直接传给 Dataset；它与 split_manifest 的组合检查保证 train90 会带清单、train100 不会带清单，Dataset 再通过“有没有清单”选择实际数据来源。"
         ],
         "syntax": [
-          "add_argument(type=int/float/str) 指定转换类型，default 指定省略时的值，choices 限定允许字符串。",
-          "action=\"store_true\" 表示出现开关就设 True；若 default 已是 True，则这个开关没有从命令行变为 False 的入口。",
-          "parser.error 会打印用法并以错误状态退出；args.img_size 从字符串被替换为宽高元组。"
+          "type=int/float/str 由 argparse 在解析阶段执行类型转换；default 是未传参时使用的值；help 只影响 --help 文本。",
+          "parser.error(message) 会输出使用说明和错误并以非零状态结束程序；它不会返回让后续训练继续。",
+          "main() 自身没有 Python 形参；此处参数表描述的是命令行接口，而不是 main 的函数签名。"
         ],
-        "shapes": "",
-        "pitfall": "--use_heatmap 默认 True 且 store_true，无法关闭；--backbone_pretrained 虽然被解析，下方构造模型却没有传它。不能把界面参数说明当作真实执行效果。",
-        "exercise": "如何使一个布尔选项在命令行中既能开启又能关闭？",
-        "answer": "可使用 argparse.BooleanOptionalAction 生成 --foo/--no-foo，或定义互斥开关；同时必须把值真正传到模型，并让前向分支与损失接口一致。",
-        "diagram": "split"
+        "shapes": "命令行字符串列表 → Namespace；img_size 从 str 改为 tuple[W,H]。",
+        "pitfall": "--backbone_pretrained 未被传入网络；--use_heatmap 无法通过当前 CLI 关闭；--heatmap_sigma 不决定损失里最终采用的宽度。阅读 help 文本不能代替追踪参数实际使用位置。",
+        "summary": "声明全部命令行参数，解析真实配置，检查划分协议组合，再固定随机种子。",
+        "parameters": [
+          {
+            "name": "--img_size",
+            "type": "str → tuple[int,int]",
+            "default": "\"256\"",
+            "meaning": "输入尺寸；单数为正方形，逗号形式按 W,H 解析。"
+          },
+          {
+            "name": "--num_lines",
+            "type": "int",
+            "default": "2",
+            "meaning": "模型输出的边界条数；数据标签固定为两条目标线，修改此值必须与标签和损失维度一致。"
+          },
+          {
+            "name": "--epochs",
+            "type": "int",
+            "default": "40",
+            "meaning": "遍历训练数据的轮数；启动脚本覆盖为 100。"
+          },
+          {
+            "name": "--batch_size",
+            "type": "int",
+            "default": "32",
+            "meaning": "每个 batch 的图像数量；启动脚本覆盖为 48。"
+          },
+          {
+            "name": "--lr",
+            "type": "float",
+            "default": "0.001",
+            "meaning": "AdamW 学习率；本主程序没有调度器进一步修改它。"
+          },
+          {
+            "name": "--num_workers",
+            "type": "int",
+            "default": "8",
+            "meaning": "DataLoader 并行取样进程数；启动脚本默认 16，可由 NUM_WORKERS 环境变量覆盖。"
+          },
+          {
+            "name": "--device",
+            "type": "str",
+            "default": "可用 CUDA 时 cuda，否则 cpu",
+            "meaning": "网络与 batch 的计算设备；仅检测 CUDA 是否可用，并不自动选择显存最多的 GPU。"
+          },
+          {
+            "name": "--backbone",
+            "type": "str",
+            "default": "mobilenet_v3_large",
+            "meaning": "网络骨干名称，传给 LineCoordNetFPN。"
+          },
+          {
+            "name": "--backbone_pretrained",
+            "type": "bool 开关",
+            "default": "False",
+            "meaning": "声明了“启用预训练”的开关，但主程序构造网络时未传递此值，因此当前无效。"
+          },
+          {
+            "name": "--save_dir",
+            "type": "str",
+            "default": "checkpoints",
+            "meaning": "检查点、审计 JSON、图像等产物的保存目录。"
+          },
+          {
+            "name": "--use_heatmap",
+            "type": "bool 开关",
+            "default": "True",
+            "meaning": "采用 store_true 且默认已经 True，命令行没有对应关闭开关；正常调用始终为真。"
+          },
+          {
+            "name": "--heatmap_sigma",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "传给 Dataset 和损失构造器；Dataset 使用它生成批次热图，但复合损失内部把实际 sigma 固定为 3.0。"
+          },
+          {
+            "name": "--data_root",
+            "type": "str",
+            "default": "源码中的绝对数据目录",
+            "meaning": "图像与标注的扫描根目录；项目启动脚本会传入另一份实际数据路径。"
+          },
+          {
+            "name": "--split_mode",
+            "type": "str",
+            "default": "train100",
+            "meaning": "只接受 train100 或 train90；前者不带清单，后者必须带清单。"
+          },
+          {
+            "name": "--split_manifest",
+            "type": "str 或 None",
+            "default": "None",
+            "meaning": "包含 meta.json、train.jsonl、val.jsonl 的固定划分目录。"
+          },
+          {
+            "name": "--seed",
+            "type": "int",
+            "default": "20260925",
+            "meaning": "全局随机种子，训练 DataLoader 使用它，验证 DataLoader 使用 seed+1。"
+          },
+          {
+            "name": "--skip_export",
+            "type": "bool 开关",
+            "default": "False",
+            "meaning": "出现此开关时跳过训练后的 PTE 导出和运行检查，权重仍照常保存。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "parser",
+            "type": "argparse.ArgumentParser",
+            "meaning": "维护参数声明、帮助文本和错误处理。"
+          },
+          {
+            "name": "args",
+            "type": "argparse.Namespace",
+            "meaning": "解析后的配置容器；args.img_size 随后由字符串被替换为整数二元组。"
+          },
+          {
+            "name": "choices",
+            "type": "list[str]",
+            "meaning": "限制 split_mode 仅能取两个约定值。"
+          },
+          {
+            "name": "action=\"store_true\"",
+            "type": "参数解析策略",
+            "meaning": "命令行出现开关时写为 True；不读取后面的 True/False 字符串。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "建立参数表",
+            "detail": "L168–185 定义参数名、类型、默认值和帮助文本。"
+          },
+          {
+            "title": "解析命令行",
+            "detail": "L186 parse_args() 读取进程参数；未显式提供的参数取默认值。"
+          },
+          {
+            "title": "转换尺寸类型",
+            "detail": "L187 调用 parse_img_size，把字符串改为 (W,H)。"
+          },
+          {
+            "title": "检查协议与清单",
+            "detail": "L188–191 对 train90 缺清单、train100 带清单两种组合立即报错终止。"
+          },
+          {
+            "title": "统一随机起点",
+            "detail": "L192 用最终 seed 调用 set_global_seed。"
+          }
+        ],
+        "returns": [
+          "本段不返回；生成 args 供 main 的全部后续阶段使用。"
+        ]
       },
       {
         "start": 194,
         "end": 228,
         "title": "构造 Dataset 和 DataLoader：样本接口与批次接口分工",
         "principle": [
-          "Dataset 决定某个索引对应什么图像、标注和增强；DataLoader 决定何时取哪些索引、是否打乱、如何并行取样以及如何拼成批次。训练集 shuffle=True 打破顺序相关性，验证集 shuffle=False 保持固定遍历。",
-          "训练和验证使用不同 torch.Generator，种子分别为 seed 与 seed+1，使二者的数据加载随机状态分离。自定义 default_collate 把每个样本字典里的张量 stack 成批次。",
-          "pin_memory=True 让加载后的 CPU 张量可放在页锁定内存中，为 CPU 到 GPU 传输提供条件，但当前 .to 没有显式使用 non_blocking=True；开启 pin_memory 不代表所有传输自动异步。"
+          "Dataset 负责“给定样本索引，返回一张图及对应标签”；DataLoader 负责“选择哪些索引、并行取样、拼成一批”。二者分工不同，所以 batch_size、shuffle 和 num_workers 应由 DataLoader 管理。",
+          "训练打乱样本顺序以改变每批组合，验证固定顺序便于重复比较。两个独立 torch.Generator 分别播种，避免训练和验证加载器直接共用同一个生成器状态。",
+          "pin_memory=True 让数据加载器尝试使用可固定的主机内存，常用于加速 CPU 到 GPU 搬运；它不把数据自动放上 GPU，实际设备转换仍在训练/验证函数里完成。"
         ],
         "syntax": [
-          "os.makedirs(...,exist_ok=True) 创建目录，已存在时不报错。os.path.join 拼接跨平台路径。",
-          "DataLoader(dataset,batch_size=...,num_workers=...,collate_fn=...) 使用关键字参数；num_workers=0 可在主进程执行加载，方便排查数据异常。",
-          "代码没设置 drop_last，默认保留不足一个 batch 的末批次。"
+          "os.makedirs(...,exist_ok=True) 在目录已存在时不抛 FileExistsError。os.path.join 用当前系统的路径规则拼接字符串。",
+          "torch.Generator().manual_seed(...) 是先构造对象再调用返回生成器的方法。collate_fn 接收函数对象 default_collate，没有写括号，因此这里不会马上调用它。"
         ],
-        "shapes": "单样本 image [1,H,W]、y/valid [L,W] → 批次 [B,1,H,W]、[B,L,W]。",
-        "pitfall": "UNIFY_MODE=unify 在 val 模式也会扩充裁剪副本，因此 val_items 可能大于验证源图数。",
-        "exercise": "把 batch_size 从 48 改到 24 会改变单个样本 y 的形状吗？",
-        "answer": "不会；单样本仍为 [L,W]，批张量第 0 维由 48 改为 24，末批次可能更小。",
-        "diagram": "train"
+        "shapes": "单样本 image [1,H,W]、y_px/valid [L,W]、heatmaps [L,H,W] → 批次各自增加最前面的 B 维。",
+        "pitfall": "两个 DataLoader 均未指定 drop_last，因此最后一批可不足 batch_size。设置 pin_memory 不等于采用异步拷贝；本代码 .to(device) 没有传 non_blocking=True。",
+        "summary": "把训练和验证单样本数据集分别包装成可迭代批次，并保留数据来源审计。",
+        "parameters": [
+          {
+            "name": "LineDataset.data_root",
+            "type": "str",
+            "default": "args.data_root",
+            "meaning": "图像和标注的根目录。"
+          },
+          {
+            "name": "LineDataset.mode",
+            "type": "str",
+            "default": "训练 train / 验证 val",
+            "meaning": "决定取哪个数据子集及是否执行训练增强。"
+          },
+          {
+            "name": "LineDataset.img_size",
+            "type": "tuple[int,int]",
+            "default": "args.img_size",
+            "meaning": "输出图像的宽高。"
+          },
+          {
+            "name": "LineDataset.sigma",
+            "type": "float",
+            "default": "args.heatmap_sigma",
+            "meaning": "Dataset 侧生成热图的宽度参数。"
+          },
+          {
+            "name": "LineDataset.split_manifest",
+            "type": "str 或 None",
+            "default": "args.split_manifest",
+            "meaning": "有值则读取固定分组清单，无值使用数据集内部默认划分路径。"
+          },
+          {
+            "name": "DataLoader.batch_size",
+            "type": "int",
+            "default": "args.batch_size",
+            "meaning": "单批样本数。"
+          },
+          {
+            "name": "DataLoader.shuffle",
+            "type": "bool",
+            "default": "训练 True / 验证 False",
+            "meaning": "训练随机打乱索引，验证顺序读取。"
+          },
+          {
+            "name": "DataLoader.num_workers",
+            "type": "int",
+            "default": "args.num_workers",
+            "meaning": "并行取样进程数；0 时在主进程加载。"
+          },
+          {
+            "name": "DataLoader.pin_memory",
+            "type": "bool",
+            "default": "True",
+            "meaning": "启用适用设备下的固定主机内存机制。"
+          },
+          {
+            "name": "DataLoader.collate_fn",
+            "type": "函数",
+            "default": "default_collate",
+            "meaning": "将单样本字典按字段堆叠为 batch。"
+          },
+          {
+            "name": "DataLoader.generator",
+            "type": "torch.Generator",
+            "default": "分别指定",
+            "meaning": "参与随机采样以及加载进程初始随机种子的生成。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "log_dir",
+            "type": "str",
+            "meaning": "save_dir/log，存放每轮预测对照图和热图。"
+          },
+          {
+            "name": "train_set / val_set",
+            "type": "LineDataset 实例",
+            "meaning": "数据条目列表与取样转换逻辑，不是已经堆好的完整图像张量。"
+          },
+          {
+            "name": "train_generator",
+            "type": "torch.Generator",
+            "meaning": "以 seed 初始化，提供训练加载器随机状态。"
+          },
+          {
+            "name": "val_generator",
+            "type": "torch.Generator",
+            "meaning": "以 seed+1 初始化，独立于训练生成器。"
+          },
+          {
+            "name": "train_loader / val_loader",
+            "type": "DataLoader",
+            "meaning": "每次迭代产生 batch 字典；len(loader) 是批次数。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "准备输出目录",
+            "detail": "L194–196 创建保存目录与 log 子目录，允许已存在。"
+          },
+          {
+            "title": "创建两份 Dataset",
+            "detail": "L198–205 共享尺寸等配置，区别在 mode。"
+          },
+          {
+            "title": "写划分审计",
+            "detail": "L206 在训练开始前输出源图交集。"
+          },
+          {
+            "title": "创建独立生成器",
+            "detail": "L208–209 分别用 seed 与 seed+1 播种。"
+          },
+          {
+            "title": "包装 DataLoader",
+            "detail": "L211–228 指定批大小、打乱方式、并行进程和 collate 函数。"
+          }
+        ],
+        "returns": [
+          "本段为 main 建立 train_loader 和 val_loader；之后反复迭代这些对象。"
+        ],
+        "flow": {
+          "title": "样本接口怎样变成批次接口",
+          "nodes": [
+            {
+              "id": "cfg",
+              "title": "数据配置",
+              "detail": "根目录、清单、尺寸和随机种子",
+              "kind": "input"
+            },
+            {
+              "id": "train",
+              "title": "训练 Dataset",
+              "detail": "mode=train，提供逐样本字典",
+              "kind": "process"
+            },
+            {
+              "id": "val",
+              "title": "验证 Dataset",
+              "detail": "mode=val，提供逐样本字典",
+              "kind": "process"
+            },
+            {
+              "id": "audit",
+              "title": "源图审计",
+              "detail": "对 img_paths 去重并统计交集",
+              "kind": "process"
+            },
+            {
+              "id": "tl",
+              "title": "训练 DataLoader",
+              "detail": "打乱 + 并行取样 + 字段堆叠",
+              "kind": "process"
+            },
+            {
+              "id": "vl",
+              "title": "验证 DataLoader",
+              "detail": "固定顺序 + 并行取样 + 字段堆叠",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "训练 / 验证函数",
+              "detail": "每次接收一个 batch 字典",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "cfg",
+              "to": "train",
+              "label": ""
+            },
+            {
+              "from": "cfg",
+              "to": "val",
+              "label": ""
+            },
+            {
+              "from": "train",
+              "to": "audit",
+              "label": ""
+            },
+            {
+              "from": "val",
+              "to": "audit",
+              "label": ""
+            },
+            {
+              "from": "train",
+              "to": "tl",
+              "label": ""
+            },
+            {
+              "from": "val",
+              "to": "vl",
+              "label": ""
+            },
+            {
+              "from": "tl",
+              "to": "out",
+              "label": ""
+            },
+            {
+              "from": "vl",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "Dataset 改变单个样本的内容；DataLoader 改变样本的组织方式。"
+        }
       },
       {
         "start": 230,
         "end": 245,
         "title": "模型、复合损失与 AdamW：训练的三个可调用对象",
         "principle": [
-          "模型把图像映射成坐标与热图；损失把预测与真值映射成标量；AdamW 使用梯度和历史动量更新参数。它们分别负责“预测、评价、改变”。",
-          "AdamW 维护一阶和二阶梯度统计，对不同参数自适应缩放更新，并使用与梯度更新解耦的权重衰减。这里 lr=1e-3（默认）控制总体步长，weight_decay=1e-4 控制衰减强度。",
-          "学习率在整个训练中保持配置值，因为代码没有 scheduler；也没有 AMP 自动混合精度或梯度累积逻辑。"
+          "model、loss_fn 和 optimizer 组成训练闭环：模型给出预测，损失衡量预测与标签的差异，优化器根据反传的梯度更新模型参数。构造优化器时传的是参数引用，因此后续 step 能直接更新同一模型。",
+          "AdamW 会维护梯度一阶、二阶统计，并以解耦方式施加权重衰减。这里显式设置学习率与 weight_decay；学习率在后续主循环中没有通过 scheduler 改变。"
         ],
         "syntax": [
-          "LineCoordNetFPN 这里只传 backbone 与 num_lines，其他构造参数采用模型默认值。",
-          "model.to(device) 把参数和注册 buffer 放到指定设备；loss_fn 也是 nn.Module，也可调用 .to。",
-          "AdamW(model.parameters(),lr=...,weight_decay=...) 注册模型的参数迭代器；它不需要直接持有 Dataset 或 loss_fn。"
+          "nn.Module.to(device) 会移动模块参数与缓冲区，返回该模块，故可以直接接在构造表达式后。",
+          "model.parameters() 会递归遍历子模块 Parameter；不需要手动列出每层卷积。AdamW 的其他参数使用库默认值，本源码未显式改写。"
         ],
-        "shapes": "",
-        "pitfall": "args.backbone_pretrained 被忽略。HeatmapCompositeLoss(sigma=args.heatmap_sigma) 内部又将 sigma 固定成 3.0，所以命令行默认 2.0 不是实际损失热图宽度。",
-        "exercise": "没有 scheduler 时，训练到第 80 轮，lr 会自动变小吗？",
-        "answer": "不会。除非显式修改 optimizer 的学习率或调用调度器，否则这里一直使用配置值。",
-        "diagram": "loss"
+        "shapes": "网络输入 [B,1,H,W]，默认输出 ([B,2,W],[B,2,H,W])；优化器内部状态与各参数形状对应。",
+        "pitfall": "args.backbone_pretrained 和 args.use_heatmap 没有传入网络构造器；不能以命令行有参数为由认定模型接收了它们。本段没有创建学习率调度器。",
+        "summary": "构造可调用的模型和损失，再让 AdamW 持有模型参数，为批次更新做准备。",
+        "parameters": [
+          {
+            "name": "LineCoordNetFPN.backbone",
+            "type": "str",
+            "default": "args.backbone",
+            "meaning": "选择骨干提取器。"
+          },
+          {
+            "name": "LineCoordNetFPN.num_lines",
+            "type": "int",
+            "default": "args.num_lines",
+            "meaning": "决定输出热图通道数与边界条数。"
+          },
+          {
+            "name": "HeatmapCompositeLoss.sigma",
+            "type": "float",
+            "default": "args.heatmap_sigma",
+            "meaning": "传入值在损失类内部被固定的 3.0 覆盖，不能按传入值推断实际目标宽度。"
+          },
+          {
+            "name": "AdamW.params",
+            "type": "可迭代 Parameter",
+            "default": "model.parameters()",
+            "meaning": "待优化的所有模型参数。"
+          },
+          {
+            "name": "AdamW.lr",
+            "type": "float",
+            "default": "args.lr",
+            "meaning": "基础更新步长。"
+          },
+          {
+            "name": "AdamW.weight_decay",
+            "type": "float",
+            "default": "0.0001",
+            "meaning": "对权重施加的衰减系数；与损失函数里的平滑正则不是同一件事。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "model",
+            "type": "LineCoordNetFPN",
+            "meaning": "已搬到 args.device 的边界网络。"
+          },
+          {
+            "name": "loss_fn",
+            "type": "HeatmapCompositeLoss 或 CompositeLoss",
+            "meaning": "默认命令行配置选择热图复合损失；对象本身可像函数一样调用。"
+          },
+          {
+            "name": "optimizer",
+            "type": "torch.optim.AdamW",
+            "meaning": "在整个训练过程中持续复用，保留优化器内部统计。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "构造并迁移网络",
+            "detail": "L230–234 传入骨干和边界数量，迁移到设备并打印结构。"
+          },
+          {
+            "title": "选择损失接口",
+            "detail": "L236–239 根据 use_heatmap 构造对应损失对象。"
+          },
+          {
+            "title": "建立优化器",
+            "detail": "L241–245 绑定模型参数，设置 lr 与权重衰减。"
+          }
+        ],
+        "returns": [
+          "三个对象继续保存在 main 局部变量中，供每轮训练与验证调用。"
+        ]
       },
       {
         "start": 247,
         "end": 276,
         "title": "Epoch 循环：先学习，再测量，并展示同一轮指标",
         "principle": [
-          "best_mae 初始为正无穷，第一次有有限 MAE 的验证就能成为最佳。每轮固定顺序是训练完整个训练集，再评估完整个验证集。",
-          "tabulate 把当前轮的多种指标排成表格。训练损失高于验证损失不必立即判定异常：训练有增强且模型处于 train 模式；验证条件不同。但 train100 的验证源图重叠是另一项必须独立说明的问题。"
+          "每一轮先训练再验证，因此 ev 描述的是该轮更新完成后的权重表现。训练损失来自训练期间一批批不同时间点的模型，验证损失来自本轮结束时同一份模型，二者的采样与计算条件不完全一样。",
+          "best_mae 初始为正无穷，正常有限 MAE 的第一轮会自然成为当前最佳。最佳记录不会直接改变训练控制流，模型仍会继续训练到最后一轮。"
         ],
         "syntax": [
-          "range(1,args.epochs+1) 包含 1 到 epochs；右端点不包含，所以要 +1。",
-          "f\"{value:.4f}\" 控制显示小数位，不改变保存的浮点精度。headers 和 table_data 的元素顺序必须一一对应。",
-          "best_state_dict=None 是尚未得到最佳模型的哨兵值；best_metrics 字典仅在产生改进时更新。"
+          "float(\"inf\") 是可比较的正无穷；普通有限数与它比较都更小。",
+          "f\"{value:.4f}\" 将显示文本保留四位小数；它不修改 value。table_data 外层列表表示表格的行，内层列表表示该行各列。"
         ],
-        "shapes": "",
-        "pitfall": "epochs=0 或全部 MAE 为 NaN 时，best_state_dict 始终为 None，后续默认导出会失败。",
-        "exercise": "为什么 best_mae 初始化为 inf 而不是 0？",
-        "answer": "MAE 越小越好，合法值通常非负。设 0 会阻止正常结果成为最佳；inf 允许第一次有限值进入。",
-        "diagram": "train"
+        "shapes": "每一轮返回若干标量；本段把它们转换为展示用字符串矩阵 [1,指标列数]。",
+        "pitfall": "没有早停判断或 scheduler.step()。若 epochs 为 0，循环一次也不执行，best_state_dict 会保持 None，后续非跳过导出路径无法正常加载最佳状态。",
+        "summary": "建立最佳成绩追踪变量，逐轮调用训练与验证，并把本轮结果整理成终端表格。",
+        "parameters": [
+          {
+            "name": "range.start",
+            "type": "int",
+            "default": "1",
+            "meaning": "epoch 从 1 编号。"
+          },
+          {
+            "name": "range.stop",
+            "type": "int",
+            "default": "args.epochs + 1",
+            "meaning": "range 右端不包含，因此恰好覆盖 1 到 epochs。"
+          },
+          {
+            "name": "tabulate.headers",
+            "type": "list[str]",
+            "default": "headers",
+            "meaning": "给每列展示指标名称。"
+          },
+          {
+            "name": "tabulate.tablefmt",
+            "type": "str",
+            "default": "grid",
+            "meaning": "以网格风格输出表格，仅影响显示。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "best_mae",
+            "type": "float",
+            "meaning": "历史最小验证 MAE，初始为 inf。"
+          },
+          {
+            "name": "best_epoch",
+            "type": "int",
+            "meaning": "该最小值发生的轮次，初始 0。"
+          },
+          {
+            "name": "best_metrics",
+            "type": "dict 或 None",
+            "meaning": "最佳轮次的可读摘要，稍后保存到 JSON。"
+          },
+          {
+            "name": "best_state_dict",
+            "type": "参数状态字典或 None",
+            "meaning": "最佳权重的深拷贝，供训练后导出。"
+          },
+          {
+            "name": "epoch",
+            "type": "int",
+            "meaning": "当前轮次。"
+          },
+          {
+            "name": "tr_loss",
+            "type": "float",
+            "meaning": "train_one_epoch 返回的批次平均损失。"
+          },
+          {
+            "name": "ev",
+            "type": "dict[str,float]",
+            "meaning": "eval_one_epoch 返回的本轮验证指标。"
+          },
+          {
+            "name": "headers / table_data",
+            "type": "list[str] / list[list[str]]",
+            "meaning": "表格列名与一行格式化的指标字符串；字符串保留小数不改变原始指标值。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "初始化最佳记录",
+            "detail": "L247–250 创建最优指标与权重占位。"
+          },
+          {
+            "title": "进入轮次循环",
+            "detail": "L251–256 顺序执行训练与验证。"
+          },
+          {
+            "title": "组织指标展示",
+            "detail": "L258–271 将各数值格式化成表格单元。"
+          },
+          {
+            "title": "有热图项则追加一列",
+            "detail": "L272–274 同时追加列名和数据，保持长度对应。"
+          },
+          {
+            "title": "打印表格",
+            "detail": "L276 使用 tabulate 生成终端文本。"
+          }
+        ],
+        "returns": [
+          "本段不返回；当前 tr_loss、ev 和 epoch 继续交给记录、保存和画图逻辑。"
+        ]
       },
       {
         "start": 278,
         "end": 292,
         "title": "MLflow 指标记录：把张量世界压成每轮标量",
         "principle": [
-          "日志保存 train.loss、val.loss、val.mae_px 和各损失分量，以 epoch 作为 step。未来可以画出收敛曲线、定位过拟合或异常，而无需从终端截图估读。",
-          "代码先过滤 None 与非有限数，避免把 NaN/Inf 当正常指标上传。日志失败只给警告，训练循环继续；实验记录的失败与模型计算的失败在这里被区分处理。"
+          "实验记录需要的是 Python 标量和明确名称，而不是保留计算图的 Tensor。因此本段统一转换数值、过滤不可用结果，并用 epoch 作为时间轴位置。",
+          "记录系统可能因环境或服务问题失败，try/except 只让该记录步骤降级为警告，训练仍继续。它不负责忽略模型前向、反向或数据读取错误。"
         ],
         "syntax": [
-          "np.isnan 检查 MAE 是否 NaN；np.isfinite 排除 NaN、正负无穷。字典推导式中的 if 过滤不合法项。",
-          "try/except Exception as e 捕获该区域中的运行异常；mlflow.log_metrics 接收字典和 step。"
+          "条件表达式先判断 MAE，再决定转 float 还是写 None。",
+          "v is not None and np.isfinite(v) 使用短路求值：None 时不会再调用 isfinite。except Exception as e 将异常对象绑定到 e。"
         ],
-        "shapes": "",
-        "pitfall": "主程序没有显式 start_run 或记录完整超参数；不要假设 MLflow 上自动有全部配置。实际复现实验还应读取 checkpoint 的 args 和运行脚本。",
-        "exercise": "为什么不要把整个 pred_heatmaps 交给 log_metrics？",
-        "answer": "指标接口用于标量随时间的序列；高维预测应作为图片、数组或其他 artifact 保存。",
-        "diagram": "train"
+        "shapes": "验证指标字典 → 清理后的 dict[str,float]；不涉及张量形状变化。",
+        "pitfall": "本段没有记录 A@、HD 或 TV 分量，也没有在这里设置 MLflow tracking URI、实验名或显式 start_run。日志缺某项不代表该计算一定没参与训练。",
+        "summary": "把本轮可用的有限数值指标交给 MLflow，并把记录失败与训练主流程隔离。",
+        "parameters": [
+          {
+            "name": "mlflow.log_metrics.metrics",
+            "type": "dict[str,float]",
+            "default": "metrics",
+            "meaning": "批量提交的标量指标。"
+          },
+          {
+            "name": "mlflow.log_metrics.step",
+            "type": "int",
+            "default": "epoch",
+            "meaning": "将这批指标放到当前训练轮次上。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "metrics",
+            "type": "dict[str,float 或 None]",
+            "meaning": "包含 train.loss、val.loss、val.mae_px、loss.coord、loss.topo、loss.smooth，以及存在时的 loss.heatmap。"
+          },
+          {
+            "name": "np.isnan(ev[\"mae\"])",
+            "type": "bool",
+            "meaning": "检测 MAE 是否为 NaN；为真时暂存 None，等待过滤。"
+          },
+          {
+            "name": "np.isfinite(v)",
+            "type": "bool",
+            "meaning": "过滤 NaN、正无穷和负无穷，只保留有限数。"
+          },
+          {
+            "name": "k / v",
+            "type": "str / 数值",
+            "meaning": "字典推导式遍历的指标名与指标值。"
+          },
+          {
+            "name": "e",
+            "type": "Exception",
+            "meaning": "记录失败时捕获的异常，转换为警告文本。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "构造基础指标字典",
+            "detail": "L279–286 使用清楚的分层名称组织数值。"
+          },
+          {
+            "title": "追加热图分量",
+            "detail": "L287–288 只在存在 heatmap_loss 时写入。"
+          },
+          {
+            "title": "排除不可用数值",
+            "detail": "L289 去掉 None 和所有非有限值。"
+          },
+          {
+            "title": "按轮次提交",
+            "detail": "L290 调用 log_metrics；L291–292 捕获此记录块的异常。"
+          }
+        ],
+        "returns": [
+          "None；成功时在 MLflow 当前实验运行中留下指标记录。"
+        ]
       },
       {
         "start": 294,
         "end": 329,
         "title": "最佳检查点与周期检查点：保存模型状态而非训练故事",
         "principle": [
-          "当前验证 MAE 严格小于历史最好值时，更新最佳轮次并保存 best.pth 和 best_metrics.json。严格小于意味着相同 MAE 不会覆盖前一个最佳。",
-          "state_dict 包含可学习参数及 BatchNorm 运行统计等 buffer。copy.deepcopy 创建内存中的独立快照，否则直接持有 state_dict 中张量引用，后续训练可能使所谓最佳快照继续变化。",
-          "每 10 轮额外保存一个周期检查点，用于回看中间状态。文件包含模型、epoch、loss 和 args，但不含 optimizer.state_dict、随机数状态或调度器状态，无法保证从这里无缝恢复相同优化轨迹。"
+          "最佳模型选择依据是 ev[\"mae\"]，不是总损失最小。总损失混合热图、坐标与几何正则，量纲与作用不同；此项目用更容易解释的坐标 MAE 作为模型选择标准。",
+          "model.state_dict() 含参数和缓冲区，例如 BatchNorm 的运行统计。若只是把这个字典赋给 best_state_dict，其中张量可能仍与模型共享底层状态；deepcopy 为训练后导出保留当时的独立快照。",
+          "best.pth 保存一个字典容器，除了 model 状态还保存 epoch、mae、loss 和 args。周期检查点则每 10 轮保存一次，不要求这一轮优于历史最佳。"
         ],
         "syntax": [
-          "torch.save 序列化字典；args 是 argparse.Namespace 对象，因此 pth 不只是纯权重张量。JSON 摘要则只保存可读标量和字符串。",
-          "epoch % 10 == 0 用取余判断是否达到保存间隔。copy.deepcopy 与 model.state_dict() 的组合解决引用别名问题。"
+          "state_dict() 只导出参数和持久缓冲区的命名映射，不等于把整个 Python 类定义放进去。",
+          "epoch % 10 是整数余数运算。f\"epoch_{epoch}.pth\" 根据轮次构造不同文件名。",
+          "json.dump 面向通用数据格式，torch.save 面向 PyTorch 序列化；二者输出文件并不互换。"
         ],
-        "shapes": "",
-        "pitfall": "best_metrics.json 的 train_loss 与 val_loss 是最佳 MAE 那一轮的数值，不是各自独立最小值。加载来源不可信的 pickle 检查点需要另外审查。",
-        "exercise": "为什么不能简单写 best_state_dict=model.state_dict() 后继续训练？",
-        "answer": "返回的字典持有张量引用，参数后续更新可能反映到快照中；deepcopy 才建立独立保存的最佳状态。",
-        "diagram": "train"
+        "shapes": "模型参数保持各层原形状；检查点是“字符串键 → Tensor/数值/配置对象”的嵌套字典。",
+        "pitfall": "检查点没有 optimizer.state_dict()、随机状态或数据加载器状态，无法保证从中精确续训得到与不中断训练一样的轨迹。MAE 为 NaN 时比较为假，不会产生新的最佳模型。",
+        "summary": "根据更小的验证 MAE 更新最佳模型，并独立保存每 10 轮的周期权重快照。",
+        "parameters": [
+          {
+            "name": "copy.deepcopy.x",
+            "type": "状态字典",
+            "default": "model.state_dict()",
+            "meaning": "递归复制最佳时刻的参数与缓冲区，避免后续训练改变内存中的最佳记录。"
+          },
+          {
+            "name": "torch.save.obj",
+            "type": "dict",
+            "default": "检查点字典",
+            "meaning": "需要序列化的状态和配置。"
+          },
+          {
+            "name": "torch.save.f",
+            "type": "str",
+            "default": "best.pth 或 epoch_N.pth",
+            "meaning": "输出文件路径；再次出现新的最佳时覆盖 best.pth。"
+          },
+          {
+            "name": "json.dump.ensure_ascii / indent",
+            "type": "bool / int",
+            "default": "False / 2",
+            "meaning": "让 best_metrics.json 保留中文并以可读缩进保存。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "ev[\"mae\"] < best_mae",
+            "type": "bool",
+            "meaning": "严格更小才更新最佳；相等时保持旧记录。"
+          },
+          {
+            "name": "best_metrics",
+            "type": "dict",
+            "meaning": "epoch、best_metric=\"mae\"、best_metric_value、val_mae、val_loss、train_loss、split_mode。"
+          },
+          {
+            "name": "best_state_dict",
+            "type": "深拷贝的状态字典",
+            "meaning": "用于训练结束后加载最佳网络，区别于磁盘检查点外层容器。"
+          },
+          {
+            "name": "best.pth[\"model\"]",
+            "type": "状态字典",
+            "meaning": "真正传给 model.load_state_dict 的模型状态。"
+          },
+          {
+            "name": "best.pth[\"args\"]",
+            "type": "argparse.Namespace",
+            "meaning": "本次配置；不是纯 JSON 字典。"
+          },
+          {
+            "name": "epoch % 10",
+            "type": "int",
+            "meaning": "取余为 0 表示到达第 10、20、30 等轮次。"
+          },
+          {
+            "name": "epoch_N.pth",
+            "type": "检查点文件",
+            "meaning": "包含 model、epoch、loss、args；此分支没有写 mae 字段。"
+          },
+          {
+            "name": "handle",
+            "type": "文本文件对象",
+            "meaning": "with open(...) 打开的 best_metrics.json 写入句柄；json.dump 将最佳模型的指标字典写入它，离开 with 时自动关闭文件。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "检查是否刷新 MAE",
+            "detail": "L294 用严格小于进行比较。"
+          },
+          {
+            "title": "更新内存摘要和最佳权重",
+            "detail": "L295–306 记录指标并深拷贝状态。"
+          },
+          {
+            "title": "写出最佳检查点与 JSON",
+            "detail": "L307–315 保存可恢复权重及易读的最佳指标摘要。"
+          },
+          {
+            "title": "尝试记录最佳指标",
+            "detail": "L317–321 把最佳值和轮次写入 MLflow，失败只警告。"
+          },
+          {
+            "title": "独立检查周期保存条件",
+            "detail": "L323–329 即使本轮没有刷新最佳，只要轮次为 10 的倍数也保存。"
+          }
+        ],
+        "returns": [
+          "None；更新 best_* 内存变量并写出权重文件。"
+        ],
+        "flow": {
+          "title": "最佳保存与周期保存是两个判断",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "本轮验证结束",
+              "detail": "取得 ev.mae、ev.loss 和 epoch",
+              "kind": "input"
+            },
+            {
+              "id": "best",
+              "title": "MAE 严格变小吗",
+              "detail": "与 best_mae 比较",
+              "kind": "decision"
+            },
+            {
+              "id": "save",
+              "title": "更新最佳记录",
+              "detail": "深拷贝状态并写 best.pth / JSON",
+              "kind": "process"
+            },
+            {
+              "id": "period",
+              "title": "epoch 能被 10 整除吗",
+              "detail": "独立于是否刷新最佳",
+              "kind": "decision"
+            },
+            {
+              "id": "snap",
+              "title": "保存周期检查点",
+              "detail": "写 epoch_N.pth",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "继续可视化与下一轮",
+              "detail": "训练不会因没有提升而停止",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "in",
+              "to": "best",
+              "label": ""
+            },
+            {
+              "from": "best",
+              "to": "save",
+              "label": "是"
+            },
+            {
+              "from": "best",
+              "to": "period",
+              "label": "否"
+            },
+            {
+              "from": "save",
+              "to": "period",
+              "label": ""
+            },
+            {
+              "from": "period",
+              "to": "snap",
+              "label": "是"
+            },
+            {
+              "from": "period",
+              "to": "out",
+              "label": "否"
+            },
+            {
+              "from": "snap",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "最佳检查点供模型选择；周期检查点保留不同训练阶段的状态。"
+        }
       },
       {
         "start": 331,
         "end": 352,
         "title": "可视化诊断：每个验证 batch 只取第一张",
         "principle": [
-          "代码最多遍历验证加载器的前 5 个 batch，并各取第 1 张图，因此最多保存 5 个代表样本。它们不是验证集中连续前 5 张，也不是随机抽取 5 张。",
-          "预测/真值叠加图帮助观察曲线偏移、交叉和缺失标注；热图帮助判断输出是一条清楚的峰还是多个模糊峰。数值平均误差可能掩盖局部失败，可视化提供另一种证据。"
+          "数值指标不能直接显示边界有没有整体偏移、交叉或局部异常，画图提供直观诊断。本段不重新训练，而是让当前模型对少量验证样本再次推理，并把预测与标签叠加到图上。",
+          "这里选择的是“前五个 batch 各取一张”，不是验证集前五张。当 batch_size=48 时，通常对应第 0、48、96、144、192 个条目；最后不足五批则实际更少。"
         ],
         "syntax": [
-          "enumerate(val_loader) 同时产生 batch 序号与 batch；idx>=5 时 break。",
-          "[:1] 保留批维，得到 [1,1,H,W]，而 [0] 会去掉批维；.cpu() 把张量带回 CPU 供绘图库使用。",
-          "out.get(\"heatmaps\",None) 在缺少键时返回 None；条件表达式只在热图存在时切片。"
+          "[:1] 是长度为 1 的切片，区别于 [0]：前者保留最外层 batch 维，后者会删除该维。",
+          "dict.get(\"heatmaps\",None) 在键不存在时返回 None，不抛 KeyError。表达式 A if heatmaps is not None else None 避免对 None 调用切片或 .cpu()。"
         ],
-        "shapes": "",
-        "pitfall": "固定少量可视化不能替代完整测试；同时它们受当前验证划分是否泄漏影响。保存图像时应注意原始医学数据授权，本学习网页不需要公开真实图像。",
-        "exercise": "batch_size=48 时，前五个 batch 的第一张在无打乱条件下对应哪些样本索引？",
-        "answer": "通常为 0、48、96、144、192；若数据集少于这些位置则实际更少。",
-        "diagram": "train"
+        "shapes": "batch 图像 [B,1,H,W] → 单图 [1,1,H,W]；标签和预测从 [B,L,W] 切为 [1,L,W]。",
+        "pitfall": "infer_lines 默认会对预测坐标做平滑，而验证指标直接使用模型输出，因此对照图中的线不必与 MAE 计算时逐点完全一致。可视化没有传 valid，无效列可能被画出；热图绘图函数又只接受二维坐标叠线，而此处传入三维 [1,L,W]，所以那份热图并未实际叠加边界。",
+        "summary": "每轮选取前五个验证 batch 的第一张图，生成预测与标签对照图及热图。",
+        "parameters": [
+          {
+            "name": "infer_lines.model / image",
+            "type": "nn.Module / Tensor",
+            "default": "当前 model / img",
+            "meaning": "用当前网络对选中图像推理。"
+          },
+          {
+            "name": "infer_lines.use_heatmap",
+            "type": "bool",
+            "default": "args.use_heatmap",
+            "meaning": "保留的推理接口参数；具体行为由 utils.py 定义。"
+          },
+          {
+            "name": "visualize_pred_gt.img_tensor / gt_y_px / pred_y_px",
+            "type": "CPU Tensor",
+            "default": "选中图像及两组坐标",
+            "meaning": "绘制标签与预测的并排/叠线对照。"
+          },
+          {
+            "name": "visualize_pred_gt.heatmaps",
+            "type": "Tensor 或 None",
+            "default": "存在则传入",
+            "meaning": "当前函数签名接收，但实际绘图逻辑未使用；本段传参不会因此自动绘制热图。"
+          },
+          {
+            "name": "save_path",
+            "type": "str",
+            "default": "包含 epoch 和 idx 的 PNG 路径",
+            "meaning": "防止不同轮次、不同 batch 的输出互相混淆。"
+          },
+          {
+            "name": "visualize_heatmaps.gt_y_px / pred_y_px",
+            "type": "CPU Tensor[1,L,W]",
+            "default": "标签 / 预测",
+            "meaning": "接口本来用于叠加坐标，但函数只对二维 [L,W] 进入画线分支；本次三维输入使曲线被跳过。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "idx",
+            "type": "int",
+            "meaning": "enumerate(val_loader) 的批次编号，从 0 开始；到 5 时 break。"
+          },
+          {
+            "name": "batch[\"image\"][:1]",
+            "type": "Tensor[1,1,H,W]",
+            "meaning": "只取本批第一张，保留 batch 维。"
+          },
+          {
+            "name": "out",
+            "type": "dict",
+            "meaning": "infer_lines 返回的 y_px 与 heatmaps 等信息。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "Tensor 或 None",
+            "meaning": "通过 out.get 安全取出，可视化前迁移到 CPU。"
+          },
+          {
+            "name": "save_path / heatmap_save_path",
+            "type": "str",
+            "meaning": "两类 PNG 的保存位置。"
+          },
+          {
+            "name": "batch[\"y_px\"][:1] / out[\"y_px\"][:1]",
+            "type": "Tensor[1,L,W]",
+            "meaning": "一张图的标签与推理后坐标。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "重新迭代验证加载器",
+            "detail": "L331–333 遍历批次，但只处理 idx=0 到 4。"
+          },
+          {
+            "title": "取第一张并推理",
+            "detail": "L334–337 保留 batch 维，获得坐标与可选热图。"
+          },
+          {
+            "title": "画标签/预测对照",
+            "detail": "L338–344 将图像、标签和预测转到 CPU 后交给绘图函数。"
+          },
+          {
+            "title": "有热图时另画热图",
+            "detail": "L345–352 生成原始热图评分可视化；传入的坐标因批维未去掉，未满足函数内部叠线条件。"
+          }
+        ],
+        "returns": [
+          "None；每轮最多输出五张预测对照 PNG 和五张热图 PNG。"
+        ]
       },
       {
         "start": 354,
         "end": 378,
         "title": "训练收尾：最佳权重导出和最终模型记录并不总是同一状态",
         "principle": [
-          "默认路径先把内存中的最佳 state_dict 加回模型，再调用 export_pte_model。导出函数会另外加载一个质量分类器，组合成边界坐标与质量类别的移动端推理模型。",
-          "--skip_export 跳过整个 else 区域，包括加载最佳权重。因此此时 best.pth 仍是最佳模型，但末尾 mlflow.pytorch.log_model(model) 记录的是最后一轮留在内存里的模型。两者不能默认等价。",
-          "artifacts 保存训练产物目录，finally 调用 end_run 收尾。但导出调用位于下面 try 之外，导出失败会直接中断到达 MLflow 收尾之前。"
+          "内存中的 model 在训练刚结束时通常是最后一轮状态，最佳状态保存在 best_state_dict。只有不跳过导出时，代码才先把最佳状态加载回 model，再交给导出模块。",
+          "因此最终 MLflow 记录的 model 取决于这条分支：正常导出路径已切换为最佳权重；--skip_export 路径保留最后一轮权重。磁盘 best.pth 仍然是按 MAE 保存的最佳版本，两者不能混为一谈。",
+          "导出器有独立依赖和质量模型路径，它并非训练计算所必需，所以导入放在训练之后、需要导出时才执行。"
         ],
         "syntax": [
-          "model.load_state_dict(best_state_dict) 把快照写回现有模块并返回加载状态。from LineDet.export import ... 放在分支内，避免 skip_export 时导入 ExecuTorch。",
-          "os.path.isdir / isfile 检查产物是否存在；try/except/finally 中 finally 在这个 try 被进入后无论成功失败都会执行。"
+          "os.path.isdir / isfile 分别检测目录与普通文件。from LineDet.export import ... 放在分支内部属于延迟导入，未走该分支时不会加载模块。",
+          "finally 保证在进入对应 try 后的正常返回或异常路径上执行；它的保护范围仅是 L366 开始的 try，并不覆盖前面的导出调用。"
         ],
-        "shapes": "",
-        "pitfall": "本地固定的外部质量权重路径可能不存在；训练成功不保证导出成功。当前 PTE 运行检查只打印输出形状和 dtype，并没有与 PyTorch 数值比较。",
-        "exercise": "使用 --skip_export 后，MLflow 模型与 best.pth 是否一定一致？",
-        "answer": "不一定。skip_export 也跳过加载最佳权重，MLflow 记录的可能是最后一轮模型。",
-        "diagram": "export"
+        "shapes": "保存/导出使用与当前模型一致的参数形状；img_size 仍是 (W,H)。导出器决定实际输入张量与输出契约。",
+        "pitfall": "导出调用在 MLflow 的 try/except/finally 之前，若导出抛异常，下面的 end_run 不会通过该 finally 被执行。若从未出现有效最佳 MAE，best_state_dict 为 None，加载也会失败。",
+        "summary": "训练结束后按配置导出最佳模型，再记录文件与当前内存模型并结束 MLflow 运行。",
+        "parameters": [
+          {
+            "name": "model.load_state_dict.state_dict",
+            "type": "状态字典",
+            "default": "best_state_dict",
+            "meaning": "把最佳参数和缓冲区覆盖到当前模型，默认严格检查键是否匹配。"
+          },
+          {
+            "name": "export_pte_model.line_model / save_path / img_size",
+            "type": "模型 / 路径 / 尺寸",
+            "default": "model / args.save_dir / args.img_size",
+            "meaning": "交给导出模块封装网络、转换并验证端侧执行。"
+          },
+          {
+            "name": "mlflow.log_artifacts.local_dir",
+            "type": "str",
+            "default": "args.save_dir 或 log_dir",
+            "meaning": "递归记录目录内产物。"
+          },
+          {
+            "name": "mlflow.log_artifact.artifact_path",
+            "type": "str",
+            "default": "exports",
+            "meaning": "把存在的 best.pte 额外归到 exports 目录。"
+          },
+          {
+            "name": "mlflow.pytorch.log_model.artifact_path",
+            "type": "str",
+            "default": "pytorch-model",
+            "meaning": "模型产物在当前 run 中的名称。"
+          },
+          {
+            "name": "mlflow.pytorch.log_model.registered_model_name",
+            "type": "str",
+            "default": "LineDet",
+            "meaning": "尝试向 MLflow 模型注册表登记该名称。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "args.skip_export",
+            "type": "bool",
+            "meaning": "决定是否跳过加载最佳状态与导出调用。"
+          },
+          {
+            "name": "best_mae / best_epoch",
+            "type": "float / int",
+            "meaning": "前面循环维护的最佳指标与对应轮次。"
+          },
+          {
+            "name": "best_pte",
+            "type": "str",
+            "meaning": "save_dir/best.pte 的预期路径，存在才单独记录。"
+          },
+          {
+            "name": "model.load_state_dict(...) 返回值",
+            "type": "状态加载结果",
+            "meaning": "打印缺失键/多余键等加载信息；严格不匹配时通常直接抛异常。"
+          },
+          {
+            "name": "e",
+            "type": "Exception",
+            "meaning": "仅捕获文件/模型记录块中的异常。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "打印训练摘要",
+            "detail": "L354–356 展示最佳 MAE 与轮次。"
+          },
+          {
+            "title": "按开关决定是否导出",
+            "detail": "L358–364 跳过时只打印信息，否则恢复最佳权重并调用导出函数。"
+          },
+          {
+            "title": "记录产物文件",
+            "detail": "L367–373 检查目录/文件存在后调用 MLflow。"
+          },
+          {
+            "title": "记录当前模型对象",
+            "detail": "L374 保存当下内存中的 model；其状态受导出分支影响。"
+          },
+          {
+            "title": "完成记录收尾",
+            "detail": "L375–378 捕获记录异常，finally 无论该记录块是否失败都 end_run。"
+          }
+        ],
+        "returns": [
+          "main 返回 None；可留下 best.pte、运行检查输出与 MLflow 产物。"
+        ],
+        "flow": {
+          "title": "训练结束后的模型状态变化",
+          "nodes": [
+            {
+              "id": "last",
+              "title": "训练循环结束",
+              "detail": "model 仍是最后一轮状态",
+              "kind": "input"
+            },
+            {
+              "id": "skip",
+              "title": "是否 --skip_export",
+              "detail": "决定是否进入导出路径",
+              "kind": "decision"
+            },
+            {
+              "id": "load",
+              "title": "加载最佳权重",
+              "detail": "model.load_state_dict(best_state_dict)",
+              "kind": "process"
+            },
+            {
+              "id": "export",
+              "title": "导出 PTE",
+              "detail": "封装、转换、运行检查",
+              "kind": "process"
+            },
+            {
+              "id": "log",
+              "title": "记录当前模型与文件",
+              "detail": "此时模型可能是最佳或最后一轮",
+              "kind": "process"
+            },
+            {
+              "id": "end",
+              "title": "结束 MLflow run",
+              "detail": "记录块的 finally 调用 end_run",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "last",
+              "to": "skip",
+              "label": ""
+            },
+            {
+              "from": "skip",
+              "to": "log",
+              "label": "是：保留最后一轮"
+            },
+            {
+              "from": "skip",
+              "to": "load",
+              "label": "否"
+            },
+            {
+              "from": "load",
+              "to": "export",
+              "label": ""
+            },
+            {
+              "from": "export",
+              "to": "log",
+              "label": ""
+            },
+            {
+              "from": "log",
+              "to": "end",
+              "label": ""
+            }
+          ],
+          "caption": "图示是正常完成的执行路径；导出异常会在进入最后的记录块前中断。"
+        }
       },
       {
         "start": 381,
         "end": 382,
         "title": "程序入口：作为脚本运行才启动训练",
         "principle": [
-          "这个保护使 import main 时可以复用指标或辅助函数，而不自动开始耗时训练。直接 python main.py 时 __name__ 为 __main__，条件成立。"
+          "Python 在加载模块时会执行顶层语句。若直接在顶层无条件 main()，任何为了复用指标函数而导入该文件的代码都会开始训练。入口条件把“定义工具”和“启动任务”分开。"
         ],
         "syntax": [
-          "__name__ 是 Python 为模块设置的特殊全局变量；两个等号表示比较，一个等号表示赋值。",
-          "Windows 多进程数据加载也依赖合理的入口保护，避免子进程导入主模块时重复启动顶层训练。"
+          "双下划线名称 __name__ 由 Python 设置；字符串比较使用 ==。缩进表示 main() 属于 if 的分支。"
         ],
-        "shapes": "",
-        "pitfall": "",
-        "exercise": "在另一个文件写 from main import parse_img_size，会立刻训练吗？",
-        "answer": "不会。函数与导入语句会被定义/执行，但入口条件不成立，main() 不会被调用。",
-        "diagram": "train"
+        "shapes": "不处理张量；决定是否启动整个训练流程。",
+        "pitfall": "入口保护不会避免导入时执行顶部 import；如果环境缺少依赖，单纯 import main 仍可能失败。",
+        "summary": "只在文件作为脚本直接运行时调用 main，供其他模块安全导入函数。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "__name__",
+            "type": "str",
+            "meaning": "直接执行 python main.py 时为 \"__main__\"；被 import 时为模块名称。"
+          },
+          {
+            "name": "main",
+            "type": "无参数函数",
+            "meaning": "从解析命令行到训练、保存和导出的总调度函数。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "判断运行身份",
+            "detail": "L381 比较 __name__ 是否为 __main__。"
+          },
+          {
+            "title": "启动训练入口",
+            "detail": "L382 条件为真才调用 main()。"
+          }
+        ],
+        "returns": [
+          "入口语句无返回值；main 正常结束后进程结束。"
+        ]
       }
-    ]
+    ],
+    "role": "单次训练的实际主入口；run_dual_split.sh 会分别以 train100 和 train90 调用它两次。",
+    "inputs": [
+      "命令行参数 args：输入尺寸、骨干、训练轮数、批大小、学习率、设备、数据根目录和划分协议等。",
+      "LineDataset 提供单样本字典；DataLoader 将其堆为 batch，主要字段为 image、y_px、valid 和 heatmaps。",
+      "train90 还需要预先生成的划分目录，其中含 meta.json、train.jsonl 和 val.jsonl；本文件不会生成这些清单。"
+    ],
+    "outputs": [
+      "save_dir/split_summary.json：数据条目数、原图去重数量和训练/验证原图交集。",
+      "best.pth、best_metrics.json：按验证 MAE 选择的最佳权重和指标；每 10 轮另存 epoch_N.pth。",
+      "log/ 中的预测与标签对照图、热图；未启用 --skip_export 时尝试生成 best.pte。",
+      "函数返回值包括一轮训练平均损失和一轮验证指标字典；main 本身返回 None。"
+    ],
+    "readingGuide": [
+      "先看 main 的配置和对象构造，知道四个对象 Dataset、DataLoader、model、loss_fn 各自负责什么；再进入 train_one_epoch 和 eval_one_epoch 阅读一批数据。",
+      "模型结构在 LineDet/model/model.py，标签转换在 LineDet/dataset/，损失组合在 LineDet/loss.py。这里调用它们，不重新实现它们。",
+      "main 没有学习率调度器、混合精度或提前停止；AdamW 使用同一个配置学习率跑满 epochs。不要把常见训练模板里的功能想当然地加到本项目中。",
+      "验证 MAE 使用 valid；A@阈值和当前 HD/HD95 没有使用 valid。评估数值以缩放后的输入图像像素为单位，不能直接当成原图像素或毫米。"
+    ],
+    "components": [
+      {
+        "name": "set_global_seed",
+        "kind": "函数",
+        "summary": "同时设置 Python、NumPy、PyTorch 随机源和 cuDNN 策略，为初始化、采样和增强提供可复现基础。",
+        "segmentStart": 23
+      },
+      {
+        "name": "write_split_summary",
+        "kind": "函数",
+        "summary": "把 Dataset 条目映射回原图路径、去重并统计交集，检查两组数据是否共用源图。",
+        "segmentStart": 33
+      },
+      {
+        "name": "threshold_accuracy",
+        "kind": "函数",
+        "summary": "统计逐列坐标误差不超过 2、3、5 像素的比例，返回百分数字典。",
+        "segmentStart": 50
+      },
+      {
+        "name": "hausdorff_distance",
+        "kind": "函数",
+        "summary": "按每张图、每条线计算两组高度值的最近邻距离，再汇总最大距离和分位数。",
+        "segmentStart": 60
+      },
+      {
+        "name": "train_one_epoch",
+        "kind": "函数",
+        "summary": "逐批清梯度、前向、计算总损失、反向、裁剪梯度和更新权重。",
+        "segmentStart": 85
+      },
+      {
+        "name": "eval_one_epoch",
+        "kind": "函数",
+        "summary": "在 eval 与 no_grad 状态下逐批计算损失和指标，返回批次平均值。",
+        "segmentStart": 115
+      },
+      {
+        "name": "parse_img_size",
+        "kind": "函数",
+        "summary": "把命令行的 256 或 W,H 转成尺寸二元组，供 Dataset 和导出器使用。",
+        "segmentStart": 157
+      },
+      {
+        "name": "main",
+        "kind": "函数",
+        "summary": "解析配置、建立各模块，组织完整 epoch 循环与保存、可视化、导出流程。",
+        "segmentStart": 167
+      }
+    ],
+    "pipeline": {
+      "title": "一次训练任务的完整调用链",
+      "nodes": [
+        {
+          "id": "args",
+          "title": "读取配置",
+          "detail": "解析尺寸、检查划分协议、固定随机种子",
+          "kind": "input"
+        },
+        {
+          "id": "data",
+          "title": "建立数据接口",
+          "detail": "Dataset → DataLoader，并写划分审计",
+          "kind": "process"
+        },
+        {
+          "id": "model",
+          "title": "建立训练对象",
+          "detail": "网络 + 复合损失 + AdamW",
+          "kind": "process"
+        },
+        {
+          "id": "train",
+          "title": "训练一轮",
+          "detail": "前向 → 总损失 → 反向 → 更新",
+          "kind": "process"
+        },
+        {
+          "id": "eval",
+          "title": "验证一轮",
+          "detail": "禁用求导，计算坐标误差和其他指标",
+          "kind": "process"
+        },
+        {
+          "id": "metrics",
+          "title": "记录本轮指标",
+          "detail": "终端表格与 MLflow 标量日志",
+          "kind": "process"
+        },
+        {
+          "id": "best",
+          "title": "MAE 是否更小",
+          "detail": "与此前最佳验证 MAE 比较",
+          "kind": "decision"
+        },
+        {
+          "id": "save",
+          "title": "保存最佳模型",
+          "detail": "深拷贝权重，并写 best.pth 和指标",
+          "kind": "process"
+        },
+        {
+          "id": "record",
+          "title": "周期保存与画图",
+          "detail": "每10轮快照、验证对照图",
+          "kind": "process"
+        },
+        {
+          "id": "more",
+          "title": "还有训练轮次吗",
+          "detail": "epoch 从 1 遍历到 epochs",
+          "kind": "decision"
+        },
+        {
+          "id": "export",
+          "title": "是否跳过导出",
+          "detail": "--skip_export 决定是否加载最佳权重",
+          "kind": "decision"
+        },
+        {
+          "id": "pte",
+          "title": "导出并检查运行",
+          "detail": "调用 export_pte_model",
+          "kind": "process"
+        },
+        {
+          "id": "end",
+          "title": "记录最终产物",
+          "detail": "保存 MLflow 产物并结束 run",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "args",
+          "to": "data",
+          "label": ""
+        },
+        {
+          "from": "data",
+          "to": "model",
+          "label": ""
+        },
+        {
+          "from": "model",
+          "to": "train",
+          "label": ""
+        },
+        {
+          "from": "train",
+          "to": "eval",
+          "label": ""
+        },
+        {
+          "from": "eval",
+          "to": "metrics",
+          "label": ""
+        },
+        {
+          "from": "metrics",
+          "to": "best",
+          "label": ""
+        },
+        {
+          "from": "best",
+          "to": "save",
+          "label": "是"
+        },
+        {
+          "from": "best",
+          "to": "record",
+          "label": "否"
+        },
+        {
+          "from": "save",
+          "to": "record",
+          "label": ""
+        },
+        {
+          "from": "record",
+          "to": "more",
+          "label": ""
+        },
+        {
+          "from": "more",
+          "to": "train",
+          "label": "是"
+        },
+        {
+          "from": "more",
+          "to": "export",
+          "label": "否"
+        },
+        {
+          "from": "export",
+          "to": "end",
+          "label": "跳过"
+        },
+        {
+          "from": "export",
+          "to": "pte",
+          "label": "不跳过"
+        },
+        {
+          "from": "pte",
+          "to": "end",
+          "label": ""
+        }
+      ],
+      "caption": "验证只测量，不更新参数。best 分支由验证 MAE 决定；周期保存与最佳保存是独立条件。"
+    }
   },
   {
     "path": "run_dual_split.sh",
-    "title": "双协议实验脚本：同配置顺序训练并保存审计材料",
-    "overview": "Bash 脚本把同一组模型参数分别用于 train100 和 train90，并为代码、清单、日志和产物建立独立目录。它负责实验管理，不执行神经网络计算；此处“对照”比较的是两套数据与验证协议，不能当作同一独立测试集上的公平模型竞赛。",
+    "title": "双协议实验调度：顺序启动、留档与汇总",
+    "overview": "run_dual_split.sh 是 Bash 实验调度脚本。它接收任务名、数据根目录、固定划分清单目录，以及一组交给 main.py 的训练参数。脚本先组织输出目录、提醒检查清单并备份代码和清单，然后先运行 train100，再运行 train90，最后收集两份最佳指标生成 comparison.json。它不实现网络训练，也不会自动重建划分清单；实际训练交给 Python 主程序。",
     "segments": [
       {
         "start": 1,
         "end": 17,
         "title": "严格 Shell 模式与参数边界",
         "principle": [
-          "调用约定是任务名、数据根目录、清单目录、分隔符 --，其后全部原样交给 main.py。这样脚本自己的参数与 Python 训练参数分开。",
-          "set -euo pipefail 使未处理的失败、未设置变量和管道内部失败更容易使脚本停止，避免失败实验继续伪装为完成。"
+          "脚本自身需要任务名和两条目录路径，main.py 又需要一组可变长度参数。通过 -- 规定接口边界，Shell 先消费自己的参数，剩下的 \"$@\" 就能原样传给训练程序。",
+          "set -euo pipefail 提高错误可见性：多数未处理的非零退出会终止脚本，未定义变量报错，管道中前序命令失败也会影响管道状态。但 Bash 在条件判断等语境有例外，不能把它理解为对所有错误的完整异常系统。"
         ],
         "syntax": [
-          "$# 是参数数量，$1/$2/$3 是前三个参数；shift 3 丢弃前三个，后续 $1 就是原来的第四个。",
-          "${1:-} 在第一个参数不存在时返回空字符串，配合 -u 防止直接读取未设置变量。[[ ... ]] 是 Bash 条件语法。",
-          ">&2 把用法错误写到标准错误；exit 2 返回失败退出码。"
+          "#!/usr/bin/env bash 是 shebang，供系统选择 Bash。set -euo pipefail 中 -e 是错误退出、-u 是未定义变量检查、-o pipefail 是管道状态规则。",
+          "[[ ... ]] 是 Bash 条件语法；-lt 表示整数小于；!= 比较字符串。>&2 把输出重定向到标准错误。",
+          "shift 3 将原 $4 变为新 $1；最后的 shift 默认为 shift 1。后续 \"$@\" 会逐个保留各参数边界。"
         ],
-        "shapes": "",
-        "pitfall": "脚本依赖 Bash，并使用进程替换与 GNU date 等行为；不能直接当成 PowerShell 脚本运行。",
-        "exercise": "为什么检查 -- 后还要再 shift 一次？",
-        "answer": "把分隔符本身移出参数列表，保证 \"$@\" 只包含要转发给 main.py 的选项。",
-        "diagram": "train"
+        "shapes": "可变长 Shell 参数列表 → 三个具名变量 + 剩余 main.py 参数列表。",
+        "pitfall": "这是 Bash 语法，不能直接当成 PowerShell 或纯 POSIX sh 脚本执行。-- 是本调度脚本自己的分隔符，检查后会被消费，不会原样交给 main.py。",
+        "summary": "开启 Bash 严格模式，读取三个实验参数，并用 -- 明确划开训练参数的边界。",
+        "parameters": [
+          {
+            "name": "$1 / TASK_NAME",
+            "type": "位置参数字符串",
+            "default": "必填",
+            "meaning": "实验任务名，用于输出目录与摘要。"
+          },
+          {
+            "name": "$2 / DATA_ROOT",
+            "type": "位置参数路径",
+            "default": "必填",
+            "meaning": "图像与标注数据根目录。"
+          },
+          {
+            "name": "$3 / MANIFEST_DIR",
+            "type": "位置参数路径",
+            "default": "必填",
+            "meaning": "固定 train/val 清单目录。"
+          },
+          {
+            "name": "$4 / --",
+            "type": "分隔符",
+            "default": "必填",
+            "meaning": "标记剩余参数都属于 main.py。"
+          },
+          {
+            "name": "其余 \"$@\"",
+            "type": "参数列表",
+            "default": "可为空",
+            "meaning": "后续透传的训练命令行参数。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "$#",
+            "type": "int",
+            "meaning": "当前 Shell 位置参数数量。"
+          },
+          {
+            "name": "$0",
+            "type": "str",
+            "meaning": "脚本被调用时的名称，用于用法提示。"
+          },
+          {
+            "name": "TASK_NAME / DATA_ROOT / MANIFEST_DIR",
+            "type": "Shell 字符串变量",
+            "meaning": "保存前三个位置参数，之后 shift 不会改变这些已赋值变量。"
+          },
+          {
+            "name": "${1:-}",
+            "type": "str",
+            "meaning": "安全读取当前第一个位置参数；不存在时给空字符串，避免 set -u 报错。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "指定解释器与严格选项",
+            "detail": "L1–2 通过 env 查找 bash，开启 e、u、pipefail。"
+          },
+          {
+            "title": "检查最少参数数目",
+            "detail": "L4–7 不足四个时写错误到标准错误并 exit 2。"
+          },
+          {
+            "title": "保存三项入口参数",
+            "detail": "L9–12 赋值后 shift 3 消耗它们。"
+          },
+          {
+            "title": "检查并消费分隔符",
+            "detail": "L13–17 要求当前 $1 为 --，成功后再 shift。"
+          }
+        ],
+        "returns": [
+          "合法时继续执行；非法时以退出码 2 结束。"
+        ]
       },
       {
         "start": 19,
         "end": 29,
         "title": "实验目录与环境变量默认值",
         "principle": [
-          "通过脚本所在目录定位项目，避免从任意工作目录启动时找不到 main.py。时间戳和任务名构成默认实验目录，两种划分的权重不会互相覆盖。",
-          "SAVE_DIR、PYTHON_BIN、SEED 可由外部环境覆盖，使同一脚本适配不同存储位置和 Python 环境。"
+          "从脚本所在位置计算 PROJECT_ROOT，可以让用户在别的工作目录调用脚本，仍然找到 main.py 和 LineDet。RUN_ROOT 默认含任务名和时间戳，避免不同实验产物混在同一个目录。",
+          "${变量:-默认值} 表示只有环境变量未设置或为空时才取默认值，因此 SAVE_DIR、PYTHON_BIN、SEED 都可以由调用者在启动前覆盖。"
         ],
         "syntax": [
-          "$(...) 是命令替换；${BASH_SOURCE[0]} 指向脚本文件；dirname 提取父目录。",
-          "${TASK_NAME//\\//_} 将任务名中的斜杠替换为下划线；${VAR:-fallback} 在变量为空或未设置时采用默认值。",
-          "双引号保护带空格或中文路径，防止 Shell 将一个路径拆成多个参数。"
+          "$(...) 执行括号内命令并用其标准输出替换表达式；内层 dirname 先取目录，外层 cd && pwd 再得到绝对路径。",
+          "${TASK_NAME//\\//_} 是 Bash 全部替换表达式，把 / 替换为 _。双引号保护带空格或中文的路径不被拆成多个参数。"
         ],
-        "shapes": "",
-        "pitfall": "如果手动复用 SAVE_DIR，现有产物可能被覆盖；默认时间戳目录能减少此风险，但没有拒绝覆盖的专门检查。",
-        "exercise": "如何在不改脚本的情况下换 Python 解释器？",
-        "answer": "在 Bash 设置 PYTHON_BIN 指向所需环境的 python，再运行脚本。",
-        "diagram": "train"
+        "shapes": "全部为 Shell 字符串，不涉及图像或张量。",
+        "pitfall": "只替换正斜杠不是完整文件名清洗。若手动重复使用同一个 SAVE_DIR，mkdir -p 不会清空旧内容，新旧产物可能共存。",
+        "summary": "以脚本自身所在目录为项目根，确定本次实验的各输出路径及可覆盖的环境配置。",
+        "parameters": [
+          {
+            "name": "SAVE_DIR",
+            "type": "环境变量路径",
+            "default": "项目根/runs/compare_任务_时间",
+            "meaning": "存在且非空时直接作为整个双协议实验的根目录。"
+          },
+          {
+            "name": "PYTHON_BIN",
+            "type": "环境变量字符串",
+            "default": "python",
+            "meaning": "训练和汇总使用的 Python 程序，可以是虚拟环境可执行文件路径。"
+          },
+          {
+            "name": "SEED",
+            "type": "环境变量字符串",
+            "default": "20260925",
+            "meaning": "同时传给两次 main.py 的随机种子。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "BASH_SOURCE[0]",
+            "type": "str",
+            "meaning": "当前脚本文件路径，比调用时工作目录更适合定位脚本资源。"
+          },
+          {
+            "name": "PROJECT_ROOT",
+            "type": "绝对路径字符串",
+            "meaning": "进入脚本目录后用 pwd 得到。"
+          },
+          {
+            "name": "TIMESTAMP",
+            "type": "str",
+            "meaning": "date 格式 YYYYMMDD_HHMMSS，用于实验目录命名。"
+          },
+          {
+            "name": "SAFE_TASK",
+            "type": "str",
+            "meaning": "把 TASK_NAME 中所有正斜杠替换为下划线，减少路径层级歧义。"
+          },
+          {
+            "name": "RUN_ROOT",
+            "type": "str",
+            "meaning": "整个对比实验的根目录。"
+          },
+          {
+            "name": "TRAIN100_DIR / TRAIN90_DIR",
+            "type": "str",
+            "meaning": "两个协议分别的产物目录。"
+          },
+          {
+            "name": "BACKUP_DIR / SNAPSHOT_DIR",
+            "type": "str",
+            "meaning": "代码备份与划分清单快照目录。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "定位项目目录",
+            "detail": "L19–20 在命令替换的子 Shell 中取得脚本目录绝对路径，再切换主脚本工作目录。"
+          },
+          {
+            "title": "命名本次运行",
+            "detail": "L21–23 生成时间戳，处理任务名中的斜杠，选择输出根目录。"
+          },
+          {
+            "title": "划分产物子目录",
+            "detail": "L24–27 组成两个训练目录和两类快照目录。"
+          },
+          {
+            "title": "读取可覆盖环境变量",
+            "detail": "L28–29 确定 Python 可执行程序及种子。"
+          }
+        ],
+        "returns": [
+          "本段不返回；给后续函数和命令建立路径变量。"
+        ]
       },
       {
         "start": 31,
         "end": 81,
         "title": "清单更新提示：告知人工责任，不自动重新切分",
         "principle": [
-          "这段函数在训练前展示当前数据与清单路径，并打印重新生成清单的命令。目的在于提醒数据增删后不要继续使用过时清单。",
-          "有交互终端时显示颜色并暂停 5 秒；非交互输出不暂停。提示本身没有读取用户确认，也不会自动执行打印出的 --force 命令。"
+          "固定划分清单是比较实验的依据；如果数据发生变化，旧清单可能不再对应当前数据。因此脚本把提醒放在训练前，并打印包含当前路径、种子和验证比例的重建命令，方便人工核对。",
+          "整个函数只负责显示。printf 打印 generate_group_split.py 命令，不会执行这条命令；交互终端的倒计时结束后自动继续，并没有 read 输入或确认逻辑。"
         ],
         "syntax": [
-          "local 定义函数局部变量；[[ -t 1 ]] 判断标准输出是否为终端。",
-          "$'...' 解析 ANSI 转义；printf %q 输出适合 Shell 再输入的转义形式；for seconds in 5 4 3 2 1 是倒计时循环。"
+          "local 将变量限制在函数作用域。$'...' 是 Bash ANSI-C 字符串，可以解释 \\033 这样的转义。",
+          "printf %b 会解释反斜杠转义；%s 按普通字符串输出；%q 生成 Shell 转义形式。行末反斜杠表示命令跨到下一行继续。",
+          "\\r 是回到行首，%*s 用前一个参数控制字段宽度，配合空字符串打印空白覆盖旧行。"
         ],
-        "shapes": "",
-        "pitfall": "“提醒”不等于验证数据未变化。清单存在只证明文件在，后续实际校验由 Python 数据清单加载器完成，内容被替换为不同图像的情况仍需额外审计。",
-        "exercise": "看到脚本打印 --force，就意味着清单已被重写了吗？",
-        "answer": "没有。这里只打印命令，没有执行 generate_group_split.py。",
-        "diagram": "split"
+        "shapes": "输入为路径/配置字符串，输出为终端文本。",
+        "pitfall": "这是提醒，不是自动的数据变化检测或人工确认。非交互日志环境会跳过倒计时，但仍继续训练；是否更新清单取决于实际维护流程。",
+        "summary": "显示划分清单维护提醒和重建命令，在交互终端短暂停留后继续。",
+        "parameters": [
+          {
+            "name": "函数位置参数",
+            "type": "无",
+            "default": "无",
+            "meaning": "该函数不接收自己的位置参数；读取外层 Shell 变量。"
+          },
+          {
+            "name": "printf 的 %q",
+            "type": "Shell 格式规则",
+            "default": "用于打印命令参数",
+            "meaning": "按可供 Shell 再解释的形式转义参数，让包含空格的路径更易复制。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "manifest_name",
+            "type": "local str",
+            "meaning": "basename MANIFEST_DIR，只取清单目录末级名称，作为显示命令的 --name。"
+          },
+          {
+            "name": "red / yellow / bold / reset",
+            "type": "local str",
+            "meaning": "交互终端时保存 ANSI 颜色/粗体/复位控制码，否则为空。"
+          },
+          {
+            "name": "-t 1",
+            "type": "条件测试",
+            "meaning": "检查标准输出是否连接终端，用于决定颜色和倒计时。"
+          },
+          {
+            "name": "seconds",
+            "type": "循环变量",
+            "meaning": "依次为 5、4、3、2、1；每次 sleep 1。"
+          },
+          {
+            "name": "PROJECT_ROOT / PYTHON_BIN / DATA_ROOT / MANIFEST_DIR / SEED",
+            "type": "外层变量",
+            "meaning": "用于打印准确的当前任务与建议重建命令。"
+          },
+          {
+            "name": "--val-ratio / --force",
+            "type": "打印出的命令选项",
+            "meaning": "建议按 0.1 比例重建验证组并允许覆盖输出；这里没有实际执行这些选项。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "准备本地显示变量",
+            "detail": "L32–38 声明 local 变量，取清单末级目录名。"
+          },
+          {
+            "title": "按终端能力设置颜色",
+            "detail": "L39–44 标准输出是终端才填入转义序列。"
+          },
+          {
+            "title": "显示当前配置与重建命令",
+            "detail": "L46–70 打印警示、路径和参数；没有运行 Python。"
+          },
+          {
+            "title": "交互终端短暂停留",
+            "detail": "L72–78 倒数五次，每次一秒，之后清除倒计时行。"
+          },
+          {
+            "title": "调用提醒函数",
+            "detail": "L81 在声明完成后实际执行一次。"
+          }
+        ],
+        "returns": [
+          "函数正常结束通常返回最后执行命令的状态；主要副作用是显示文本与可选的五秒等待。"
+        ],
+        "flow": {
+          "title": "提醒函数实际做了什么",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "读取任务与清单路径",
+              "detail": "函数使用外层配置",
+              "kind": "input"
+            },
+            {
+              "id": "tty",
+              "title": "标准输出是终端吗",
+              "detail": "检测 -t 1",
+              "kind": "decision"
+            },
+            {
+              "id": "color",
+              "title": "启用颜色",
+              "detail": "准备 ANSI 控制字符串",
+              "kind": "process"
+            },
+            {
+              "id": "print",
+              "title": "打印提醒与重建命令",
+              "detail": "只输出文字",
+              "kind": "process"
+            },
+            {
+              "id": "wait",
+              "title": "终端模式倒数五秒",
+              "detail": "没有等待用户输入",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回主脚本",
+              "detail": "继续检查文件并启动训练",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "in",
+              "to": "tty",
+              "label": ""
+            },
+            {
+              "from": "tty",
+              "to": "color",
+              "label": "是"
+            },
+            {
+              "from": "tty",
+              "to": "print",
+              "label": "否"
+            },
+            {
+              "from": "color",
+              "to": "print",
+              "label": ""
+            },
+            {
+              "from": "print",
+              "to": "wait",
+              "label": "终端模式"
+            },
+            {
+              "from": "print",
+              "to": "out",
+              "label": "非终端"
+            },
+            {
+              "from": "wait",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "显示出来的 --force 命令并未自动运行；它也不构成对清单内容的校验。"
+        }
       },
       {
         "start": 83,
         "end": 102,
         "title": "快照与训练信息：建立可回溯实验材料",
         "principle": [
-          "先检查 meta.json、train.jsonl、val.jsonl 是否齐全，再建立输出和备份目录。源码及清单快照可帮助解释某次实验究竟使用什么版本。",
-          "training_info.txt 记录启动时间、任务、路径、种子和完整训练参数，补充仅靠权重无法还原的实验上下文。"
+          "为了事后解释结果，除了权重还需要知道当时用的代码和划分。这里把源码和清单复制到实验目录，并记录任务名、路径、种子及额外参数，形成可追溯材料。",
+          "文件存在性检查只证明三个预期文件在目录中；它不证明内容合法、组间无交叉或与最新数据一致。更详细的清单检查在 Python 数据加载模块中完成。"
         ],
         "syntax": [
-          "[[ ! -f ... || ... ]] 表示任一必需文件不存在；mkdir -p 会创建父目录并允许已有目录。",
-          "cp -a 保留尽可能多的文件属性并复制目录；2>/dev/null || true 忽略第一条备份命令的错误，其他复制失败仍会影响严格模式。",
-          "{ ...; } > file 将一组命令的输出共同重定向到一个文件；\"$@\" 保留每个参数的原始边界。"
+          "[[ ! -f path || ... ]] 表示只要有一个文件不存在即为真。",
+          "cp 源目录/. 目标目录 表示复制源目录的内容，包括隐藏项；这里给清单留档。",
+          "2>/dev/null 抛弃标准错误；|| true 把前一条命令的失败转成可继续的成功结果。大括号 { ...; } 将多个命令归为同一重定向组。"
         ],
-        "shapes": "",
-        "pitfall": "当前 run_version 接收的是 MANIFEST_DIR，未改为 SNAPSHOT_DIR，所以实际训练读取原清单路径。快照建立后若原清单被外部修改，实验可能偏离快照；现存日志中的 snapshot 路径是历史运行证据，不能反推当前脚本已冻结读取路径。",
-        "exercise": "怎样让实际训练严格读取刚保存的清单快照？",
-        "answer": "在 train90 调用中把 --split_manifest 指向 SNAPSHOT_DIR，并记录该路径；同时保留原始来源信息。",
-        "diagram": "split"
+        "shapes": "输入为文件与目录；输出为多个文件快照和一个文本配置记录。",
+        "pitfall": "L89 的复制错误被隐藏并容错，不能据此保证备份完整。备份整个 LineDet 可能包含缓存等额外文件；运行信息没有记录完整依赖版本或每个源码的哈希。",
+        "summary": "检查清单文件是否齐全，为两组实验建立目录，并保存代码、清单和启动配置。",
+        "parameters": [
+          {
+            "name": "mkdir -p",
+            "type": "Shell 命令选项",
+            "default": "对四个输出目录执行",
+            "meaning": "递归创建缺失目录，已有目录视为正常。"
+          },
+          {
+            "name": "cp -a",
+            "type": "Shell 命令选项",
+            "default": "代码与清单复制",
+            "meaning": "以归档方式复制，尽量保留文件属性并递归复制目录。"
+          },
+          {
+            "name": "输出重定向 >",
+            "type": "Shell 操作",
+            "default": "training_info.txt",
+            "meaning": "把大括号代码组的标准输出一次写入运行信息文件，覆盖旧同名文件。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "MANIFEST_DIR/meta.json / train.jsonl / val.jsonl",
+            "type": "文件路径",
+            "meaning": "三个必需清单文件，任意一个缺失即 exit 2。"
+          },
+          {
+            "name": "BACKUP_DIR",
+            "type": "路径",
+            "meaning": "存放项目根目录 Python/Shell 文件和完整 LineDet 目录。"
+          },
+          {
+            "name": "SNAPSHOT_DIR",
+            "type": "路径",
+            "meaning": "保存清单目录当前内容。"
+          },
+          {
+            "name": "training_info.txt",
+            "type": "文本文件",
+            "meaning": "包括开始时间、任务名、数据路径、清单路径、种子与转义后的 main_args。"
+          },
+          {
+            "name": "\"$@\"",
+            "type": "参数列表",
+            "meaning": "尚未消费的全部训练参数，使用 %q 记录其边界。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "检查清单存在",
+            "detail": "L83–86 用三个 -f 测试和逻辑或检查，缺任意文件就退出。"
+          },
+          {
+            "title": "创建目录并复制源码",
+            "detail": "L88–90 建目录，先复制根目录文件，再复制 LineDet。"
+          },
+          {
+            "title": "复制清单快照",
+            "detail": "L91 将 MANIFEST_DIR 内部内容复制到快照目录。"
+          },
+          {
+            "title": "写运行信息",
+            "detail": "L93–102 将一组 echo/printf 输出写入 training_info.txt。"
+          }
+        ],
+        "returns": [
+          "正常继续；缺少清单或未容错复制失败时以非零状态终止。"
+        ]
       },
       {
         "start": 104,
         "end": 117,
         "title": "运行一次协议：保留终端输出并写日志",
         "principle": [
-          "run_version 把协议名和保存目录从自己的参数中取走，其余训练参数透传给 main.py。PYTHONPATH=. 使项目根目录可被 Python 模块搜索。",
-          "2>&1 把错误和普通输出合并；tee 一份输出保留给终端，另一份经 grep 过滤进度条后写入 training.log。这样同时看实时进展和留存文本日志。"
+          "同一个函数通过 version 和 save_dir 支持两种协议，避免复制两份几乎相同的训练命令。参数透传使外层脚本决定轮数、批大小和骨干，本函数只补上协议、目录和种子等共同配置。",
+          "2>&1 先合并 Python 的标准错误与标准输出，再用 tee 保留终端显示并复制一份给 grep 过滤进度条。这样保存的 training.log 更适合查找指标与错误。"
         ],
         "syntax": [
-          "函数内 local version/save_dir 只在该函数使用；shift 2 移除这两个参数。",
-          ">(...) 是 Bash 进程替换，给 tee 一个连接到子命令的可写路径；grep -vE 使用扩展正则并保留不匹配的行。",
-          "PYTHONPATH=. 放在命令前只对这一命令设置环境变量；反斜杠换行把多行组织为同一条命令。"
+          "PYTHONPATH=. command 只为该命令临时设置环境，不等于在整个 Shell 中 export。",
+          "\"$@\" 按原始参数逐个展开，保留带空格的参数；\"$*\" 则会合成一个字符串，不能在这里互换。",
+          "tee >(grep ... > file) 中的 >(...) 是 Bash 进程替换，不是普通文件名；tee 同时向自身标准输出和这个通道写数据。"
         ],
-        "shapes": "",
-        "pitfall": "过滤只匹配以 Training/Evaluating 开头的特定行格式；终端控制符或进度条格式变化可能仍使日志很大。不要把日志截断后的末尾当成训练终止证据。",
-        "exercise": "2>&1 与 >log 有什么不同？",
-        "answer": "2>&1 把标准错误接到当前标准输出；>log 把标准输出写入文件。这里先合并，再让 tee 同时分发到屏幕和文件。",
-        "diagram": "train"
+        "shapes": "函数参数和环境变量 → 一条 Python 进程调用 → 终端流与日志文件。",
+        "pitfall": "额外参数位于命令末尾，重复同名 argparse 参数通常以后者为准，可能覆盖函数本来注入的路径或协议。pipefail 约束主管道，不会自动完整管理进程替换中 grep 的所有失败情况。",
+        "summary": "组织一次 main.py 调用，将同一输出流同时送到终端和过滤后的训练日志。",
+        "parameters": [
+          {
+            "name": "version / $1",
+            "type": "str",
+            "default": "必填",
+            "meaning": "传给 main.py 的 --split_mode，如 train100 或 train90。"
+          },
+          {
+            "name": "save_dir / $2",
+            "type": "str",
+            "default": "必填",
+            "meaning": "本协议的 --save_dir 和 training.log 所在目录。"
+          },
+          {
+            "name": "其余 \"$@\"",
+            "type": "参数列表",
+            "default": "可为空",
+            "meaning": "调用者补充的 main.py 参数；train90 在此包含 --split_manifest。"
+          },
+          {
+            "name": "PYTHONPATH",
+            "type": "环境变量",
+            "default": "仅本次命令设置为 .",
+            "meaning": "把当前项目目录加入 Python 模块搜索路径，便于找到 LineDet。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "version / save_dir",
+            "type": "local str",
+            "meaning": "函数局部变量，shift 2 后依然保留。"
+          },
+          {
+            "name": "PYTHON_BIN / DATA_ROOT / SEED",
+            "type": "外层 Shell 变量",
+            "meaning": "分别决定解释器、数据路径和随机种子。"
+          },
+          {
+            "name": "tee 的进程替换目标",
+            "type": "异步子进程输入通道",
+            "meaning": ">(grep ...) 接收 tee 复制的日志流并过滤后落盘。"
+          },
+          {
+            "name": "grep 正则",
+            "type": "扩展正则字符串",
+            "meaning": "匹配以 Training 或 Evaluating 开头、随后空白及竖线的进度条行；-vE 表示扩展正则反选。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "接收并移除函数专用参数",
+            "detail": "L105–107 保存 version、save_dir，再 shift 2。"
+          },
+          {
+            "title": "打印开始时间",
+            "detail": "L108 在终端标明当前协议。"
+          },
+          {
+            "title": "调用训练主程序",
+            "detail": "L109–114 指定路径、种子和协议，再追加剩余参数。"
+          },
+          {
+            "title": "分流日志",
+            "detail": "L115 合并两条输出流，tee 显示并复制给过滤进程。"
+          },
+          {
+            "title": "正常返回时打印完成时间",
+            "detail": "L116 若主训练管道成功则继续。"
+          }
+        ],
+        "returns": [
+          "Bash 函数返回最终命令的退出状态；主训练管道失败在严格模式下通常中断整个脚本。"
+        ],
+        "flow": {
+          "title": "一次协议运行与日志分流",
+          "nodes": [
+            {
+              "id": "args",
+              "title": "协议名与训练参数",
+              "detail": "version、save_dir、剩余参数",
+              "kind": "input"
+            },
+            {
+              "id": "py",
+              "title": "运行 main.py",
+              "detail": "注入数据路径、种子和划分协议",
+              "kind": "process"
+            },
+            {
+              "id": "merge",
+              "title": "合并 stdout 与 stderr",
+              "detail": "2>&1",
+              "kind": "process"
+            },
+            {
+              "id": "tee",
+              "title": "tee 复制输出",
+              "detail": "同一流分成两份",
+              "kind": "process"
+            },
+            {
+              "id": "term",
+              "title": "终端显示",
+              "detail": "保留实时输出",
+              "kind": "output"
+            },
+            {
+              "id": "grep",
+              "title": "过滤进度条行",
+              "detail": "grep -vE",
+              "kind": "process"
+            },
+            {
+              "id": "log",
+              "title": "写 training.log",
+              "detail": "保存指标、警告及错误文本",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "args",
+              "to": "py",
+              "label": ""
+            },
+            {
+              "from": "py",
+              "to": "merge",
+              "label": ""
+            },
+            {
+              "from": "merge",
+              "to": "tee",
+              "label": ""
+            },
+            {
+              "from": "tee",
+              "to": "term",
+              "label": ""
+            },
+            {
+              "from": "tee",
+              "to": "grep",
+              "label": ""
+            },
+            {
+              "from": "grep",
+              "to": "log",
+              "label": ""
+            }
+          ],
+          "caption": "日志分流不会改变网络计算；它只改变终端文本的存放方式。"
+        }
       },
       {
         "start": 119,
         "end": 126,
         "title": "顺序运行两种划分并汇总",
         "principle": [
-          "先运行 train100，再运行带清单的 train90；这是两个独立训练进程，模型分别初始化，使用相同 seed 和额外参数。成功后调用 summarize_comparison.py 整合两个摘要。",
-          "train100 看过验证源图，train90 按组隔离，所以更低的 train100 验证误差不能证明 train100 模型在未见样本上更好。"
+          "两次 main.py 都使用同一组 \"$@\" 训练参数，区别是协议名、输出目录，以及 train90 额外得到固定划分清单。train100 没有清单，按 Dataset 内部路径使用全部训练源图与重叠验证子集；train90 按清单分别加载训练和验证。",
+          "这是一组顺序实验，不是两个网络在一个进程内共同训练。每次 main.py 都重新创建网络和优化器；相同种子帮助对照，但由于训练数据不同，不能保证最终每一步随机调用或权重更新都相同。"
         ],
         "syntax": [
-          "第一条 run_version 的 \"$@\" 是共享参数；第二条额外添加 --split_manifest。",
-          "在 set -e 与 pipefail 配合下，第一个训练命令失败通常会阻止继续运行下一协议和最终汇总。"
+          "Bash 默认顺序执行命令，只有显式后台符号等机制才会并发；这两行没有 &。",
+          "函数调用中的 \"$@\" 展开为多个参数，因此两次实验收到的是同一列表，而非一个大字符串。"
         ],
-        "shapes": "",
-        "pitfall": "用户额外传入重复的 --save_dir、--seed、--split_mode 或 --split_manifest 可能覆盖或冲突于脚本的选项；复现实验应避免在透传参数中重复这些管理参数。",
-        "exercise": "这是一个训练完 train100 再微调 train90 的脚本吗？",
-        "answer": "不是。它启动两个独立 python main.py 进程，没有传入前一轮权重用于继续训练。",
-        "diagram": "split"
+        "shapes": "两组独立训练进程 → 两组产物目录 → 一个嵌套 JSON 总摘要。",
+        "pitfall": "训练任务未传 --skip_export 时，第一次训练后的导出失败也可能阻止第二种协议启动。汇总文件的存在只表明读取和写入成功，不能自动证明评估协议没有数据泄漏。",
+        "summary": "顺序执行两种划分协议，成功后把各自的审计与最佳指标合并成总摘要。",
+        "parameters": [
+          {
+            "name": "run_version 第一次",
+            "type": "函数调用",
+            "default": "train100 + TRAIN100_DIR",
+            "meaning": "不额外传清单，执行全量训练协议。"
+          },
+          {
+            "name": "run_version 第二次",
+            "type": "函数调用",
+            "default": "train90 + TRAIN90_DIR",
+            "meaning": "额外传入 --split_manifest MANIFEST_DIR。"
+          },
+          {
+            "name": "summarize_comparison.py --run-root",
+            "type": "str",
+            "default": "RUN_ROOT",
+            "meaning": "指定两组产物共同所在根目录。"
+          },
+          {
+            "name": "summarize_comparison.py --task-name",
+            "type": "str",
+            "default": "TASK_NAME",
+            "meaning": "写入 comparison.json 的任务名称。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "\"$@\"",
+            "type": "共享训练参数列表",
+            "meaning": "两次调用都传入相同的骨干、轮数、尺寸等调用方配置。"
+          },
+          {
+            "name": "TRAIN100_DIR / TRAIN90_DIR",
+            "type": "协议输出目录",
+            "meaning": "防止两个模型的 best.pth、日志和图像直接互相覆盖。"
+          },
+          {
+            "name": "comparison.json",
+            "type": "汇总文件",
+            "meaning": "由 Python 汇总脚本读取已有四份 JSON 后生成，并不重新评估模型。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "运行全量协议",
+            "detail": "L119 阻塞等待第一轮 main.py 完成。"
+          },
+          {
+            "title": "运行固定划分协议",
+            "detail": "L120 第一轮正常后才开始第二轮。"
+          },
+          {
+            "title": "汇总已有结果",
+            "detail": "L122–124 调用 summarize_comparison.py。"
+          },
+          {
+            "title": "打印最终目录",
+            "detail": "L126 标识双协议流程结束的位置。"
+          }
+        ],
+        "returns": [
+          "整个脚本正常完成时返回最后 echo 的成功状态。"
+        ]
       }
-    ]
+    ],
+    "role": "被 train减脂.sh 调用的实际实验总控脚本；依赖 Bash、GNU 风格命令及可执行 Python 环境。",
+    "inputs": [
+      "位置参数：TASK_NAME、DATA_ROOT、MANIFEST_DIR，随后必须有 -- 分隔符；后面的所有参数交给 main.py。",
+      "可选环境变量 SAVE_DIR、PYTHON_BIN、SEED；其他训练设置来自调用方透传。",
+      "已经准备好的 meta.json、train.jsonl、val.jsonl 和项目 Python 源码。"
+    ],
+    "outputs": [
+      "RUN_ROOT 下的 train100/、train90/ 两组训练产物和各自 training.log。",
+      "code_backup/、split_manifest_snapshot/ 和 training_info.txt，帮助回溯运行所用代码、清单和参数。",
+      "由 summarize_comparison.py 写出的 comparison.json。"
+    ],
+    "readingGuide": [
+      "先看文件开头如何消耗三个位置参数和 --，再看末尾两次 run_version 调用，最后展开函数体。",
+      "该脚本只是打印清单重建命令，并在交互终端倒计时；没有自动执行 generate_group_split.py，也没有要求用户输入确认。",
+      "run_version 把额外参数放在命令末尾；若用户重复传 save_dir、seed、split_mode 等选项，通常后面的同名参数会覆盖前面的值，因此应追踪完整最终命令。",
+      "train100 和 train90 顺序运行，第一轮失败通常阻止第二轮；它们共享配置和种子，但样本集合不同，因此不代表后续随机序列和训练轨迹完全相同。"
+    ],
+    "components": [
+      {
+        "name": "顶部参数与路径初始化",
+        "kind": "脚本段",
+        "summary": "验证入口参数，选定项目根目录、输出根目录、Python 程序和种子。",
+        "segmentStart": 1
+      },
+      {
+        "name": "show_split_update_warning",
+        "kind": "Bash 函数",
+        "summary": "显示固定划分清单更新提醒及可复制命令；交互终端等待五秒后继续。",
+        "segmentStart": 31
+      },
+      {
+        "name": "文件快照与运行信息",
+        "kind": "脚本段",
+        "summary": "检查清单三个文件存在，备份代码与清单，并写本次参数。",
+        "segmentStart": 83
+      },
+      {
+        "name": "run_version",
+        "kind": "Bash 函数",
+        "summary": "给 main.py 注入协议与输出目录，同时在终端显示日志并保存过滤后的文本。",
+        "segmentStart": 104
+      },
+      {
+        "name": "末尾调度",
+        "kind": "脚本段",
+        "summary": "先 train100、再 train90，然后调用汇总脚本。",
+        "segmentStart": 119
+      }
+    ],
+    "pipeline": {
+      "title": "双协议脚本的执行与退出条件",
+      "nodes": [
+        {
+          "id": "in",
+          "title": "读取位置参数",
+          "detail": "任务名、数据目录、清单目录、--",
+          "kind": "input"
+        },
+        {
+          "id": "check",
+          "title": "参数格式正确吗",
+          "detail": "数量和分隔符检查",
+          "kind": "decision"
+        },
+        {
+          "id": "exit",
+          "title": "以状态 2 退出",
+          "detail": "打印用法或缺失清单错误",
+          "kind": "output"
+        },
+        {
+          "id": "paths",
+          "title": "初始化路径与环境",
+          "detail": "创建本次实验的命名规则",
+          "kind": "process"
+        },
+        {
+          "id": "warn",
+          "title": "显示清单更新提醒",
+          "detail": "只打印重建命令，不执行它",
+          "kind": "process"
+        },
+        {
+          "id": "manifest",
+          "title": "三个清单文件都存在吗",
+          "detail": "meta / train / val",
+          "kind": "decision"
+        },
+        {
+          "id": "backup",
+          "title": "建立快照与运行记录",
+          "detail": "代码、清单、training_info.txt",
+          "kind": "process"
+        },
+        {
+          "id": "a",
+          "title": "运行 train100",
+          "detail": "无固定划分清单参数",
+          "kind": "process"
+        },
+        {
+          "id": "b",
+          "title": "运行 train90",
+          "detail": "传入固定划分清单",
+          "kind": "process"
+        },
+        {
+          "id": "summary",
+          "title": "生成 comparison.json",
+          "detail": "读取两组最佳指标与划分审计",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "in",
+          "to": "check",
+          "label": ""
+        },
+        {
+          "from": "check",
+          "to": "exit",
+          "label": "否"
+        },
+        {
+          "from": "check",
+          "to": "paths",
+          "label": "是"
+        },
+        {
+          "from": "paths",
+          "to": "warn",
+          "label": ""
+        },
+        {
+          "from": "warn",
+          "to": "manifest",
+          "label": ""
+        },
+        {
+          "from": "manifest",
+          "to": "exit",
+          "label": "否"
+        },
+        {
+          "from": "manifest",
+          "to": "backup",
+          "label": "是"
+        },
+        {
+          "from": "backup",
+          "to": "a",
+          "label": ""
+        },
+        {
+          "from": "a",
+          "to": "b",
+          "label": "前一进程成功"
+        },
+        {
+          "from": "b",
+          "to": "summary",
+          "label": "前一进程成功"
+        }
+      ],
+      "caption": "严格 Shell 模式会让多数未处理命令错误终止脚本；图中 train100 和 train90 不是并行任务。"
+    }
   },
   {
     "path": "train减脂.sh",
-    "title": "减脂实验入口：把一次具体实验写成可重复命令",
-    "overview": "这是项目当前任务的配置入口。它选择 MobileNetV3-Large、两条边界、256×256 输入、100 轮、批量 48，并把 unify 模式传入数据集。它引用 Linux 数据路径，迁移到其他机器时应替换路径并安装相应依赖。",
+    "title": "减脂任务启动配置：固定数据与训练设置",
+    "overview": "train减脂.sh 是本任务最外层的启动入口。它先把工作目录切到项目根目录，通过环境变量选择“保留原图并可追加裁剪视野”的 unify 数据策略，然后把任务名、数据目录、固定划分清单和具体训练超参数交给 run_dual_split.sh。文件很短，但它决定了实际运行参数；main.py 中的默认值不一定就是本任务真正使用的值。",
     "segments": [
       {
         "start": 1,
         "end": 7,
         "title": "从脚本目录启动，并启用 unify 数据策略",
         "principle": [
-          "先切换到项目根目录，再导出两个环境变量。Dataset 模块导入时读取这些环境变量，因此必须在启动 Python 之前设置。",
-          "LINEDET_UNIFY_SIZE=516,594 是裁剪宽高比参考，不代表网络直接吃 516×594 图像。unify 会保留原图并在允许时增加裁剪副本；所有条目最后还会 resize 到 img_size。"
+          "使用脚本位置而非当前启动目录来定位项目，使从不同目录启动时仍能找到下层脚本。export 把变量放入进程环境，后续 Bash 与 Python 子进程才能读取。",
+          "unify 策略不是简单地把所有原图直接缩放为 516×594。该尺寸参数用于数据模块的目标宽高比例与裁剪判断；最终模型输入大小由后面的 --img_size 256 决定。原图版本仍保留，满足条件时才追加裁剪副本。"
         ],
         "syntax": [
-          "export 让后续子进程继承环境变量；普通 Shell 变量不一定自动传到 Python 的 os.environ。",
-          "项目目录推导使用 BASH_SOURCE[0]，不依赖用户启动命令时所在文件夹。"
+          "export NAME=\"value\" 同时赋值并标记为子进程可继承；普通 Shell 变量赋值不自动具备这一属性。",
+          "嵌套 $(...) 先求内层目录，再在子 Shell 中 cd && pwd；双引号保护路径里的空格与中文。"
         ],
-        "shapes": "比例参考 (516,594) → 原图/裁剪副本 → 模型输入 (256,256)。",
-        "pitfall": "unify 的实现对 train 和 val 都生效，并不是只对训练集增加裁剪样本。",
-        "exercise": "网络输入尺寸最终由哪个参数控制？",
-        "answer": "--img_size 256 控制最终输入；LINEDET_UNIFY_SIZE 主要定义预裁剪参考宽高比。",
-        "diagram": "train"
+        "shapes": "环境中传递的是字符串；数据模块随后解析为模式名与两个整数。",
+        "pitfall": "不能把参考比例 516:594 与模型输入 256×256 混为同一层缩放。具体裁剪是否追加，仍取决于原图尺寸与目标线是否被保留。",
+        "summary": "定位项目目录，并给后续 Python 进程设置统一视野处理策略。",
+        "parameters": [
+          {
+            "name": "LINEDET_UNIFY_MODE",
+            "type": "环境变量",
+            "default": "unify",
+            "meaning": "选择数据集的统一视野处理路径。"
+          },
+          {
+            "name": "LINEDET_UNIFY_SIZE",
+            "type": "环境变量字符串",
+            "default": "516,594",
+            "meaning": "提供统一视野的参考宽高比例，数据模块按 W,H 解析。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "PROJECT_ROOT",
+            "type": "绝对路径字符串",
+            "meaning": "当前脚本所在目录。"
+          },
+          {
+            "name": "BASH_SOURCE[0]",
+            "type": "str",
+            "meaning": "Bash 正在执行的当前脚本路径。"
+          },
+          {
+            "name": "dirname / pwd",
+            "type": "Shell 外部命令",
+            "meaning": "前者取父目录，后者输出当前工作目录。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "指定 Bash 严格执行",
+            "detail": "L1–2 设置解释器与错误处理选项。"
+          },
+          {
+            "title": "切换到项目根",
+            "detail": "L4–5 由脚本目录计算绝对路径，然后 cd。"
+          },
+          {
+            "title": "向子进程传递策略",
+            "detail": "L6–7 export 两项数据环境配置。"
+          }
+        ],
+        "returns": [
+          "无函数返回值；改变当前工作目录和子进程环境。"
+        ]
       },
       {
         "start": 9,
         "end": 20,
         "title": "exec 转交双协议脚本：理解最终生效的配置",
         "principle": [
-          "exec 用 run_dual_split.sh 替换当前 Shell 进程；后者依次完成两套训练。-- 之后是传给 main.py 的共享配置。",
-          "此入口明确覆盖默认 epochs=40、batch_size=32、num_workers=8，改为 100、48、环境 NUM_WORKERS 或 16。学习实验必须优先看启动脚本中的实际参数，不能只读 parser 默认值。"
+          "训练主程序里定义的是通用默认值，这里明确覆盖为本任务方案：MobileNetV3-Large、两条边界、256×256 输入、100 轮、batch 48、学习率 0.001。实际运行解释必须追踪这一层。",
+          "exec 成功后不会再创建一个继续等待的同层 Shell，而是用目标程序替换当前进程。因此后续进程退出状态直接反映下层执行；本文件也没有 exec 后的收尾语句。"
         ],
         "syntax": [
-          "--num_lines 2 定义输出两条曲线；--backbone mobilenet_v3_large 选择主干；--lr 1e-3 等于 0.001。",
-          "${NUM_WORKERS:-16} 允许外部调低数据加载进程数，例如排查问题时设为 0。最后一行没有续行反斜杠，命令结束。"
+          "行末 \\ 表示命令尚未结束，下一物理行仍是同一个 exec 调用的一部分。",
+          "${NUM_WORKERS:-16} 在变量不存在或为空时用 16，和 ${NUM_WORKERS-16} 对空字符串的处理不同。",
+          "exec 的目标脚本需要具备可执行条件；这里没有显式写 bash 路径去绕过执行权限。"
         ],
-        "shapes": "",
-        "pitfall": "数据根路径是原 Linux 机器上的路径，本机不存在时无法原样训练。质量分类器外部权重缺失时，应先用 --skip_export 验证训练流程。",
-        "exercise": "这份入口的每批线坐标预测形状是什么？",
-        "answer": "通常为 [48,2,256]；最后一个不足整批时第 0 维更小。",
-        "diagram": "train"
+        "shapes": "固定命令行配置最终令输入 image 为 [B,1,256,256]，边界输出为 [B,2,256]；B 通常 48，尾批可更小。",
+        "pitfall": "脚本中写定的是原训练环境的 Linux 数据路径，换机器需改为可访问的位置。没有 --skip_export，因此训练后默认尝试导出；追加给本脚本的额外 CLI 参数没有被 \"$@\" 透传。",
+        "summary": "给出本任务真正采用的参数，并用 exec 将当前进程替换成双协议脚本。",
+        "parameters": [
+          {
+            "name": "任务名",
+            "type": "位置参数",
+            "default": "减脂",
+            "meaning": "用于实验目录命名及汇总标签。"
+          },
+          {
+            "name": "数据根目录",
+            "type": "位置参数",
+            "default": "源码中的减脂数据集/无垫目录",
+            "meaning": "交给双协议脚本，再成为 main.py 的 --data_root。"
+          },
+          {
+            "name": "清单目录",
+            "type": "位置参数",
+            "default": "PROJECT_ROOT/splits/grouped_v2/减脂无垫_20261009",
+            "meaning": "train90 使用的固定分组清单位置。"
+          },
+          {
+            "name": "--",
+            "type": "分隔符",
+            "default": "固定",
+            "meaning": "下层脚本以此区分调度参数和训练参数。"
+          },
+          {
+            "name": "--backbone",
+            "type": "str",
+            "default": "mobilenet_v3_large",
+            "meaning": "选取默认 V3-Large 特征骨干。"
+          },
+          {
+            "name": "--num_lines",
+            "type": "int",
+            "default": "2",
+            "meaning": "输出真皮层下界和脂肪层下界两个通道。"
+          },
+          {
+            "name": "--img_size",
+            "type": "尺寸字符串",
+            "default": "256",
+            "meaning": "主程序解析为 (256,256)，对应网络输入大小。"
+          },
+          {
+            "name": "--epochs",
+            "type": "int",
+            "default": "100",
+            "meaning": "覆盖主程序默认 40 轮。"
+          },
+          {
+            "name": "--batch_size",
+            "type": "int",
+            "default": "48",
+            "meaning": "覆盖主程序默认 32。"
+          },
+          {
+            "name": "--lr",
+            "type": "float",
+            "default": "0.001",
+            "meaning": "AdamW 的学习率。"
+          },
+          {
+            "name": "--num_workers",
+            "type": "int",
+            "default": "NUM_WORKERS 非空则取其值，否则 16",
+            "meaning": "控制 DataLoader 并行取样进程数。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "NUM_WORKERS",
+            "type": "可选环境变量",
+            "meaning": "只有这项在当前脚本的训练参数中动态读取；其他列出的训练值为字面量。"
+          },
+          {
+            "name": "PROJECT_ROOT/run_dual_split.sh",
+            "type": "可执行脚本路径",
+            "meaning": "exec 的目标。"
+          },
+          {
+            "name": "SAVE_DIR / PYTHON_BIN / SEED",
+            "type": "可继承环境变量",
+            "meaning": "本文件不读取，但下层调度脚本会读取，因此可在启动前设置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "选定要替换执行的脚本",
+            "detail": "L9 exec 引用 PROJECT_ROOT 下的 run_dual_split.sh。"
+          },
+          {
+            "title": "传入任务与数据位置",
+            "detail": "L10–13 写三项调度参数和 --。"
+          },
+          {
+            "title": "传入网络与训练配置",
+            "detail": "L14–20 写各命令行选项，最后为 num_workers 应用环境默认值。"
+          }
+        ],
+        "returns": [
+          "exec 成功后当前脚本不再返回执行后续语句；退出状态来自下层任务。"
+        ]
       }
-    ]
+    ],
+    "role": "任务专用启动脚本；不直接实现训练，而是给双协议调度脚本提供配置。",
+    "inputs": [
+      "脚本文件所在位置，用于定位项目根目录。",
+      "源码中写定的数据根目录与 grouped_v2 划分目录。",
+      "可选环境变量 NUM_WORKERS，以及被下层脚本读取的 SAVE_DIR、PYTHON_BIN、SEED。"
+    ],
+    "outputs": [
+      "启动 run_dual_split.sh，依次触发 train100 与 train90 的实验产物。",
+      "向子进程导出 LINEDET_UNIFY_MODE=unify 和 LINEDET_UNIFY_SIZE=516,594。"
+    ],
+    "readingGuide": [
+      "本文件的 --img_size 256 是网络实际输入尺寸；LINEDET_UNIFY_SIZE=516,594 用于数据视野比例策略，两者含义不同。",
+      "若要知道命令最终如何执行，接着看 run_dual_split.sh；若要知道每个训练参数怎么使用，接着看 main.py。",
+      "脚本没有透传自身的 \"$@\"；直接在脚本命令后追加 --epochs 等参数不会自动进入下层训练命令。"
+    ],
+    "components": [
+      {
+        "name": "项目定位与数据策略",
+        "kind": "脚本段",
+        "summary": "根据脚本位置确定工作目录，并导出 unify 两个环境变量。",
+        "segmentStart": 1
+      },
+      {
+        "name": "exec 调用双协议脚本",
+        "kind": "脚本段",
+        "summary": "写明本任务的数据、清单、模型和训练超参数，并把进程控制转交。",
+        "segmentStart": 9
+      }
+    ],
+    "pipeline": {
+      "title": "任务配置如何进入训练",
+      "nodes": [
+        {
+          "id": "root",
+          "title": "定位项目根目录",
+          "detail": "脚本目录 → PROJECT_ROOT",
+          "kind": "input"
+        },
+        {
+          "id": "env",
+          "title": "导出数据策略",
+          "detail": "unify 与 516,594 比例参数",
+          "kind": "process"
+        },
+        {
+          "id": "args",
+          "title": "指定实际训练配置",
+          "detail": "V3 / 2 条线 / 256 / 100 轮 / batch 48",
+          "kind": "process"
+        },
+        {
+          "id": "dual",
+          "title": "exec 双协议脚本",
+          "detail": "数据路径、清单路径与训练参数",
+          "kind": "process"
+        },
+        {
+          "id": "data",
+          "title": "Dataset 读取环境",
+          "detail": "决定原图与裁剪副本的处理",
+          "kind": "output"
+        },
+        {
+          "id": "train",
+          "title": "main.py 读取参数",
+          "detail": "构造网络并分别完成两次训练",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "root",
+          "to": "env",
+          "label": ""
+        },
+        {
+          "from": "env",
+          "to": "args",
+          "label": ""
+        },
+        {
+          "from": "args",
+          "to": "dual",
+          "label": ""
+        },
+        {
+          "from": "env",
+          "to": "data",
+          "label": "子进程继承"
+        },
+        {
+          "from": "dual",
+          "to": "train",
+          "label": ""
+        }
+      ],
+      "caption": "环境变量和命令行参数是两条配置通道，最终分别在数据模块与主程序中生效。"
+    }
   },
   {
     "path": "summarize_comparison.py",
-    "title": "汇总实验：让数据协议与最佳结果一起出现",
-    "overview": "该脚本只读取两个训练子目录中的 JSON 摘要，写出 comparison.json；它不重新评估模型，不验证权重，也不计算新的统计显著性。保留 split 与 best 的组合，是为了防止只摘录一个好看的误差而忽略数据划分。",
+    "title": "对比结果汇总：读取两份实验摘要并写总 JSON",
+    "overview": "summarize_comparison.py 是训练结束后的文件整理工具。它读取 train100 与 train90 目录中各自的 split_summary.json 和 best_metrics.json，把数据划分情况与最佳成绩放进同一份 comparison.json，并附上任务名及生成时刻。它不加载权重、不读取图像，也不重新计算 MAE，因此汇总是否可信取决于上游训练和审计文件。",
     "segments": [
       {
         "start": 1,
         "end": 16,
         "title": "安全缺省的 JSON 读取",
         "principle": [
-          "摘要不存在时返回 None，让汇总可以表达某个结果缺失；JSON 文件存在但内容损坏则仍会抛出解析错误，不会静默伪造成功。",
-          "utf-8-sig 同时兼容普通 UTF-8 和带 BOM 的 UTF-8 文本，这对不同工具生成的 JSON 更方便。"
+          "结果整理可能遇到某一组尚未生成最佳指标的情况。返回 None 让汇总还能保留结构，JSON 序列化后就是 null，读者可以识别资料缺失。",
+          "缺文件与坏文件是两种情况：这段代码只为不存在的路径提供缺省值，已有文件若不是合法 JSON，json.load 仍然抛出异常，避免悄悄掩盖格式损坏。"
         ],
         "syntax": [
-          "from __future__ import annotations 延迟类型注解求值；path: Path 是类型提示，不会自动把字符串转换为 Path。",
-          "path.is_file() 判断存在且是文件；with path.open(...) as handle 管理文件句柄。"
+          "path: Path 是类型注解，说明期望接口，不会自动把字符串转成 Path。from __future__ import annotations 改变注解的求值处理方式。",
+          "encoding=\"utf-8-sig\" 能容忍 UTF-8 文件开头的 BOM；普通无 BOM 的 UTF-8 也可读取。with 保证离开块时关闭句柄。"
         ],
-        "shapes": "",
-        "pitfall": "缺失结果返回 None 最后会写成 JSON null；读取汇总时要区分 null 与数值 0。",
-        "exercise": "如果 best_metrics.json 不存在，summary 会写 0 还是 null？",
-        "answer": "写 null，因为 Python None 序列化为 JSON null。",
-        "diagram": "train"
+        "shapes": "文件路径 → Python dict/list/标量，或者 None；本项目主要读取字典。",
+        "pitfall": "函数没有捕获 JSONDecodeError 或文件权限错误；不能把它理解成“任何读取失败都返回空”。",
+        "summary": "读取一个 JSON 文件；若文件不存在，返回 None 供总摘要表达缺失数据。",
+        "parameters": [
+          {
+            "name": "path",
+            "type": "pathlib.Path",
+            "default": "必填",
+            "meaning": "要读取的文件位置；调用者用 root/子目录/文件名构造。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "Path",
+            "type": "类",
+            "meaning": "面向对象的路径接口，提供 is_file、open、resolve 等操作。"
+          },
+          {
+            "name": "handle",
+            "type": "文本文件句柄",
+            "meaning": "以只读模式和 utf-8-sig 解码打开的 JSON 文件。"
+          },
+          {
+            "name": "json.load(handle)",
+            "type": "任意 JSON 对应 Python 值",
+            "meaning": "对象变 dict、数组变 list、null 变 None；本项目预期是摘要字典。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "导入依赖",
+            "detail": "L4–9 引入延后注解、命令行、JSON、带时区时间和 Path。"
+          },
+          {
+            "title": "判断文件是否存在",
+            "detail": "L13–14 不是普通文件就返回 None。"
+          },
+          {
+            "title": "读取并解析内容",
+            "detail": "L15–16 用 with 打开，json.load 解析，然后自动关闭。"
+          }
+        ],
+        "returns": [
+          "文件存在且合法时返回解析结果；不存在时返回 None。"
+        ]
       },
       {
         "start": 19,
         "end": 38,
         "title": "按协议嵌套汇总，附上生成时间",
         "principle": [
-          "run-root 指向含 train100/train90 的目录。脚本对每种协议读取 split_summary 和 best_metrics，将“数据来自哪里、是否重叠”与“最佳误差是多少”绑定到同一对象中。",
-          "completed_at_utc 是汇总文件生成时间，并不能单独证明训练已全部完成；此脚本允许摘要缺失。实验事实应回到具体文件和日志核对。"
+          "payload 按 train100 和 train90 分组，每组再分别保存 split 与 best，使读者可以把成绩与数据划分同时检查。它不会把两种不同协议的成绩混成一个平均数。",
+          "使用带 UTC 时区的 ISO 时间字符串，便于跨机器记录；但这只是汇总生成时间。Path.resolve 把运行根目录变成绝对路径，减少调用工作目录差异带来的路径歧义。"
         ],
         "syntax": [
-          "required=True 表示两个命令行参数必填；Path.resolve() 生成规范绝对路径。",
-          "Path 对象支持 / 运算符拼接子路径；datetime.now(timezone.utc).isoformat() 输出有时区的时间字符串。",
-          "ensure_ascii=False 与 indent=2 保留中文并美化 JSON。"
+          "Path 对象用 / 运算符拼接路径，不是做除法；root / \"train100\" / \"best_metrics.json\" 形成完整文件路径。",
+          "required=True 表示即使类型没有显式指定也必须提供该选项。main() -> None 表明此函数主要通过写文件产生效果。",
+          "json.dump 会把 Python None 写为 JSON null，因此缺少源文件时仍能看到明确的缺失标记。"
         ],
-        "shapes": "",
-        "pitfall": "直接读取保存的 val_mae，并未验证该值是独立测试结果。数据协议不同的数值并列展示不等于可作因果比较。",
-        "exercise": "为什么汇总应该保留 split 字段，而不仅列出两个 MAE？",
-        "answer": "因为误差的含义依赖评估数据。train100 有源图重叠，train90 没有；去掉 split 会让读者误以为两者是同一测试条件。",
-        "diagram": "split"
+        "shapes": "四个摘要字典或 None → {task_name, completed_at_utc, train100:{split,best}, train90:{split,best}}。",
+        "pitfall": "root 不存在时此函数不会替你 mkdir。已有 comparison.json 会被覆盖；它也没有检查输入 JSON 是否属于同一次实验或验证源图交集是否为 0。",
+        "summary": "读取两组训练的划分与最佳成绩摘要，保留协议结构并输出一份比较文件。",
+        "parameters": [
+          {
+            "name": "--run-root",
+            "type": "命令行字符串",
+            "default": "必填",
+            "meaning": "包含两组训练产物的根目录。"
+          },
+          {
+            "name": "--task-name",
+            "type": "命令行字符串",
+            "default": "必填",
+            "meaning": "写入总摘要的任务名称。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "parser / args",
+            "type": "ArgumentParser / Namespace",
+            "meaning": "声明并保存两个必填参数；main 自身没有 Python 形参。"
+          },
+          {
+            "name": "root",
+            "type": "pathlib.Path",
+            "meaning": "args.run_root 解析出的绝对目录路径。"
+          },
+          {
+            "name": "payload",
+            "type": "dict",
+            "meaning": "最终总摘要。"
+          },
+          {
+            "name": "task_name",
+            "type": "str",
+            "meaning": "来自 args.task_name，仅作为描述标签。"
+          },
+          {
+            "name": "completed_at_utc",
+            "type": "ISO 8601 字符串",
+            "meaning": "datetime.now(timezone.utc).isoformat() 的结果，包含 UTC 时区信息。"
+          },
+          {
+            "name": "train100 / train90",
+            "type": "dict",
+            "meaning": "两个协议的独立子对象。"
+          },
+          {
+            "name": "split",
+            "type": "dict 或 None",
+            "meaning": "从对应 split_summary.json 读取的样本数与源图交集等审计。"
+          },
+          {
+            "name": "best",
+            "type": "dict 或 None",
+            "meaning": "从对应 best_metrics.json 读取的最佳轮次、MAE 和损失等摘要。"
+          },
+          {
+            "name": "handle",
+            "type": "输出文件句柄",
+            "meaning": "用于写 root/comparison.json。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "读取必要配置",
+            "detail": "L20–23 声明两个 required=True 参数并解析。"
+          },
+          {
+            "title": "规范输出根目录",
+            "detail": "L24 Path(...).resolve() 得到绝对路径。"
+          },
+          {
+            "title": "收集两组数据",
+            "detail": "L25–36 构建顶层信息和两个协议的 split/best 子对象。"
+          },
+          {
+            "title": "写出总摘要",
+            "detail": "L37–38 以 UTF-8 保存，保持中文和缩进。"
+          }
+        ],
+        "returns": [
+          "None；写入 comparison.json，不在终端直接返回成绩。"
+        ],
+        "flow": {
+          "title": "汇总中的单文件读取分支",
+          "nodes": [
+            {
+              "id": "path",
+              "title": "给定摘要文件路径",
+              "detail": "四个输入文件各执行一次",
+              "kind": "input"
+            },
+            {
+              "id": "exists",
+              "title": "是已存在的普通文件吗",
+              "detail": "Path.is_file()",
+              "kind": "decision"
+            },
+            {
+              "id": "none",
+              "title": "放入 None",
+              "detail": "写 JSON 时表现为 null",
+              "kind": "process"
+            },
+            {
+              "id": "load",
+              "title": "解析 JSON",
+              "detail": "utf-8-sig 解码与 json.load",
+              "kind": "process"
+            },
+            {
+              "id": "payload",
+              "title": "放入对应协议字段",
+              "detail": "train100 / train90 的 split / best",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "写总摘要",
+              "detail": "附加任务名和 UTC 生成时刻",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "path",
+              "to": "exists",
+              "label": ""
+            },
+            {
+              "from": "exists",
+              "to": "none",
+              "label": "否"
+            },
+            {
+              "from": "exists",
+              "to": "load",
+              "label": "是"
+            },
+            {
+              "from": "none",
+              "to": "payload",
+              "label": ""
+            },
+            {
+              "from": "load",
+              "to": "payload",
+              "label": ""
+            },
+            {
+              "from": "payload",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "文件存在但 JSON 格式损坏会抛异常；图中缺省分支仅针对文件不存在。"
+        }
       },
       {
         "start": 41,
         "end": 42,
         "title": "脚本入口：只在命令行执行汇总",
         "principle": [
-          "入口保护允许其他 Python 程序导入 read_json 而不意外解析命令行和重写 comparison.json。"
+          "入口判断让其他脚本可以导入 read_json，而不立即读取命令行或覆盖 comparison.json。直接由 run_dual_split.sh 调用本文件时，条件为真，执行 main。"
         ],
         "syntax": [
-          "__name__ == \"__main__\" 在直接执行此文件时成立，导入时不成立。"
+          "if __name__ == \"__main__\" 是 Python 常用脚本入口形式；main 后面的括号表示实际调用，而不是仅引用函数对象。"
         ],
-        "shapes": "",
-        "pitfall": "",
-        "exercise": "import summarize_comparison 会写出 comparison.json 吗？",
-        "answer": "不会，除非调用它的 main 函数。",
-        "diagram": "train"
+        "shapes": "不处理张量；决定是否执行文件整理流程。",
+        "pitfall": "入口保护不验证上游训练是否成功；输入是否齐全仍由 read_json 的文件存在性判断决定。",
+        "summary": "在直接运行脚本时开始汇总，导入模块时只提供可复用函数。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "__name__",
+            "type": "str",
+            "meaning": "直接执行时为 __main__，导入时为模块名。"
+          },
+          {
+            "name": "main",
+            "type": "无参数函数",
+            "meaning": "负责参数解析、四份摘要读取和总文件写入。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "判断是否直接启动",
+            "detail": "L41 检查模块身份。"
+          },
+          {
+            "title": "调用汇总入口",
+            "detail": "L42 仅在条件成立时执行 main。"
+          }
+        ],
+        "returns": [
+          "正常执行 main 后进程结束；本段无自定义返回值。"
+        ]
       }
-    ]
+    ],
+    "role": "由 run_dual_split.sh 在两种协议完成后调用的结果整理入口。",
+    "inputs": [
+      "--run-root：双协议实验根目录，里面预期有 train100/ 和 train90/。",
+      "--task-name：用于摘要显示的任务名。",
+      "四份已有 JSON：每个协议各一份 split_summary.json 和 best_metrics.json。"
+    ],
+    "outputs": [
+      "run-root/comparison.json：包含 task_name、completed_at_utc、train100、train90 的嵌套字典。",
+      "缺失的输入 JSON 对应 null；已有但格式错误的 JSON 会抛异常。"
+    ],
+    "readingGuide": [
+      "先看 main 中 payload 的嵌套结构，再看 read_json 如何处理缺失文件。",
+      "completed_at_utc 是汇总脚本生成结果的时间，不是模型开始训练的时间，也不一定是模型实际最后一次更新的时刻。",
+      "它只收集最佳指标与划分审计，不汇总完整 epoch 曲线、模型权重或独立测试结果。"
+    ],
+    "components": [
+      {
+        "name": "read_json",
+        "kind": "函数",
+        "summary": "判断文件存在并读取 JSON；文件不存在返回 None。",
+        "segmentStart": 1
+      },
+      {
+        "name": "main",
+        "kind": "函数",
+        "summary": "解析根目录与任务名，读取四份摘要，组装并写 comparison.json。",
+        "segmentStart": 19
+      },
+      {
+        "name": "__main__ 入口",
+        "kind": "脚本条件",
+        "summary": "直接命令行运行时才调用 main。",
+        "segmentStart": 41
+      }
+    ],
+    "pipeline": {
+      "title": "四份摘要如何合成 comparison.json",
+      "nodes": [
+        {
+          "id": "args",
+          "title": "解析根目录和任务名",
+          "detail": "两个必填命令行参数",
+          "kind": "input"
+        },
+        {
+          "id": "a",
+          "title": "读取 train100 两份 JSON",
+          "detail": "split_summary 与 best_metrics",
+          "kind": "process"
+        },
+        {
+          "id": "b",
+          "title": "读取 train90 两份 JSON",
+          "detail": "split_summary 与 best_metrics",
+          "kind": "process"
+        },
+        {
+          "id": "merge",
+          "title": "组装 payload",
+          "detail": "保留协议嵌套结构并添加 UTC 时刻",
+          "kind": "process"
+        },
+        {
+          "id": "out",
+          "title": "写 comparison.json",
+          "detail": "UTF-8、保留中文、缩进 2",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "args",
+          "to": "a",
+          "label": ""
+        },
+        {
+          "from": "args",
+          "to": "b",
+          "label": ""
+        },
+        {
+          "from": "a",
+          "to": "merge",
+          "label": ""
+        },
+        {
+          "from": "b",
+          "to": "merge",
+          "label": ""
+        },
+        {
+          "from": "merge",
+          "to": "out",
+          "label": ""
+        }
+      ],
+      "caption": "每次读取缺失文件时放入 null；流程不重新评估网络或证明训练已经正确完成。"
+    }
   }
 ]

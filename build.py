@@ -9,6 +9,33 @@ SNAPSHOTS = ROOT / "source"
 OUT.mkdir(exist_ok=True)
 SNAPSHOTS.mkdir(exist_ok=True)
 files = []
+
+def validate_flow(flow, context):
+    if not flow:
+        return
+    assert flow.get("title") and flow.get("caption"), context
+    nodes = flow["nodes"]
+    ids = {n["id"] for n in nodes}
+    assert len(ids) == len(nodes) and len(nodes) > 1, context
+    for node in nodes:
+        assert node.get("title") and node.get("detail"), (context, node)
+    for edge in flow["edges"]:
+        assert edge["from"] in ids and edge["to"] in ids, (context, edge)
+
+def source_inventory(tree, segments):
+    definitions = []
+    def walk(body, scope=""):
+        for node in body:
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = next((s for s in segments if s["start"] <= node.lineno <= s["end"]), None)
+                assert owner, ("definition without explanation", scope, node.name)
+                is_class = isinstance(node, ast.ClassDef)
+                signature = ("class " + node.name + "(" + ", ".join(ast.unparse(b) for b in node.bases) + ")") if is_class else node.name + "(" + ast.unparse(node.args) + ")"
+                definitions.append({"name":node.name, "scope":scope, "signature":signature, "line":node.lineno, "end":node.end_lineno, "segmentStart":owner["start"], "kind":"class" if is_class else "function"})
+                walk(node.body, (scope + "." if scope else "") + node.name)
+    walk(tree.body)
+    return definitions
+
 for part in ("data", "model", "training"):
     items = json.loads((ROOT / f"content-{part}.json").read_text(encoding="utf-8-sig"))
     for item in items:
@@ -30,16 +57,50 @@ for part in ("data", "model", "training"):
             assert 1 <= seg["start"] <= seg["end"] <= len(lines), (item["path"], seg["title"])
             assert seg["start"] > previous, (item["path"], "overlapping segments", seg["title"])
             previous = seg["end"]
-            for key in ("title","principle","syntax","exercise","answer"):
+            for key in ("title","summary","principle","syntax","steps","returns"):
                 assert seg.get(key), (item["path"], key, seg["title"])
+            assert not any(key in seg for key in ("exercise", "answer", "diagram")), (item["path"], "obsolete teaching schema")
+            for key in ("parameters", "variables"):
+                assert isinstance(seg.get(key), list), (item["path"], key, seg["title"])
+                for row in seg[key]:
+                    assert all(row.get(k) for k in ("name", "type", "meaning")), (item["path"], row)
+            validate_flow(seg.get("flow"), (item["path"], seg["title"]))
+        for key in ("overview", "role", "inputs", "outputs", "components", "readingGuide"):
+            assert item.get(key), (item["path"], key)
+        for component in item["components"]:
+            assert all(component.get(k) for k in ("name", "kind", "summary", "segmentStart")), (item["path"], component)
+            assert component["segmentStart"] in {s["start"] for s in item["segments"]}, (item["path"], component)
+        validate_flow(item.get("pipeline"), item["path"])
         if relative.suffix == ".py":
             tree = ast.parse(source)
+            item["definitions"] = source_inventory(tree, item["segments"])
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef,ast.AsyncFunctionDef)):
                     assert any(s["start"]<=node.lineno<=s["end"] for s in item["segments"]), (item["path"],"uncovered function",node.name,node.lineno)
+                    relevant = [s for s in item["segments"] if s["start"] <= node.end_lineno and s["end"] >= node.lineno]
+                    names = " ".join(p["name"] for s in relevant for p in s["parameters"])
+                    params = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    params += [p for p in (node.args.vararg, node.args.kwarg) if p]
+                    for param in params:
+                        if param.arg not in ("self", "cls"):
+                            assert re.search(r"(?<![A-Za-z_0-9])" + re.escape(param.arg) + r"(?![A-Za-z_0-9])", names), (item["path"], node.name, "missing parameter explanation", param.arg)
         item.update(source=source,lines=lines,sha256=hashlib.sha256(source.encode()).hexdigest())
         files.append(item)
 assert len({f["path"] for f in files}) == len(files)
+for item in files:
+    dependencies = []
+    if item["path"].endswith(".py"):
+        tree = ast.parse(item["source"])
+        package = item["path"].split("/")[:-1]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                base = package[:len(package)-node.level+1] if node.level else []
+                module = base + (node.module.split(".") if node.module else [])
+                candidates = ["/".join(module) + ".py", "/".join(module + ["__init__.py"])]
+                for candidate in candidates:
+                    if candidate != item["path"] and candidate in {f["path"] for f in files} and candidate not in dependencies:
+                        dependencies.append(candidate)
+    item["dependencies"] = dependencies
 report = (ROOT / "report.html").read_text(encoding="utf-8-sig")
 figure_info = {
     "interpolation": ("图 3 · 离散点到逐列标签的完整计算", "示例使用原图8×20、新图16×10。先反查原图横坐标，线性插值，再缩放纵坐标；数值存在和标签有效是两件事。"),
@@ -70,19 +131,20 @@ def embed_figure(match):
 report = re.sub(r"<!--FIG:([a-z]+)-->", embed_figure, report)
 assert "<!--FIG:" not in report
 assert all(link in {f["path"] for f in files} for link in re.findall(r'href="#code/([^"?]+)',report))
-manifest = {"created":"2026-11-14","files":files}
+manifest = {"created":"2026-11-14","updated":"2026-11-21","reader_version":4,"files":files}
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {
-    "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig"),
+    "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "reader.css").read_text(encoding="utf-8-sig"),
     "REPORT":report,
     "DATA":payload,
-    "APP":(ROOT / "app.js").read_text(encoding="utf-8-sig")
+    "APP":(ROOT / "app.js").read_text(encoding="utf-8-sig").replace("/*__READER__*/", (ROOT / "reader.js").read_text(encoding="utf-8-sig"))
 }.items():
     html = html.replace("/*__"+key+"__*/",value)
 assert "/*__" not in html
 (OUT / "index.html").write_text(html,encoding="utf-8")
 (OUT / ".nojekyll").touch()
 summary = {"files":len(files),"segments":sum(len(f["segments"]) for f in files),"source_lines":sum(len(f["lines"]) for f in files),"html_bytes":len(html.encode()),"hashes":{f["path"]:f["sha256"] for f in files}}
+summary.update(definitions=sum(len(f.get("definitions",[])) for f in files), parameter_entries=sum(len(s["parameters"]) for f in files for s in f["segments"]), variable_entries=sum(len(s["variables"]) for f in files for s in f["segments"]), flowcharts=sum(bool(f.get("pipeline")) + sum(bool(s.get("flow")) for s in f["segments"]) for f in files))
 (ROOT / "build-manifest.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
 print(json.dumps({k:v for k,v in summary.items() if k!="hashes"},ensure_ascii=False))

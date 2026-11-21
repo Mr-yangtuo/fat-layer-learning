@@ -2,750 +2,5326 @@
   {
     "path": "LineDet/model/model.py",
     "title": "从超声图像到两条边界：模型主干",
-    "overview": "这个文件定义可学习去噪、轻量骨干、两尺度特征融合、热图预测和可微坐标解码。B为批大小，L为边界条数，H/W为图高/图宽；真实训练脚本令L=2。模型本身不直接输出区域mask，也不预测有效性。",
+    "overview": "这个文件定义“图像怎样变成两条逐列边界”的神经网络。它先对灰度图做可学习滤波，用 MobileNet 提取粗细两种尺度的特征，再把两种特征对齐、拼接、融合，生成每条边界各自的二维评分图。最后对每一列的高度评分做归一化和加权平均，输出小数形式的边界高度。文件还提供从参考坐标构造高斯热图标签的工具，供损失模块调用；这一步属于制作监督答案，不属于模型推理。",
     "segments": [
       {
         "start": 5,
         "end": 14,
         "title": "导入模块与可选的 timm 依赖",
         "principle": [
-          "nn提供有参数的层与Module基类，functional提供插值、softmax等计算。torchvision提供MobileNetV3；MobileNetV4分支才需要timm。",
-          "将timm导入失败转换为None，使只用V3时仍可导入本文件；真正选V4时再报告缺失依赖。"
+          "模块导入阶段只定义工具和类，不会自动构建或训练模型。V3 不依赖 timm，因此用可选导入避免整个项目被不需要的 V4 依赖阻断。"
         ],
         "syntax": [
-          "import torch.nn as nn 是模块别名；from torch import Tensor用于函数类型标注，不会自动检查形状。",
-          "try/except ImportError只捕获导入类错误，不会自动安装依赖。模块顶层导入torchvision仍是必需。"
+          "import torch.nn as nn 中 as 只是给模块起短名字；from torch import Tensor 只导入一个对象。",
+          "try/except ImportError 专门处理模块不可导入；后续 if timm is None 会在构建 V4 时给出明确错误。"
         ],
         "shapes": "",
         "pitfall": "仓库未固定依赖版本；pretrained旧参数和ExecuTorch接口需要与所用环境版本匹配。",
-        "exercise": "为什么不能把timm=None直接当作一个可用模型？",
-        "answer": "它只是缺失依赖的哨兵；TimmFeatureBackbone初始化会检查并抛ImportError。",
-        "diagram": ""
+        "summary": "导入张量运算、网络层和模型工厂，并让缺少 timm 的环境仍可使用 V3。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "torch",
+            "type": "模块",
+            "meaning": "创建和运算张量；负责设备、类型以及高斯核计算。"
+          },
+          {
+            "name": "nn",
+            "type": "torch.nn 别名",
+            "meaning": "提供 Module、Conv2d、Sequential、BatchNorm2d 等有状态网络层。"
+          },
+          {
+            "name": "F",
+            "type": "torch.nn.functional 别名",
+            "meaning": "提供 interpolate、softmax 等直接对张量执行的函数。"
+          },
+          {
+            "name": "models",
+            "type": "torchvision.models 别名",
+            "meaning": "提供 MobileNetV3 的既有网络结构。"
+          },
+          {
+            "name": "Tensor",
+            "type": "类型",
+            "meaning": "用于 soft_argmax 的类型标注，不会自动改变输入类型。"
+          },
+          {
+            "name": "timm",
+            "type": "模块或 None",
+            "meaning": "V4 的可选依赖；导入失败记为 None，只有真的构造 V4 时才报错。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L5–9 导入基础依赖",
+            "detail": "这些导入在 Python 加载本模块时执行，之后各类和函数复用同一组名字。"
+          },
+          {
+            "title": "L11–14 尝试导入可选骨干库",
+            "detail": "try 内导入 timm；只捕获 ImportError，不会把其他运行时错误全部吞掉。"
+          }
+        ],
+        "returns": [
+          "没有函数返回值；在模块命名空间中建立依赖名称。"
+        ]
       },
       {
         "start": 17,
         "end": 37,
         "title": "高斯初始化的可学习去噪卷积",
         "principle": [
-          "超声图像有细碎纹理，先用局部加权平均提供平滑初始倾向。5×5网格中心为0，初始核G(i,j)=exp(-(i²+j²)/(2σ²))，再除以总和，使初始权重和为1。",
-          "这层随后参与反向传播：learnable=True意味着它可以离开高斯形状、权重也不再保证非负或和为1。因此应称“高斯初始化的可学习卷积”，不能把训练后的滤波器仍视为固定高斯。"
+          "高斯初始化让邻近像素先做加权平均，中心权重大、远处权重小。训练后权重不再被强制保持高斯形状、非负或和为1，因此应叫“高斯初始化的可学习滤波”，不能说每次前向都执行固定高斯模糊。",
+          "groups=channels 是逐通道卷积。这里处理灰度图时只有一个通道；在多通道输入上也不会把不同通道混合。"
         ],
         "syntax": [
-          "super().__init__()注册Module基础设施；kernel_size//2是整数除法，5//2=2。",
-          "meshgrid(indexing=\"ij\")生成行列坐标；view(1,1,5,5)变成卷积权重要求的维度；repeat(channels,1,1,1)为每个输入通道复制一份核。",
-          "Conv2d(in=channels,out=channels,groups=channels,bias=False)是逐通道卷积。padding=2在5×5、stride=1时保持尺寸。requires_grad控制是否累积参数梯度。"
+          "torch.arange(K) 生成 0…K−1；// 是整除。meshgrid(indexing=\"ij\") 按矩阵行列约定构造坐标网格。",
+          "view(1,1,K,K) 只调整形状；repeat(channels,1,1,1) 真正复制数据。Conv2d 权重形状是 [输出通道, 输入通道/groups, K, K]。",
+          "nn.Conv2d 的 stride 未传，默认1；padding 是补零宽度；groups 控制连接分组；bias=False 禁用偏置。",
+          "weight.data 直接替换参数的数据；requires_grad 只控制该参数是否计算梯度，不改变网络是否处于 train/eval 模式。"
         ],
         "shapes": "输入[B,1,H,W] → 权重[1,1,5,5] → 输出[B,1,H,W]",
-        "pitfall": "初始化使用.weight.data绕开autograd；更稳妥的新代码通常在torch.no_grad()下copy_。未检查核大小为奇数或sigma>0。",
-        "exercise": "若改为3通道，groups=3的权重形状是什么？",
-        "answer": "[3,1,5,5]，三个通道各自过滤，不混合颜色通道。",
-        "diagram": "model"
+        "pitfall": "代码没有检查核尺寸为奇数或 sigma>0。偶数核配合 K//2 补边可能改变输出尺寸；当前主路径固定5和1.0。",
+        "summary": "创建一个初始行为类似高斯模糊、但可以通过训练改变权重的逐通道卷积层。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "DenoiseBlock 实例",
+            "default": "自动传入",
+            "meaning": "保存滤波层，父类 Module 负责追踪参数。"
+          },
+          {
+            "name": "channels",
+            "type": "int",
+            "default": "1",
+            "meaning": "输入和输出通道数相同；同时也是分组数，使各通道独立滤波。"
+          },
+          {
+            "name": "kernel_size",
+            "type": "int",
+            "default": "5",
+            "meaning": "方形卷积核边长；当前使用奇数5，padding=2 保持空间尺寸。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "1.0",
+            "meaning": "初始化高斯核的宽度；越大，初始平滑范围越宽，必须为正数。"
+          },
+          {
+            "name": "learnable",
+            "type": "bool",
+            "default": "True",
+            "meaning": "设置卷积权重 requires_grad；True 时参与反向传播更新，False 时作为固定滤波器。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "padding",
+            "type": "int",
+            "meaning": "kernel_size // 2，5//2=2，在图像四边补零。"
+          },
+          {
+            "name": "grid",
+            "type": "Tensor [K]",
+            "meaning": "以0为中心的坐标轴；K=5时为[-2,-1,0,1,2]。"
+          },
+          {
+            "name": "x, y",
+            "type": "Tensor [K,K]",
+            "meaning": "meshgrid 生成每个核位置的二维坐标；x²+y²表示到中心的平方距离。"
+          },
+          {
+            "name": "kernel",
+            "type": "float Tensor [K,K]",
+            "meaning": "先算 exp(-(x²+y²)/(2σ²))，再除以总和；初始化时全部核权重相加为1。"
+          },
+          {
+            "name": "weight",
+            "type": "Tensor [C,1,K,K]",
+            "meaning": "为每个输入通道复制同一个核，符合 groups=C 时 Conv2d 的权重布局。"
+          },
+          {
+            "name": "self.filter",
+            "type": "nn.Conv2d",
+            "meaning": "同进同出的逐通道卷积；bias=False，不另加偏置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L19–23 准备坐标",
+            "detail": "初始化父类、计算补边宽度、生成一维坐标并展开成二维网格。"
+          },
+          {
+            "title": "L24–27 制作权重",
+            "detail": "按距中心远近计算高斯权重，归一化后扩成卷积所需的四维权重。"
+          },
+          {
+            "title": "L29–35 创建卷积层",
+            "detail": "输入输出均为 channels，groups=channels 使一个通道只被自己的核处理。"
+          },
+          {
+            "title": "L36–37 写入初始核",
+            "detail": "用高斯核替换随机初始权重，再决定是否允许梯度更新。"
+          }
+        ],
+        "returns": [
+          "构造器不返回张量；实例持有 self.filter。输入 [B,C,H,W] 在奇数核、步长1时输出相同形状。"
+        ],
+        "flow": {
+          "title": "滤波核如何构造",
+          "nodes": [
+            {
+              "id": "grid",
+              "title": "中心坐标网格",
+              "detail": "一维[-2,2]扩成5×5",
+              "kind": "process"
+            },
+            {
+              "id": "distance",
+              "title": "计算二维距离",
+              "detail": "x²+y²",
+              "kind": "process"
+            },
+            {
+              "id": "kernel",
+              "title": "高斯权重并归一化",
+              "detail": "总和为1",
+              "kind": "process"
+            },
+            {
+              "id": "copy",
+              "title": "扩展到卷积权重",
+              "detail": "[C,1,5,5]",
+              "kind": "process"
+            },
+            {
+              "id": "conv",
+              "title": "建立逐通道卷积",
+              "detail": "groups=C，bias=False",
+              "kind": "process"
+            },
+            {
+              "id": "grad",
+              "title": "设定能否学习",
+              "detail": "requires_grad=learnable",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "distance",
+              "from": "grid"
+            },
+            {
+              "to": "kernel",
+              "from": "distance"
+            },
+            {
+              "to": "copy",
+              "from": "kernel"
+            },
+            {
+              "to": "conv",
+              "from": "copy"
+            },
+            {
+              "to": "grad",
+              "from": "conv"
+            }
+          ],
+          "caption": "只在构造时按高斯公式初始化卷积核。forward 使用已保存权重；learnable=True 时训练可以改变核的形状和总和。"
+        }
       },
       {
         "start": 39,
         "end": 40,
         "title": "forward 为什么只有一行",
         "principle": [
-          "forward描述输入到输出的计算，不负责遍历训练数据。调用denoise(x)会通过Module.__call__进入此函数，并保留用于反向传播的卷积计算图。"
+          "__init__ 负责创建可学习部件，forward 负责描述输入经过这些部件的顺序。forward 只有一行并不意味着没有可学习参数，参数保存在 self.filter 中。"
         ],
         "syntax": [
-          "self.filter是已在__init__注册的子模块，调用它等价于运行卷积前向；同一权重会被所有样本共享。"
+          "nn.Module 实例可以像函数一样调用；self.filter(x) 会走模块的 __call__，进而执行其 forward 并保留自动求导关系。"
         ],
         "shapes": "[B,C,H,W] → [B,C,H,W]",
         "pitfall": "",
-        "exercise": "为什么不在forward里每次新建Conv2d？",
-        "answer": "那会每次重新初始化权重，且新参数通常不在已创建优化器的参数列表里。",
-        "diagram": "model"
+        "summary": "把输入交给构造器中已创建的滤波层，并原样返回滤波后的张量。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "DenoiseBlock 实例",
+            "default": "自动传入",
+            "meaning": "提供已初始化的 self.filter。"
+          },
+          {
+            "name": "x",
+            "type": "float Tensor [B,C,H,W]",
+            "default": "必填",
+            "meaning": "待滤波图像；通道数必须等于构造时的 channels。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.filter(x)",
+            "type": "Tensor [B,C,H,W]",
+            "meaning": "调用 Conv2d 的前向运算；当前5×5核、padding=2不改宽高。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L40 调用子模块",
+            "detail": "通过 self.filter(x) 触发卷积运算并返回结果；不在这里重新生成高斯核。"
+          }
+        ],
+        "returns": [
+          "与输入同形状的滤波结果（当前默认奇数核配置）。"
+        ]
       },
       {
         "start": 43,
         "end": 44,
         "title": "统一骨干名称",
         "principle": [
-          "把输入名称小写化并把连字符改成下划线，让有限的命名变体走到同一个分支。"
+          "该函数只减少大小写和连字符差异，不是任意模型名的模糊匹配。mobilenetv4_conv_medium 中没有 v 与4之间的下划线，因此拼写仍要与工厂支持名单一致。"
         ],
         "syntax": [
-          "字符串lower()和replace(\"-\",\"_\")都返回新字符串；不是模糊模型搜索。"
+          "字符串方法可以链式调用；lower 和 replace 都返回字符串。"
         ],
         "shapes": "",
         "pitfall": "mobilenet-v3-large可被归一化为mobilenet_v3_large，但任意拼错的名称不会被纠正。",
-        "exercise": "MOBILENET-V3-LARGE得到什么？",
-        "answer": "mobilenet_v3_large。",
-        "diagram": ""
+        "summary": "将骨干名称转换成可稳定比较的规范字符串。",
+        "parameters": [
+          {
+            "name": "name",
+            "type": "str",
+            "default": "必填",
+            "meaning": "调用方传入的骨干名称，例如 MobileNet-V3-Large。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "name.lower()",
+            "type": "str",
+            "meaning": "将所有英文字母转为小写。"
+          },
+          {
+            "name": "replace(\"-\", \"_\")",
+            "type": "str",
+            "meaning": "把所有连字符替换为下划线，不会自动插入或删除其他字符。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L44 依次变换字符串",
+            "detail": "先 lowercase，再 replace；返回新字符串，原字符串对象不被原地修改。"
+          }
+        ],
+        "returns": [
+          "规范化后的 str，例如 mobilenet_v3_large。"
+        ]
       },
       {
         "start": 47,
         "end": 66,
         "title": "MobileNetV4：把分类骨干变为多尺度特征提取器",
         "principle": [
-          "features_only=True让timm返回中间空间特征，而不是一个分类向量。索引(2,4)指定需要的两个特征阶段；低层保留位置细节，高层具有更大感受野。",
-          "通道数从feature_info读取，避免把V3的40/960硬套在V4上。forward解包两个输出，供后续融合。"
+          "不同骨干提供特征的方式不同。这个封装让 V4 自己一次计算并返回两层，上层模型检测到元组后直接解包；V3 则需要先计算浅层，再把浅层传入剩余模块。",
+          "通道数决定融合卷积的输入输出尺寸，必须来自真实骨干定义；特征在空间上的尺度也由骨干决定。"
         ],
         "syntax": [
-          "in_chans=1指定灰度输入；pretrained决定是否请求预训练权重。out_indices是Python元组。",
-          "list(self.model.feature_info)取得元数据序列，字典[\"num_chs\"]读取对应层输出通道；return a,b返回元组。"
+          "timm.create_model(features_only=True) 请求中间特征；in_chans 是 timm 的参数名，对应本封装的 in_ch。",
+          "out_indices=(2,4) 是包含两个整数的元组；feature_info[index][\"num_chs\"] 先索引列表再查字典键。",
+          "low_level_feat, high_level_feat = self.model(x) 是序列解包，要求实际输出恰好两个元素。"
         ],
         "shapes": "输入[B,1,H,W] → 两个[B,Cᵢ,Hᵢ,Wᵢ]特征",
-        "pitfall": "V4准确通道与下采样率依赖timm对应模型定义，应在安装的版本中打印feature_info验证；不能沿用V3架构图尺寸。",
-        "exercise": "为什么融合层不直接把通道数写死为40和960？",
-        "answer": "不同骨干输出通道可能不同，必须用元数据构造匹配的卷积输入。",
-        "diagram": "model"
+        "pitfall": "V4 精确通道/尺度依赖安装的 timm 版本；本实现假定 list(feature_info) 保留可按原始 out_indices 索引的元数据，应以运行时 feature_info 检查为准。",
+        "summary": "封装 timm 骨干：构造时选中两层，前向时一次返回两张不同尺度特征图。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "TimmFeatureBackbone 实例",
+            "default": "自动传入",
+            "meaning": "保存底层模型及通道数元数据。"
+          },
+          {
+            "name": "model_name",
+            "type": "str",
+            "default": "必填",
+            "meaning": "timm 能识别的模型名，当前工厂传 mobilenetv4_conv_medium。"
+          },
+          {
+            "name": "pretrained",
+            "type": "bool",
+            "default": "False",
+            "meaning": "是否请求 timm 加载该骨干的预训练参数。"
+          },
+          {
+            "name": "in_ch",
+            "type": "int",
+            "default": "1",
+            "meaning": "输入图像通道数，通过 in_chans 传给 timm。"
+          },
+          {
+            "name": "out_indices",
+            "type": "tuple[int,int]",
+            "default": "(2,4)",
+            "meaning": "选择 feature_info 中的两级特征；第一个作浅层、第二个作深层。"
+          },
+          {
+            "name": "x",
+            "type": "float Tensor [B,in_ch,H,W]",
+            "default": "forward 必填",
+            "meaning": "前向输入图像。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.model",
+            "type": "timm 特征模型",
+            "meaning": "features_only=True 使它返回特征图列表，而非分类分数。"
+          },
+          {
+            "name": "feature_info",
+            "type": "list[dict]",
+            "meaning": "从 timm 模型读取各阶段元数据；num_chs 是通道数。"
+          },
+          {
+            "name": "self.low_level_channels, self.high_level_channels",
+            "type": "int",
+            "meaning": "分别供融合模块确定浅、深层通道；不把 V3 的40和960硬套到 V4。"
+          },
+          {
+            "name": "low_level_feat, high_level_feat",
+            "type": "Tensor",
+            "meaning": "self.model(x) 的两个输出；形状为 [B,C_low,H_low,W_low] 与 [B,C_high,H_high,W_high]。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L49–51 检查依赖",
+            "detail": "构造前先检查 timm 是否导入成功，缺少时立即抛 ImportError。"
+          },
+          {
+            "title": "L53–59 创建特征模型",
+            "detail": "传入模型名、预训练开关、输入通道及两级输出索引；关闭分类输出。"
+          },
+          {
+            "title": "L60–62 读取通道",
+            "detail": "将 feature_info 转成列表，取指定索引的 num_chs 保存。"
+          },
+          {
+            "title": "L64–66 执行前向",
+            "detail": "调用底层模型，解包两个特征并返回元组。"
+          }
+        ],
+        "returns": [
+          "构造器建立 self.model 和两个通道数属性；forward 返回 (low_level_feat, high_level_feat)。"
+        ],
+        "flow": {
+          "title": "V4 构造与前向",
+          "nodes": [
+            {
+              "id": "dep",
+              "title": "timm 可用？",
+              "detail": "缺失时抛 ImportError",
+              "kind": "decision"
+            },
+            {
+              "id": "create",
+              "title": "建立特征骨干",
+              "detail": "features_only=True",
+              "kind": "process"
+            },
+            {
+              "id": "meta",
+              "title": "读取两级通道数",
+              "detail": "feature_info 的 num_chs",
+              "kind": "process"
+            },
+            {
+              "id": "input",
+              "title": "输入图像",
+              "detail": "[B,1,H,W]",
+              "kind": "input"
+            },
+            {
+              "id": "extract",
+              "title": "一次计算两级特征",
+              "detail": "out_indices=(2,4)",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回浅层与深层",
+              "detail": "元组，不是单张特征图",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "create",
+              "label": "是",
+              "from": "dep"
+            },
+            {
+              "to": "meta",
+              "from": "create"
+            },
+            {
+              "to": "extract",
+              "from": "input"
+            },
+            {
+              "to": "extract",
+              "from": "meta"
+            },
+            {
+              "to": "out",
+              "from": "extract"
+            }
+          ],
+          "caption": "V4 的特征模型一次返回两个尺度。构造期读取的通道数用于创建融合层，前向期不再重复构建网络。"
+        }
       },
       {
         "start": 69,
         "end": 79,
         "title": "骨干工厂的 V4 分支",
         "principle": [
-          "统一工厂返回四个对象：低层提取器、高层提取器、低层通道数、高层通道数。V4第一个对象已同时返回低高两层，因此第二个只放Identity保持接口。"
+          "工厂函数把“按名称选择实现”的分支集中在一处，让完整模型只依赖统一接口。接口统一并不代表前向路径完全一样：主模型仍需区分第一项返回张量还是元组。"
         ],
         "syntax": [
-          "nn.Identity()输入原样返回，没有可学习参数；这里在V4正常forward分支并不会实际使用它。",
-          "多行return (...)构造元组；调用方以四个变量解包。"
+          "return (...) 用括号组织一个元组，调用处可用四个变量直接解包。",
+          "nn.Identity 的 forward 返回输入本身，没有可训练权重；这里主要用于保持返回项数一致。"
         ],
         "shapes": "",
         "pitfall": "",
-        "exercise": "V4为什么不再把low特征传给high_level_features？",
-        "answer": "TimmFeatureBackbone已经一次前向得到两层，LineCoordNetFPN检测到tuple后直接解包。",
-        "diagram": "model"
+        "summary": "骨干工厂的入口负责规范名称，并在选择 V4 时立即返回统一的四项接口。",
+        "parameters": [
+          {
+            "name": "name",
+            "type": "str",
+            "default": "\"mobilenet_v3_large\"",
+            "meaning": "希望构建的骨干；先规范化，再匹配支持名称。"
+          },
+          {
+            "name": "pretrained",
+            "type": "bool",
+            "default": "False",
+            "meaning": "传给所选骨干的预训练开关。"
+          },
+          {
+            "name": "in_ch",
+            "type": "int",
+            "default": "1",
+            "meaning": "输入通道数；灰度图为1。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "name",
+            "type": "规范化 str",
+            "meaning": "覆盖为小写、下划线格式后的名称。"
+          },
+          {
+            "name": "backbone",
+            "type": "TimmFeatureBackbone",
+            "meaning": "V4 封装对象，一次产生两级特征。"
+          },
+          {
+            "name": "nn.Identity()",
+            "type": "无参数模块",
+            "meaning": "为返回接口的“第二段骨干”占位；主模型检测到元组时不会调用它。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L70 规范名称",
+            "detail": "调用 _normalize_backbone_name，统一比较格式。"
+          },
+          {
+            "title": "L72–73 选择 V4",
+            "detail": "名称匹配时创建 TimmFeatureBackbone，指定两级输出为(2,4)。"
+          },
+          {
+            "title": "L74–79 返回四项",
+            "detail": "依次返回可调用骨干、占位模块、浅层通道、深层通道；return 后不会再执行下面的 V3 分支。"
+          }
+        ],
+        "returns": [
+          "四元组 (backbone, Identity, C_low, C_high)。第一项前向返回的是双特征元组。"
+        ]
       },
       {
         "start": 81,
         "end": 102,
         "title": "MobileNetV3：灰度输入与真实切分位置",
         "principle": [
-          "删除分类用途的池化/分类头，只保留mobilenet.features。第一层原来接受RGB三通道，这里新建单通道卷积，沿用输出通道、步长和核尺寸。",
-          "默认large模型的前5个features子模块产生40通道、1/8分辨率；其余模块继续产生960通道、1/32分辨率。对256×256输入分别是32×32和8×8。MobileNet的倒残差块使用扩展、逐通道卷积、投影；部分块有SE与Hardswish，内部实现来自torchvision。"
+          "浅层特征保留较多位置细节，深层特征经过更多下采样和非线性变换，覆盖更大范围的上下文。两者在融合时互补。",
+          "这里不是取两个独立网络：深层模块继续处理浅层输出。浅层结果另外保留一份，用于后面的跨层融合。",
+          "即使 pretrained=True，替换的灰度首层也会重新初始化，没有把原RGB权重平均迁移过来；其他未替换层才可能保留预训练参数。"
         ],
         "syntax": [
-          "children()只枚举直接子模块；list后才能切片。features[:5]包含索引0至4，features[5:]从索引5开始。",
-          "nn.Sequential(*features[:5])中的*把列表展开为多个位置参数。新建nn.Conv2d会替换第一层参数，即使其他层用了预训练权重，第一层也重新初始化。",
-          "else对应name==mobilenet_v3_large检查；不支持的名称抛ValueError。"
+          "children() 只取直接子模块；list(...) 使其可切片。[:5] 包含索引0至4，[5:] 从索引5开始。",
+          "nn.Sequential(*features[:5]) 中 * 将列表元素展开成多个位置参数；Sequential 按顺序调用它们。",
+          "新 Conv2d 使用 in_channels=in_ch，保留原 out_channels/kernel_size/stride/padding，bias=False 禁用偏置。"
         ],
         "shapes": "256输入：low=[B,40,32,32]，high=[B,960,8,8]",
-        "pitfall": "训练main.py虽然声明--backbone_pretrained，却没有传给LineCoordNetFPN，因此当前主训练路径默认不加载预训练。V3新第一层也未由RGB权重求均值迁移。",
-        "exercise": "features[:5]是否等于前五个倒残差块？",
-        "answer": "不是；features[0]是stem卷积，因此切片包含stem加四个后续块。",
-        "diagram": "model"
+        "pitfall": "当前 main.py 虽定义 --backbone_pretrained，却未传给 LineCoordNetFPN，因此主训练默认不加载预训练。features[:5] 不能被误读为“五个倒残差块”，因为第0项是 stem。",
+        "summary": "构造 V3-large 特征骨干，替换灰度输入卷积，并在第5个 features 子模块后切成浅深两段。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "mobilenet",
+            "type": "torchvision MobileNetV3",
+            "meaning": "完整分类网络对象；本函数只使用其 features。"
+          },
+          {
+            "name": "features",
+            "type": "list[nn.Module]",
+            "meaning": "features.children() 的直接子模块列表；不包括分类器和全局池化。"
+          },
+          {
+            "name": "low_level_channels, high_level_channels",
+            "type": "int，40 / 960",
+            "meaning": "默认 V3-large 两个切点的通道数；用于后续融合卷积配置。"
+          },
+          {
+            "name": "first_conv",
+            "type": "原 nn.Conv2d",
+            "meaning": "读取原首层输出通道、卷积核、步长和补边配置。"
+          },
+          {
+            "name": "features[0][0]",
+            "type": "新 nn.Conv2d",
+            "meaning": "把首层输入通道改为 in_ch，其他关键几何配置延用原层。"
+          },
+          {
+            "name": "low_level_features",
+            "type": "nn.Sequential",
+            "meaning": "features[:5]，包括 stem 和后续四个子模块；256输入得到 [B,40,32,32]。"
+          },
+          {
+            "name": "high_level_features",
+            "type": "nn.Sequential",
+            "meaning": "features[5:]，接收浅层输出；得到 [B,960,8,8]。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L81–85 创建模型并记录通道",
+            "detail": "只有名称为 mobilenet_v3_large 才进入；实例化分类骨干并提取 features 列表。"
+          },
+          {
+            "title": "L87–95 替换首层",
+            "detail": "新建接收 in_ch 的卷积并放回 features[0][0]；这会创建新的首层参数。"
+          },
+          {
+            "title": "L96–97 切成两段",
+            "detail": "前5个子模块组成浅层，剩余子模块组成深层；深层输入是浅层输出。"
+          },
+          {
+            "title": "L99–102 处理未知名称并返回",
+            "detail": "未匹配已支持骨干时抛 ValueError，否则返回两段模型及通道数。"
+          }
+        ],
+        "returns": [
+          "四元组 (low_level_features, high_level_features, 40, 960)。"
+        ],
+        "flow": {
+          "title": "V3 两段式特征提取",
+          "nodes": [
+            {
+              "id": "create",
+              "title": "建立 MobileNetV3-large",
+              "detail": "仅取 features 子模块",
+              "kind": "process"
+            },
+            {
+              "id": "gray",
+              "title": "替换首层卷积",
+              "detail": "输入从RGB适配为灰度",
+              "kind": "process"
+            },
+            {
+              "id": "split",
+              "title": "切分模块列表",
+              "detail": "[:5] 与 [5:]",
+              "kind": "process"
+            },
+            {
+              "id": "low",
+              "title": "先计算浅层",
+              "detail": "[B,40,32,32]",
+              "kind": "process"
+            },
+            {
+              "id": "high",
+              "title": "继续计算深层",
+              "detail": "[B,960,8,8]",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "保留两级结果",
+              "detail": "供融合使用",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "gray",
+              "from": "create"
+            },
+            {
+              "to": "split",
+              "from": "gray"
+            },
+            {
+              "to": "low",
+              "from": "split"
+            },
+            {
+              "to": "high",
+              "from": "low"
+            },
+            {
+              "to": "out",
+              "label": "细节",
+              "from": "low"
+            },
+            {
+              "to": "out",
+              "label": "上下文",
+              "from": "high"
+            }
+          ],
+          "caption": "深层继续处理浅层输出，浅层结果同时保留给融合。标注尺寸对应默认 V3-large 和 256×256 输入。"
+        }
       },
       {
         "start": 105,
         "end": 116,
         "title": "Soft-argmax：可微地把一列概率变成坐标",
         "principle": [
-          "对每条线的每个x列，模型要选择一个y位置。先沿高度H做softmax，得到该列的概率p(y|x,l)，再算期望ŷ=Σy·p(y)。输出可以为小数，因此能用坐标误差反传到热图。",
-          "减去该列最大值不改变softmax结果，却避免exp溢出；temperature越小分布通常越尖锐，越大越均匀。这里只有temperature=1。",
-          "普通argmax只返回最高位置的离散索引；这里的加权平均可微。若一列有两个峰，结果可能落在两个峰之间，所以热图监督仍然重要。"
+          "softmax 把同一列的候选高度放在一起比较：p(r)=exp(z(r)/T)/Σexp(z(k)/T)。归一化轴是高度，不是两条边界之间。",
+          "坐标是 ŷ=Σr·p(r)。例如四行概率为[0.1,0.2,0.3,0.4]，坐标为2.0；两行43和44各占一半时，坐标为43.5。",
+          "加权平均可以对评分求导，而 argmax 只返回离散位置。双峰分布可能平均到两峰之间，因此只约束最后坐标不足以保证热图集中，仍需要热图损失。"
         ],
         "syntax": [
-          "heatmaps.shape解包[B,L,H,W]；dim=2准确指高度轴，不是线条轴。keepdim=True保留长度1，便于广播相减。",
-          "torch.arange(H).view(1,1,H,1)将0到H-1广播到所有批、线和列；sum(dim=2)消掉高度轴。",
-          "返回类型标注->Tensor只说明类型。max返回值和索引，_表示不需要索引。"
+          "Tensor.max(dim=2,keepdim=True) 返回(最大值,索引)，keepdim 保留长度1的高度轴，以便自动广播相减。",
+          "view(1,1,H,1) 改变行号张量的视图；乘法广播时只复制逻辑索引，不需要手工把每个批和列写一遍。",
+          "sum(dim=2) 消去高度轴。函数签名的 Tensor 和 -> Tensor 是类型提示，不会在运行时自动验证形状。"
         ],
         "shapes": "logits[B,L,H,W] → 概率[B,L,H,W] → 坐标[B,L,W]",
-        "pitfall": "未检查temperature>0；输出被限制在[0,H-1]的凸包。概率均匀时预测(H-1)/2；这不等于模型发现了中间边界。",
-        "exercise": "高度为4且概率[0.1,0.2,0.3,0.4]时坐标是多少？",
-        "answer": "0×0.1+1×0.2+2×0.3+3×0.4=2.0。",
-        "diagram": "heatmap"
+        "pitfall": "temperature 没有正数检查。概率均匀时预测(H−1)/2，只是平均值，不代表已识别出中间位置。该 softmax 分布不同于 BCE 热图损失中的逐像素 sigmoid 值。",
+        "summary": "把每条边界每一列的高度评分转成概率，再计算行号的加权平均，得到可微坐标。",
+        "parameters": [
+          {
+            "name": "heatmaps",
+            "type": "float Tensor [B,L,H,W]",
+            "default": "必填",
+            "meaning": "模型原始评分 logits；L 是边界条数，H 是候选高度，W 是横向列数。"
+          },
+          {
+            "name": "temperature",
+            "type": "float",
+            "default": "1.0",
+            "meaning": "在 softmax 前除以此数；正数越小通常越尖锐，越大越均匀。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "B, L, H, W",
+            "type": "int",
+            "meaning": "从四维形状解包；本函数实际用 H 创建所有候选行号。"
+          },
+          {
+            "name": "device",
+            "type": "torch.device",
+            "meaning": "与输入一致，避免行号张量在CPU而输入在GPU。"
+          },
+          {
+            "name": "max_v",
+            "type": "Tensor [B,L,1,W]",
+            "meaning": "每列在高度轴上的最大评分，减去它改善指数计算稳定性。"
+          },
+          {
+            "name": "_",
+            "type": "Tensor 索引（忽略）",
+            "meaning": "max 同时返回最大值和其行号，解码不采用最大值行号，因此丢弃索引。"
+          },
+          {
+            "name": "probs",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "沿高度归一化后的概率；每条边界每列的 H 个概率相加为1。"
+          },
+          {
+            "name": "y_coords",
+            "type": "Tensor [1,1,H,1]",
+            "meaning": "浮点行号0至H−1，依靠广播扩展到所有批、边界和列。"
+          },
+          {
+            "name": "coords",
+            "type": "Tensor [B,L,W]",
+            "meaning": "probs 与行号相乘后沿高度求和，得到每列的期望高度。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L106–109 读取形状并调节温度",
+            "detail": "记录设备，将评分除以 temperature。"
+          },
+          {
+            "title": "L110–112 稳定地归一化",
+            "detail": "先减去每列最大值，再对 dim=2 做 softmax；每列的相对评分保持不变。"
+          },
+          {
+            "title": "L114 创建候选行号",
+            "detail": "以 float32 建立 [1,1,H,1] 的0…H−1。"
+          },
+          {
+            "title": "L115–116 加权求和",
+            "detail": "对每行执行概率×行号，沿高度相加，返回 [B,L,W]。"
+          }
+        ],
+        "returns": [
+          "浮点 Tensor [B,L,W]；每个值落在0到H−1之间，可以是小数。"
+        ],
+        "flow": {
+          "title": "每列如何得到小数坐标",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "原始评分",
+              "detail": "[B,L,H,W]",
+              "kind": "input"
+            },
+            {
+              "id": "temp",
+              "title": "除以温度",
+              "detail": "当前 T=1",
+              "kind": "process"
+            },
+            {
+              "id": "max",
+              "title": "减去本列最大值",
+              "detail": "保持相对差，避免指数溢出",
+              "kind": "process"
+            },
+            {
+              "id": "prob",
+              "title": "沿高度 softmax",
+              "detail": "每列概率总和为1",
+              "kind": "process"
+            },
+            {
+              "id": "rows",
+              "title": "乘以行号",
+              "detail": "0、1、…、H−1",
+              "kind": "process"
+            },
+            {
+              "id": "sum",
+              "title": "沿高度求和",
+              "detail": "输出 [B,L,W]",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "temp",
+              "from": "in"
+            },
+            {
+              "to": "max",
+              "from": "temp"
+            },
+            {
+              "to": "prob",
+              "from": "max"
+            },
+            {
+              "to": "rows",
+              "from": "prob"
+            },
+            {
+              "to": "sum",
+              "from": "rows"
+            }
+          ],
+          "caption": "每条边界、每个横向列分别计算。softmax 只在高度轴竞争，最终按行号求期望，允许输出小数。"
+        }
       },
       {
         "start": 119,
         "end": 136,
         "title": "从坐标生成列归一化高斯监督",
         "principle": [
-          "GT只给每列一个纵坐标，用高斯把“附近也接近正确”表达为软目标：q(y)∝exp(-(y-y*)²/(2σ²))。每个有效列再沿H归一化到总和1；无效列乘0后仍全0。",
-          "有限图像会截断边缘高斯，归一化将剩余质量重新分配。sigma控制目标容忍范围，并不直接设定模型的预测误差阈值。"
+          "“软目标”表示标签可以是0到1之间的小数。边界附近的行得到较高目标，远处行得到较低目标；它表达人为设定的监督形状，不是医生真实置信度，也不是脂肪区域概率。",
+          "以5行、中心2、σ=1的演示为例，未归一化数值约为[0.1353,0.6065,1,0.6065,0.1353]，总和2.4837；除以总和得到[0.0545,0.2442,0.4026,0.2442,0.0545]。实际训练σ=3，不使用这个示例的宽度。",
+          "σ越大，目标覆盖越多行；没有“超过σ就自动为零”的硬边界。中心为43.5时，43和44的目标相同；保留小数可表达亚像素位置。",
+          "这与 dataset_utils.py 的 generate_heatmap_targets 不同：数据集工具不按列归一化；当前损失在这里重新生成目标，因此训练真正比较的是本函数的输出。"
         ],
         "syntax": [
-          "coords.unsqueeze(2)把[B,L,W]变成[B,L,1,W]；与[1,1,H,1]广播相减，得到[B,L,H,W]。valid_mask同样扩展。",
-          "sum(dim=2,keepdim=True)+1e-8防止无效列0/0；x_grid虽然创建了但后续完全没用。"
+          "unsqueeze(2) 在第2维插入长度1；不同形状的张量相减时自动广播为 [B,L,H,W]。",
+          "**2 是平方；torch.exp 是逐元素指数；布尔 mask 与浮点数相乘时作为0/1使用。",
+          "sum(dim=2,keepdim=True) 只累计高度方向并保留该维，确保除法作用于各自的列。"
         ],
         "shapes": "coords/valid[B,L,W] → 高斯[B,L,H,W]",
-        "pitfall": "image_width实际未控制gaussian的宽度，宽度来自coords。代码未核验两者一致。数据集还有另一个未按列归一化的目标函数，训练损失用的是这里现场重建的版本。",
-        "exercise": "一个valid=False的列最终是均匀分布还是全0？",
-        "answer": "全0。先乘mask为0，再除以1e-8仍是0，随后损失会排除这个列。",
-        "diagram": "heatmap"
+        "pitfall": "image_width 不会校验 coords 的宽度。sigma 没有正数检查。高斯标签按图像有限高度截取后归一化；中心靠近上下边缘时分布会被截断。",
+        "summary": "围绕每个参考高度生成平滑软标签，再逐列归一化；无效列保持全零。",
+        "parameters": [
+          {
+            "name": "coords",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "参考边界高度，既可来自人工点，也可来自插值，允许小数。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "表示哪些边界列有监督；False 的整列目标清零。"
+          },
+          {
+            "name": "image_height",
+            "type": "int",
+            "default": "必填",
+            "meaning": "候选行数H；生成0…H−1的纵坐标网格。"
+          },
+          {
+            "name": "image_width",
+            "type": "int",
+            "default": "必填",
+            "meaning": "图像宽度；代码生成 x_grid 后未使用，实际输出宽度来自 coords。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "高斯标签宽度，单位为像素行；HeatmapCompositeLoss 实际强制传3.0。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "B, L, W",
+            "type": "int",
+            "meaning": "参考坐标的批大小、边界数和列数；W来自 coords.shape。"
+          },
+          {
+            "name": "device",
+            "type": "torch.device",
+            "meaning": "让网格与参考坐标位于相同设备。"
+          },
+          {
+            "name": "y_grid",
+            "type": "Tensor [1,1,H,1]",
+            "meaning": "每个候选行的行号。"
+          },
+          {
+            "name": "x_grid",
+            "type": "Tensor [1,1,1,image_width]",
+            "meaning": "横坐标网格，但之后没有被读取，对计算结果没有影响。"
+          },
+          {
+            "name": "coords_expanded, valid_expanded",
+            "type": "Tensor [B,L,1,W]",
+            "meaning": "插入高度轴，分别为中心坐标和有效性提供广播形状。"
+          },
+          {
+            "name": "y_diff",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "候选行号减参考高度；值为43−43.5时仍保留−0.5。"
+          },
+          {
+            "name": "gaussian",
+            "type": "float Tensor [B,L,H,W]",
+            "meaning": "先计算未归一化高斯，再乘掩码，最后逐列除以总和。"
+          },
+          {
+            "name": "gaussian_sum",
+            "type": "Tensor [B,L,1,W]",
+            "meaning": "每列高斯值总和加1e−8；加小数避免全零列除零。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L120–124 建立坐标网格",
+            "detail": "取 coords 形状和设备，创建纵、横坐标；后续实际只使用纵坐标。"
+          },
+          {
+            "title": "L126–128 对齐维度",
+            "detail": "在 coords 和 mask 的第2轴插入长度1，再让网格减去中心坐标。"
+          },
+          {
+            "title": "L130–131 计算高斯并屏蔽无效列",
+            "detail": "g(r)=exp(−(r−y)²/(2σ²))；mask=False 时整列变0。"
+          },
+          {
+            "title": "L133–136 归一化并返回",
+            "detail": "每列除以自身总和加小量；有效列总和近似1，无效列仍全0。"
+          }
+        ],
+        "returns": [
+          "float Tensor [B,L,H,W] 的高斯软目标；每个有效列近似归一化为1。"
+        ],
+        "flow": {
+          "title": "高斯软目标生成",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "高度与有效列",
+              "detail": "coords / valid_mask",
+              "kind": "input"
+            },
+            {
+              "id": "rows",
+              "title": "创建所有候选行号",
+              "detail": "0…H−1",
+              "kind": "process"
+            },
+            {
+              "id": "dist",
+              "title": "每行减去参考高度",
+              "detail": "支持小数中心",
+              "kind": "process"
+            },
+            {
+              "id": "gauss",
+              "title": "计算高斯值",
+              "detail": "距离越远数值越小",
+              "kind": "process"
+            },
+            {
+              "id": "mask",
+              "title": "无效列清零",
+              "detail": "有效列保留全部行",
+              "kind": "process"
+            },
+            {
+              "id": "norm",
+              "title": "逐列除以总和",
+              "detail": "加1e−8避免除零",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "得到目标热图",
+              "detail": "[B,L,H,W]",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "rows",
+              "from": "in"
+            },
+            {
+              "to": "dist",
+              "from": "rows"
+            },
+            {
+              "to": "gauss",
+              "from": "dist"
+            },
+            {
+              "to": "mask",
+              "from": "gauss"
+            },
+            {
+              "to": "norm",
+              "from": "mask"
+            },
+            {
+              "to": "out",
+              "from": "norm"
+            }
+          ],
+          "caption": "参考坐标可以来自插值。有效列的高斯值按高度归一化，无效列全部清零；这里不读取图像亮度。"
+        }
       },
       {
         "start": 139,
         "end": 152,
         "title": "两尺度融合：位置细节和语义一起看",
         "principle": [
-          "高层特征分辨率低但观察范围大，低层特征分辨率高、定位较细。先把high插值到low的空间大小，再沿通道拼接，让3×3卷积学习如何组合两种信息。",
-          "这是一个两尺度融合块；没有标准多级FPN的逐层横向1×1连接和反复相加，不能只按类名把它画成完整金字塔。"
+          "拼接只把两组描述放在一起，没有自动学会如何组合。紧接的3×3卷积才用可学习权重，把浅层细节与深层上下文混合并压缩。",
+          "默认每个输出特征由1000×3×3个权重计算，40个输出通道共360000个卷积权重。这里 bias=False；后面的BN另外有40个缩放和40个偏移参数。",
+          "BatchNorm 在训练时按通道统计批与空间位置上的均值方差，eval时使用累计统计量；ReLU将负数截为0，提供非线性。"
         ],
         "syntax": [
-          "F.interpolate(size=(h,w),mode=\"bilinear\",align_corners=False)按目标尺寸双线性插值。size顺序是高、宽。",
-          "torch.cat(...,dim=1)叠加通道，不会把像素值直接相加。Conv2d(960+40,40,3,padding=1,bias=False)保持空间尺寸并压缩通道。",
-          "BatchNorm2d在训练/评估模式下行为不同；ReLU(inplace=True)原位把负值截为0，减少临时内存。"
+          "F.interpolate(size=(h,w),mode=\"bilinear\",align_corners=False) 指定目标空间尺寸；align_corners=False 按像素中心规则映射采样位置。",
+          "torch.cat([...],dim=1) 在通道轴连接，其他维必须一致；不会像加法一样要求通道数相同。",
+          "Conv2d 的3表示3×3核，默认stride=1；padding=1维持宽高。ReLU(inplace=True) 允许在原存储上修改激活值，减少额外内存。"
         ],
         "shapes": "high[B,960,8,8] → [B,960,32,32]；cat low → [B,1000,32,32]；融合 → [B,40,32,32]",
-        "pitfall": "融合卷积为普通3×3而非深度可分离卷积，参数数为1000×40×3×3=360000（不含BN）。",
-        "exercise": "如果把cat改成加号，当前两个张量为什么不匹配？",
-        "answer": "high有960通道、low有40通道，逐元素加法不能直接对齐；cat允许通道数不同。",
-        "diagram": "model"
+        "pitfall": "深层插值不会凭空恢复丢失的高频细节，细节主要仍由浅层特征补充。这一层与后面的40→128和128→L是三次不同职责的卷积。",
+        "summary": "把深层特征放大到浅层大小，沿通道拼接，再压缩成适合边界预测的融合特征。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "FeatureFusionModule 实例",
+            "default": "自动传入",
+            "meaning": "保存卷积、批归一化和激活层。"
+          },
+          {
+            "name": "high_level_channels",
+            "type": "int",
+            "default": "必填",
+            "meaning": "深层特征通道数，默认V3为960。"
+          },
+          {
+            "name": "low_level_channels",
+            "type": "int",
+            "default": "必填",
+            "meaning": "浅层特征通道数，默认V3为40；也是融合后的输出通道数。"
+          },
+          {
+            "name": "high_level_feat",
+            "type": "float Tensor [B,C_high,H_high,W_high]",
+            "default": "forward 必填",
+            "meaning": "来自更深层、空间更粗的特征图。"
+          },
+          {
+            "name": "low_level_feat",
+            "type": "float Tensor [B,C_low,H_low,W_low]",
+            "default": "forward 必填",
+            "meaning": "来自浅层的细节特征，决定对齐目标尺寸。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.fusion_conv",
+            "type": "nn.Sequential",
+            "meaning": "3×3 Conv2d → BatchNorm2d → ReLU；默认1000通道变40通道。"
+          },
+          {
+            "name": "h, w",
+            "type": "int",
+            "meaning": "从浅层特征取空间尺寸，默认32和32；前两个维度用_忽略。"
+          },
+          {
+            "name": "high_upsampled",
+            "type": "Tensor [B,C_high,h,w]",
+            "meaning": "深层经双线性插值后的特征；只改变空间大小，不改变960个通道。"
+          },
+          {
+            "name": "fused",
+            "type": "Tensor [B,C_low+C_high,h,w]",
+            "meaning": "按通道拼接的特征；默认 [B,1000,32,32]，并不是逐元素相加。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L141–146 建立融合变换",
+            "detail": "卷积输入通道为浅层加深层，输出通道为浅层；padding=1保持空间大小，后接BN和ReLU。"
+          },
+          {
+            "title": "L149–150 对齐空间位置",
+            "detail": "读取浅层h,w，用双线性插值把深层8×8放大为32×32。"
+          },
+          {
+            "title": "L151 拼接描述",
+            "detail": "torch.cat(dim=1) 把两组通道并列保留，形成1000通道。"
+          },
+          {
+            "title": "L152 混合与压缩",
+            "detail": "3×3卷积每个输出通道同时读取全部1000个输入通道和邻近3×3位置，输出40通道。"
+          }
+        ],
+        "returns": [
+          "融合特征 [B,C_low,H_low,W_low]；默认 [B,40,32,32]。"
+        ],
+        "flow": {
+          "title": "融合内部的双输入链路",
+          "nodes": [
+            {
+              "id": "low",
+              "title": "浅层特征",
+              "detail": "40×32×32",
+              "kind": "input"
+            },
+            {
+              "id": "high",
+              "title": "深层特征",
+              "detail": "960×8×8",
+              "kind": "input"
+            },
+            {
+              "id": "up",
+              "title": "双线性上采样",
+              "detail": "960×32×32",
+              "kind": "process"
+            },
+            {
+              "id": "cat",
+              "title": "沿通道拼接",
+              "detail": "1000×32×32",
+              "kind": "process"
+            },
+            {
+              "id": "conv",
+              "title": "3×3混合并压缩",
+              "detail": "1000→40，空间不变",
+              "kind": "process"
+            },
+            {
+              "id": "bn",
+              "title": "BN与ReLU",
+              "detail": "归一化及非线性",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "融合特征",
+              "detail": "40×32×32",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "cat",
+              "from": "low"
+            },
+            {
+              "to": "up",
+              "from": "high"
+            },
+            {
+              "to": "cat",
+              "from": "up"
+            },
+            {
+              "to": "conv",
+              "from": "cat"
+            },
+            {
+              "to": "bn",
+              "from": "conv"
+            },
+            {
+              "to": "out",
+              "from": "bn"
+            }
+          ],
+          "caption": "插值只改变深层空间尺寸；拼接只增加通道数。真正学习浅深信息如何组合的是后续 3×3 卷积。"
+        }
       },
       {
         "start": 155,
         "end": 174,
         "title": "组装模型与热图预测头",
         "principle": [
-          "模块先实例化去噪、骨干、融合，再用3×3把40通道升到128、ReLU引入非线性、1×1投影成L条线的得分图。不同输出通道分别学习不同边界。",
-          "输出头末端没有sigmoid或softmax：它输出任意实数logits。热图的显示值、BCE中的sigmoid概率、soft-argmax中的列softmax概率是三种不同对象。"
+          "融合卷积先把1000个描述压成40个；预测头的3×3卷积再产生128种用于定位边界的局部组合。增加通道是增加可学习的隐藏表达维度，不是增加边界条数，也不改变图像宽高。",
+          "最后1×1卷积在每个空间位置读取128个数，为每条边界各学习一组128个权重及一个偏置。输出2通道因为任务有2条边界，不是“脂肪/背景”二分类。",
+          "128是实现者选择的隐藏宽度，代码没有证据说明它必然最优。最后一层不做ReLU是为了保留任意正负评分，让后续softmax/sigmoid按各自需要转换。",
+          "默认40→128的3×3层有40×128×9+128=46208个参数；128→2的1×1层有128×2+2=258个参数，两者默认都含偏置。"
         ],
         "syntax": [
-          "构造函数默认num_lines=3，而main.py传入默认2；判断实际网络应沿调用链看参数。",
-          "self.num_lines等普通属性保存配置；self.heatmap_head是Sequential子模块，会出现在state_dict与parameters中。",
-          "3×3卷积未显式bias=False，因此默认有偏置；末层1×1卷积在每个位置混合通道。"
+          "build_backbone(backbone,pretrained,in_ch=1) 前两个是位置参数，第三个是关键字参数；返回四元组通过赋值解包。",
+          "Conv2d(feat_channels,128,3,padding=1) 默认stride=1、bias=True；Conv2d(128,num_lines,1) 的1表示1×1卷积。",
+          "nn.Sequential 按定义顺序调用三个层；其中 ReLU 不含可学习参数。"
         ],
         "shapes": "融合[B,40,32,32] → [B,128,32,32] → [B,L,32,32]",
-        "pitfall": "self.use_heatmap和self.sigma保存后没有在forward使用，改变这两个构造参数不会切换输出模式或热图解码。",
-        "exercise": "为什么末层输出通道数应是边界条数，而不是背景+脂肪两类？",
-        "answer": "任务对每条边界在每个x列预测y分布，L对应曲线身份；它不是逐像素语义分类。",
-        "diagram": "model"
+        "pitfall": "num_lines默认3与数据的2条目标线不同，必须看main.py调用。use_heatmap=False也不会改变本类返回元组；sigma属性也不控制loss.py中实际σ=3的监督。",
+        "summary": "组装所有网络部件，并建立“融合特征 → 隐藏特征 → 每条边界评分”的预测头。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "LineCoordNetFPN 实例",
+            "default": "自动传入",
+            "meaning": "保存可训练子模块，使 parameters() 和 state_dict() 能统一管理。"
+          },
+          {
+            "name": "backbone",
+            "type": "str",
+            "default": "\"mobilenet_v3_large\"",
+            "meaning": "选择骨干工厂的实现。"
+          },
+          {
+            "name": "num_lines",
+            "type": "int",
+            "default": "3",
+            "meaning": "输出边界条数；main.py 实际传2，对应真皮层下界与脂肪层下界。"
+          },
+          {
+            "name": "pretrained",
+            "type": "bool",
+            "default": "False",
+            "meaning": "传给 build_backbone；主训练入口目前未传入它。"
+          },
+          {
+            "name": "use_heatmap",
+            "type": "bool",
+            "default": "True",
+            "meaning": "只保存为属性，本类 forward 没有据此切换成另一种结构。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "只保存为属性；本类前向不生成目标，不用它决定热图评分。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.num_lines, self.use_heatmap, self.sigma",
+            "type": "实例配置属性",
+            "meaning": "分别记录条数和两个配置值；只有条数用于这里构造输出层。"
+          },
+          {
+            "name": "self.denoise",
+            "type": "DenoiseBlock",
+            "meaning": "单通道、5×5、σ=1、可学习的输入滤波。"
+          },
+          {
+            "name": "self.low_level_features, self.high_level_features",
+            "type": "nn.Module",
+            "meaning": "骨干工厂返回的浅深层接口；V4第一项直接返回两个特征。"
+          },
+          {
+            "name": "low_level_channels, high_level_channels",
+            "type": "int",
+            "meaning": "骨干返回的真实通道数；默认40和960。"
+          },
+          {
+            "name": "self.feature_fusion",
+            "type": "FeatureFusionModule",
+            "meaning": "将两级特征混合成 low_level_channels 个通道。"
+          },
+          {
+            "name": "feat_channels",
+            "type": "int",
+            "meaning": "融合输出的通道数别名，默认40。"
+          },
+          {
+            "name": "self.heatmap_head",
+            "type": "nn.Sequential",
+            "meaning": "3×3卷积40→128、ReLU、1×1卷积128→num_lines；最后没有激活。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L157–161 保存配置并建滤波器",
+            "detail": "先初始化 Module，再保存属性，创建固定几何配置的可学习去噪层。"
+          },
+          {
+            "title": "L163–168 创建骨干和融合",
+            "detail": "四项解包骨干工厂返回值，根据通道数创建融合模块。"
+          },
+          {
+            "title": "L170–174 建立预测头",
+            "detail": "3×3卷积扩展隐藏表达到128通道；ReLU后用1×1卷积输出每条边界的一张评分图。"
+          }
+        ],
+        "returns": [
+          "构造完整 nn.Module；前向输出协议见下一段。预测头在默认输入下将 [B,40,32,32] 变成 [B,2,32,32]。"
+        ],
+        "flow": {
+          "title": "三次卷积的角色",
+          "nodes": [
+            {
+              "id": "cat",
+              "title": "拼接特征",
+              "detail": "1000通道",
+              "kind": "input"
+            },
+            {
+              "id": "fusion",
+              "title": "融合3×3卷积",
+              "detail": "1000→40：混合并压缩",
+              "kind": "process"
+            },
+            {
+              "id": "expand",
+              "title": "预测头3×3卷积",
+              "detail": "40→128：形成定位特征",
+              "kind": "process"
+            },
+            {
+              "id": "relu",
+              "title": "ReLU",
+              "detail": "引入非线性",
+              "kind": "process"
+            },
+            {
+              "id": "project",
+              "title": "预测头1×1卷积",
+              "detail": "128→2：各输出一条边界评分",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "两张评分图",
+              "detail": "不是前景/背景掩码",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "fusion",
+              "from": "cat"
+            },
+            {
+              "to": "expand",
+              "from": "fusion"
+            },
+            {
+              "to": "relu",
+              "from": "expand"
+            },
+            {
+              "to": "project",
+              "from": "relu"
+            },
+            {
+              "to": "out",
+              "from": "project"
+            }
+          ],
+          "caption": "1000→40 是融合压缩，40→128 是隐藏特征扩展，128→2 是两条边界的评分投影；三个步骤不改变 32×32 空间大小。"
+        }
       },
       {
         "start": 176,
         "end": 190,
         "title": "一次完整前向与返回协议",
         "principle": [
-          "输入先去噪，骨干提取两尺度特征，融合后生成低分辨率logits，插值回输入H×W。坐标因此处于输入图像像素坐标系，不是原始超声图尺寸。",
-          "V3低层返回单张Tensor，需要再运行高层；V4封装返回tuple/list，直接取两层。最后总是同时返回坐标和logits，让坐标损失与热图损失共同训练同一网络。"
+          "同一份评分同时承担两种监督：热图项约束每列响应形状，坐标项约束最后的边界高度。返回原始评分使损失可以自行选择sigmoid+BCE或softmax+MSE。",
+          "双线性上采样只在每个边界通道内部插值，不把两条边界混在一起。先恢复到输入网格再解码，使输出高度单位与数据集给出的像素坐标一致。"
         ],
         "syntax": [
-          "isinstance(low_level_feat,(list,tuple))允许两个类型；多变量赋值解包低高特征。",
-          "size=(x.shape[2],x.shape[3])读取NCHW的H/W。return y_px,heatmaps返回长度2元组，调用方不能当单个Tensor使用。"
+          "isinstance(value,(list,tuple)) 接受多种候选类型；多变量赋值要求序列正好含两项。",
+          "size=(x.shape[2],x.shape[3]) 的顺序是(H,W)，与PIL常见的(W,H)不同。",
+          "return y_px,heatmaps 自动构造元组；调用方可用 pred_y,pred_heatmaps=model(img) 解包。"
         ],
         "shapes": "输入[B,1,H,W] → (坐标[B,L,W], logits[B,L,H,W])",
-        "pitfall": "即使use_heatmap=False也返回元组；main的非热图分支不能直接兼容此模型。输出没有valid置信度或拓扑硬约束，交叉线仅由损失软惩罚。",
-        "exercise": "想把256图上的y恢复到原始高度594，最简单纯缩放情形用什么比例？",
-        "answer": "乘594/256；若前处理还有裁剪、填充或形变，必须逆变换相应步骤，不能只做一次比例缩放。",
-        "diagram": "model"
+        "pitfall": "此 forward 不检查 self.use_heatmap，总返回坐标与评分图。输入必须与模型设备和通道一致，本函数不自动搬设备或做灰度转换。",
+        "summary": "按骨干返回类型选择前向分支，得到高分辨率评分图，再同时返回坐标与原始评分。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "LineCoordNetFPN 实例",
+            "default": "自动传入",
+            "meaning": "使用构造器中注册的所有子模块。"
+          },
+          {
+            "name": "x",
+            "type": "float Tensor [B,1,H,W]",
+            "default": "必填",
+            "meaning": "预处理后的灰度图，通常已按单张图做标准化。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "x",
+            "type": "Tensor [B,1,H,W]",
+            "meaning": "本地变量被滤波结果覆盖；默认去噪不改变宽高，所以仍用其形状恢复输出尺寸。"
+          },
+          {
+            "name": "low_level_feat",
+            "type": "Tensor 或双特征 tuple",
+            "meaning": "先接收第一段骨干输出；V4是二元组，V3是浅层张量。"
+          },
+          {
+            "name": "high_level_feat",
+            "type": "Tensor",
+            "meaning": "V4从元组直接解包；V3把浅层继续送入深层得到。"
+          },
+          {
+            "name": "feat",
+            "type": "Tensor [B,C_low,H_low,W_low]",
+            "meaning": "融合模块输出。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "预测头先产生低分辨率评分，再双线性放大到输入高宽；仍是原始 logits。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [B,L,W]",
+            "meaning": "soft_argmax 对放大后的评分图解码出的浮点坐标。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L177–178 滤波和第一阶段特征",
+            "detail": "输入先经 self.denoise，然后调用 low_level_features。"
+          },
+          {
+            "title": "L179–182 分辨骨干接口",
+            "detail": "返回list/tuple就拆成浅深两层；否则将浅层张量交给high_level_features。"
+          },
+          {
+            "title": "L184–187 融合并预测",
+            "detail": "融合特征经过热图头，随后按 x.shape[2:4] 恢复评分图空间尺寸。"
+          },
+          {
+            "title": "L189–190 解码与返回",
+            "detail": "温度固定1.0，计算坐标后返回(y_px,heatmaps)，供坐标损失和热图损失分别使用。"
+          }
+        ],
+        "returns": [
+          "二元组：y_px [B,L,W] 与 heatmaps [B,L,H,W]。"
+        ],
+        "flow": {
+          "title": "前向中的骨干分支",
+          "nodes": [
+            {
+              "id": "x",
+              "title": "图像与可学习滤波",
+              "detail": "[B,1,H,W]",
+              "kind": "input"
+            },
+            {
+              "id": "first",
+              "title": "调用第一个骨干接口",
+              "detail": "low_level_features(x)",
+              "kind": "process"
+            },
+            {
+              "id": "type",
+              "title": "返回两层序列？",
+              "detail": "检查 list / tuple",
+              "kind": "decision"
+            },
+            {
+              "id": "unpack",
+              "title": "V4：直接解包",
+              "detail": "浅层与深层都已算出",
+              "kind": "process"
+            },
+            {
+              "id": "continue",
+              "title": "V3：继续深层",
+              "detail": "high_level_features(浅层)",
+              "kind": "process"
+            },
+            {
+              "id": "fuse",
+              "title": "融合两种尺度",
+              "detail": "得到预测用特征",
+              "kind": "process"
+            },
+            {
+              "id": "head",
+              "title": "预测头与上采样",
+              "detail": "恢复L×H×W评分",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "坐标与评分一起返回",
+              "detail": "soft_argmax + 原始heatmaps",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "first",
+              "from": "x"
+            },
+            {
+              "to": "type",
+              "from": "first"
+            },
+            {
+              "to": "unpack",
+              "label": "是",
+              "from": "type"
+            },
+            {
+              "to": "continue",
+              "label": "否",
+              "from": "type"
+            },
+            {
+              "to": "fuse",
+              "from": "unpack"
+            },
+            {
+              "to": "fuse",
+              "from": "continue"
+            },
+            {
+              "to": "head",
+              "from": "fuse"
+            },
+            {
+              "to": "out",
+              "from": "head"
+            }
+          ],
+          "caption": "V4 返回序列，V3 返回单张浅层特征。两个分支汇合后使用相同融合、预测头和坐标解码。"
+        }
       }
-    ]
+    ],
+    "role": "主训练、验证、推理与导出共用的模型定义；默认主路径是 MobileNetV3-large，训练入口传入 2 条边界。",
+    "inputs": [
+      "模型 forward：float Tensor [B,1,H,W]，B 是批大小，1 是灰度通道；训练通常 H=W=256。",
+      "模型构造参数：骨干名称、边界条数、是否加载预训练；高斯标签工具另接收坐标 [B,L,W] 与布尔有效掩码。"
+    ],
+    "outputs": [
+      "y_px：[B,L,W] 的浮点像素高度；主训练 L=2，每条边界每列一个高度。",
+      "heatmaps：[B,L,H,W] 原始评分 logits，尚未做 sigmoid；返回元组 (y_px, heatmaps)。",
+      "generate_gaussian_heatmap：按高度归一化的目标热图，供 loss.py 使用。"
+    ],
+    "readingGuide": [
+      "先读 LineCoordNetFPN.__init__ 看部件组成，再顺着 forward 追踪去噪、骨干、融合、预测头、坐标解码。",
+      "DenoiseBlock 内的高斯核只决定初始权重；generate_gaussian_heatmap 中的高斯则用来生成标签，两者用途不同。",
+      "默认构造签名 num_lines=3，但 main.py 实际传 2；模型图和训练形状应以调用处为准。",
+      "build_backbone 只支持规范化后的 mobilenet_v3_large 和 mobilenetv4_conv_medium；主训练未把 backbone_pretrained 标志传到模型构造器。"
+    ],
+    "components": [
+      {
+        "name": "DenoiseBlock",
+        "kind": "类",
+        "summary": "用二维高斯核初始化逐通道卷积；forward 对输入做同尺寸滤波，权重可继续学习。",
+        "segmentStart": 17
+      },
+      {
+        "name": "_normalize_backbone_name",
+        "kind": "函数",
+        "summary": "把骨干名转成小写并将连字符换为下划线，统一后续分支判断。",
+        "segmentStart": 43
+      },
+      {
+        "name": "TimmFeatureBackbone",
+        "kind": "类",
+        "summary": "通过 timm 一次前向取出两种尺度的特征及其通道元数据。",
+        "segmentStart": 47
+      },
+      {
+        "name": "build_backbone",
+        "kind": "函数",
+        "summary": "按名字创建 V3 或 V4 的特征提取接口，并返回融合层需要的通道数。",
+        "segmentStart": 69
+      },
+      {
+        "name": "soft_argmax",
+        "kind": "函数",
+        "summary": "将每列高度评分变成概率，按行号求期望，得到可微的小数坐标。",
+        "segmentStart": 105
+      },
+      {
+        "name": "generate_gaussian_heatmap",
+        "kind": "函数",
+        "summary": "把参考坐标转成每列的高斯软目标，并把无效列清零。",
+        "segmentStart": 119
+      },
+      {
+        "name": "FeatureFusionModule",
+        "kind": "类",
+        "summary": "放大深层特征，与浅层按通道拼接，再用卷积压缩和混合信息。",
+        "segmentStart": 139
+      },
+      {
+        "name": "LineCoordNetFPN",
+        "kind": "类",
+        "summary": "组装完整模型，统一 V3/V4 前向分支，输出坐标和评分图。",
+        "segmentStart": 155
+      }
+    ],
+    "pipeline": {
+      "title": "完整前向与监督分支",
+      "nodes": [
+        {
+          "id": "in",
+          "title": "灰度图",
+          "detail": "[B,1,H,W]",
+          "kind": "input"
+        },
+        {
+          "id": "denoise",
+          "title": "可学习滤波",
+          "detail": "5×5 逐通道卷积",
+          "kind": "process"
+        },
+        {
+          "id": "backbone",
+          "title": "提取两种尺度",
+          "detail": "V3 分两段；V4 一次返回两层",
+          "kind": "process"
+        },
+        {
+          "id": "fusion",
+          "title": "空间对齐与融合",
+          "detail": "深层放大 → 拼接 → 3×3 卷积",
+          "kind": "process"
+        },
+        {
+          "id": "head",
+          "title": "生成边界评分",
+          "detail": "3×3 扩展至128通道 → 1×1输出L通道",
+          "kind": "process"
+        },
+        {
+          "id": "resize",
+          "title": "恢复输入尺寸",
+          "detail": "评分图放大到 H×W",
+          "kind": "process"
+        },
+        {
+          "id": "coord",
+          "title": "解码逐列坐标",
+          "detail": "沿高度 softmax 后加权平均",
+          "kind": "output"
+        },
+        {
+          "id": "logits",
+          "title": "保留原始评分",
+          "detail": "训练损失同时使用此输出",
+          "kind": "output"
+        },
+        {
+          "id": "gt",
+          "title": "参考坐标与有效列",
+          "detail": "由数据集提供",
+          "kind": "input"
+        },
+        {
+          "id": "target",
+          "title": "制作高斯软目标",
+          "detail": "中心为参考高度，逐列归一化",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "to": "denoise",
+          "from": "in"
+        },
+        {
+          "to": "backbone",
+          "from": "denoise"
+        },
+        {
+          "to": "fusion",
+          "from": "backbone"
+        },
+        {
+          "to": "head",
+          "from": "fusion"
+        },
+        {
+          "to": "resize",
+          "from": "head"
+        },
+        {
+          "to": "coord",
+          "from": "resize"
+        },
+        {
+          "to": "logits",
+          "from": "resize"
+        },
+        {
+          "to": "target",
+          "from": "gt"
+        }
+      ],
+      "caption": "最后两条输出来自同一评分图；右侧标签工具只在计算训练/验证损失时调用。"
+    }
   },
   {
     "path": "LineDet/model/__init__.py",
     "title": "模型包的公共入口",
-    "overview": "一行重导出让其他文件从LineDet.model获取模型和GT热图函数，无需写内部model.py路径。",
+    "overview": "公开网络类和高斯目标生成函数，供训练与损失模块直接从 LineDet.model 导入。 本文件没有新增算法，只决定包向外暴露哪些名字。",
     "segments": [
       {
         "start": 1,
         "end": 1,
         "title": "相对导入与公开接口",
         "principle": [
-          "包入口集中暴露被其他模块使用的符号。它不构建模型，也不训练参数。"
+          "包入口把内部文件组织与外部调用隔开；只要公开名字不变，调用方不必直接依赖更深层文件路径。"
         ],
         "syntax": [
-          "from .model import ...的点表示当前包，因此指向LineDet/model/model.py；两个名称随后可由from LineDet.model import ...导入。"
+          "from .xxx import A,B 中的一个点代表当前包；逗号表示一次导入多个名字。__init__.py 会在包首次加载时执行。"
         ],
         "shapes": "",
         "pitfall": "",
-        "exercise": "这里的.model与上层LineDet.model有什么区别？",
-        "answer": "前者是包内model.py模块；后者是包含__init__.py的model包。",
-        "diagram": ""
+        "summary": "公开网络类和高斯目标生成函数，供训练与损失模块直接从 LineDet.model 导入。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "LineCoordNetFPN",
+            "type": "类或函数对象",
+            "meaning": "从.model导入并绑定到当前包的同名属性。"
+          },
+          {
+            "name": "generate_gaussian_heatmap",
+            "type": "类或函数对象",
+            "meaning": "从.model导入并绑定到当前包的同名属性。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L1 相对导入并重导出",
+            "detail": "加载同包下的目标模块，将指定名字绑定在当前包中；不创建类实例，也不执行训练。"
+          }
+        ],
+        "returns": [
+          "没有函数返回；调用者可以使用 from LineDet.model import LineCoordNetFPN, generate_gaussian_heatmap。"
+        ]
+      }
+    ],
+    "role": "包初始化与导入接口。",
+    "inputs": [
+      "Python 首次导入该包时执行此文件。"
+    ],
+    "outputs": [
+      "在包命名空间中提供 LineCoordNetFPN、generate_gaussian_heatmap。"
+    ],
+    "readingGuide": [
+      "定义仍位于被导入的内部模块；理解具体处理逻辑应继续进入对应实现文件。"
+    ],
+    "components": [
+      {
+        "name": "LineCoordNetFPN",
+        "kind": "重导出",
+        "summary": "模型与标签工具入口",
+        "segmentStart": 1
+      },
+      {
+        "name": "generate_gaussian_heatmap",
+        "kind": "重导出",
+        "summary": "模型与标签工具入口",
+        "segmentStart": 1
       }
     ]
   },
   {
     "path": "LineDet/loss.py",
     "title": "用五项损失同时约束边界",
-    "overview": "热图定位、有效坐标拟合、上下顺序、曲率平滑和一阶平滑共同参与训练。请以属性赋值与forward实际公式为准，不能只看构造函数的默认参数。",
+    "overview": "这个文件把“模型输出哪里不符合参考答案、哪里不符合边界形态要求”变成可反向传播的标量。坐标项比较逐列高度，热图项比较整列响应分布，另外三项分别约束上下顺序、弯曲和相邻列跳动。HeatmapCompositeLoss 把五项加权求和，返回训练用总损失以及日志用分项；line_mae 另算像素单位的验证指标，用于比较模型表现。",
     "segments": [
       {
         "start": 3,
         "end": 7,
         "title": "损失模块的依赖",
         "principle": [
-          "从模型包导入GT高斯生成函数，使训练时能根据当前增强后的坐标重建监督。functional提供可微的BCE、softmax与ReLU计算。"
+          "损失模块直接复用同一标签生成实现，保证热图监督与模型使用的高度坐标系一致。"
         ],
         "syntax": [
-          "from .model是相对LineDet包导入，而不是loss.py同目录下的一个变量。"
+          "from .model 表示LineDet包下的model子包，它再由__init__.py重导出实际函数。"
         ],
         "shapes": "",
         "pitfall": "",
-        "exercise": "为什么应从增强后的gt_y生成热图？",
-        "answer": "几何增强会改变边界位置，热图目标必须跟变换后的图像和坐标对应。",
-        "diagram": ""
+        "summary": "准备损失计算需要的张量接口，并复用模型模块的高斯标签工具。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "torch",
+            "type": "模块",
+            "meaning": "提供Tensor、零值、sigmoid及无梯度上下文。"
+          },
+          {
+            "name": "nn",
+            "type": "模块别名",
+            "meaning": "提供Module父类，使复合损失像网络一样可调用。"
+          },
+          {
+            "name": "F",
+            "type": "函数接口别名",
+            "meaning": "提供softmax、ReLU、binary_cross_entropy。"
+          },
+          {
+            "name": "generate_gaussian_heatmap",
+            "type": "导入的函数",
+            "meaning": "从参考坐标创建按列归一化的目标热图，定义在model/model.py。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L3–7 导入依赖",
+            "detail": "先导入PyTorch，再通过相对导入取得目标生成函数；不会创建任何训练参数。"
+          }
+        ],
+        "returns": [
+          "模块内获得四个可用名称。"
+        ]
       },
       {
         "start": 10,
         "end": 14,
         "title": "有效位置上的坐标均方误差",
         "principle": [
-          "逐位置平方误差强调较大的错位：Lcoord=Σvalid·(ŷ-y)²/Σvalid。mask把没有可靠标注的列排除，避免把占位值当真值。",
-          "均方误差单位为像素平方，所以不能直接把它和MAE像素误差当成同一指标。"
+          "平方使正负偏差都变成正惩罚，并让大误差获得更大的梯度。例如预测44.2、目标43.5，单点损失为0.49，不先取整。",
+          "平均的分母是全部有效边界列的数量，不是batch大小，也不是图像总像素数。插值列与人工列只要mask=True就一视同仁。"
         ],
         "syntax": [
-          "pow(2)逐元素平方；masked_select(valid_mask)提取True处并展成一维；numel()统计选中元素数；mean()返回标量Tensor。",
-          "空mask返回新建的0标量并放在预测设备上。"
+          "pow(2) 是逐元素平方；masked_select要求可广播的布尔掩码并返回一维Tensor。",
+          "numel() 返回元素个数；torch.tensor(0.0,device=...) 创建零标量，确保设备与预测一致。"
         ],
         "shapes": "[B,L,W]差值 → [Nvalid]选中误差 → 标量",
         "pitfall": "空mask零值不连接预测的计算图；若只有该项并直接backward会缺少梯度路径。正常组合中其他正则仍可能提供梯度。",
-        "exercise": "两个有效误差为1与3像素，MSE是多少？",
-        "answer": "(1²+3²)/2=5像素²；MAE为2像素。",
-        "diagram": "loss"
+        "summary": "只取有效列的坐标平方误差，再在批、边界和列的所有有效位置上平均。",
+        "parameters": [
+          {
+            "name": "pred_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "模型预测的浮点高度。"
+          },
+          {
+            "name": "gt_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "参考高度，包含插值后的有效列。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "True位置参与坐标监督；原始点与插值点在这里没有不同权重。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "diff",
+            "type": "一维 Tensor [N_valid]",
+            "meaning": "先对预测与参考相减平方，再由masked_select选出有效元素；各图片有效数量不同时按元素数共同平均。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L11 计算并筛选误差",
+            "detail": "(pred_y−gt_y)²产生三维误差，masked_select展平成有效位置的一维列表。"
+          },
+          {
+            "title": "L12–13 处理空监督",
+            "detail": "没有有效元素时返回同设备零标量，避免空列表mean得到NaN。"
+          },
+          {
+            "title": "L14 平均误差",
+            "detail": "将全部有效元素的平方误差求平均。"
+          }
+        ],
+        "returns": [
+          "标量Tensor，单位为像素²；有有效项时可向预测坐标反传。"
+        ]
       },
       {
         "start": 17,
         "end": 24,
         "title": "热图 MSE：把有效列扩展到每个高度",
         "principle": [
-          "同一列的valid适用于整列H个热图像素，所以先把列mask广播到热图。对每个有效像素的概率差平方平均。",
-          "HeatmapCompositeLoss选择mse时会先沿高度对预测logits做softmax，确保和列归一化GT在同一个表示空间。"
+          "热图项关注整列响应的形状；边界附近和远离边界的行都参与比较。这里不自行做softmax，HeatmapCompositeLoss的mse分支在调用前完成沿高度归一化。"
         ],
         "syntax": [
-          "unsqueeze(2)插入高度维，expand(-1,-1,H,-1)把该维广播为H，-1保留原大小。",
-          "valid_count统计的是有效列数×H，返回diff.sum()/valid_count，不是除以列数。"
+          "expand(-1,-1,H,-1) 中−1表示保持原维大小；它通过广播视图扩展，不把有效列变成不同标签。",
+          "Tensor乘布尔值将False当0；diff.sum()/valid_count手动完成掩码后的mean。"
         ],
         "shapes": "valid[B,L,W] → [B,L,H,W]；pred/gt同形",
         "pitfall": "图像高度变化会改变该损失的逐像素平均尺度；同样的权重不一定在不同分辨率下等价。",
-        "exercise": "B=1,L=2,H=256,W=256且所有列有效时分母是多少？",
-        "answer": "1×2×256×256=131072。",
-        "diagram": "heatmap"
+        "summary": "对有效列的所有高度比较热图数值，计算按有效像素平均的平方误差。",
+        "parameters": [
+          {
+            "name": "pred_heatmaps",
+            "type": "float Tensor [B,L,H,W]",
+            "default": "必填",
+            "meaning": "热图预测；MSE版本接收归一化概率，BCE版本接收原始评分，具体见各函数。"
+          },
+          {
+            "name": "gt_heatmaps",
+            "type": "float Tensor [B,L,H,W]",
+            "default": "必填",
+            "meaning": "每个有效列归一化为1的高斯软目标。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "表示哪些边界列有标签。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "B,L,H,W",
+            "type": "int",
+            "meaning": "热图四个轴的长度；本函数用H扩展列掩码。"
+          },
+          {
+            "name": "valid_expanded",
+            "type": "bool Tensor [B,L,H,W]",
+            "meaning": "由[B,L,W]插入高度轴再扩展；同列H行具有相同有效性。"
+          },
+          {
+            "name": "diff",
+            "type": "float Tensor [B,L,H,W]",
+            "meaning": "预测与目标逐元素差的平方，无效列被乘0。"
+          },
+          {
+            "name": "valid_count",
+            "type": "标量Tensor",
+            "meaning": "有效边界列数×H，而不是只有边界峰附近像素数。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L18–19 扩展有效列掩码",
+            "detail": "unsqueeze(2)后expand到H行，不分配独立的H份标签含义。"
+          },
+          {
+            "title": "L20 逐像素平方差",
+            "detail": "先计算所有位置差异，再屏蔽无效列。"
+          },
+          {
+            "title": "L21–24 归一化",
+            "detail": "若计数为0返回零，否则总误差除以有效像素数。"
+          }
+        ],
+        "returns": [
+          "标量热图均方误差。"
+        ]
       },
       {
         "start": 27,
         "end": 35,
         "title": "热图 BCE：每个位置的软二分类",
         "principle": [
-          "默认分支先sigmoid，把每个像素logit映射到(0,1)，再用软目标q算−q log p−(1−q)log(1−p)。高斯中心附近的目标较大，远离曲线处目标接近0。",
-          "这里GT沿列归一化而预测用独立sigmoid；坐标解码却用列softmax。两者不是同一个概率模型。目标峰值通常小于1，不能解释为“线中心标签必为1”的硬二分类。"
+          "二元交叉熵在此为−[q·ln(p)+(1−q)·ln(1−p)]。q是标准答案，p是预测；虽然名称有“二元”，q仍可取0与1之间的小数，所以可以接收高斯软目标。",
+          "模型应拟合整列高斯目标，不是把所有靠近边界的像素都推到1。假设一个位置目标q=0.4，p=0.1、0.4、0.9的损失分别约0.984、0.673、1.424；p=q时最小。软目标下最小BCE一般不为0。",
+          "这里用sigmoid逐位置比较；最终坐标解码另用softmax令每列概率和为1。这两个变换从同一份原始评分出发，但不是同一个概率张量。"
         ],
         "syntax": [
-          "binary_cross_entropy(...,reduction=\"none\")保留逐像素损失，先乘有效mask后再求总和与有效像素均值。",
-          "torch.sigmoid不要求沿某个轴求和为1；softmax才有指定轴的归一化约束。"
+          "torch.sigmoid逐元素变换；F.binary_cross_entropy要求输入和目标在0～1范围，目标允许浮点软标签。",
+          "reduction=\"none\"阻止库提前平均，才能先应用有效列mask。若直接用默认mean，之后再乘mask就无法恢复正确分母。"
         ],
         "shapes": "logits/target[B,L,H,W] → 掩码BCE标量",
-        "pitfall": "生产实现可考虑binary_cross_entropy_with_logits，避免显式sigmoid导致极端logits数值不稳；若改公式要重新验证实验。当前代码未做这种替换。",
-        "exercise": "为什么不能说这段代码已经用了BCEWithLogitsLoss？",
-        "answer": "它显式sigmoid后调用binary_cross_entropy，两者数学目标相关但数值实现不同。",
-        "diagram": "loss"
+        "pitfall": "当前是显式sigmoid再BCE，并非BCEWithLogitsLoss；不能把代码解释成直接对logits调用稳定合并版本。热图目标虽然列归一化，预测端此处仍是独立sigmoid。",
+        "summary": "把每个原始评分分别变成0到1的预测值，再与对应高斯软目标计算二元交叉熵。",
+        "parameters": [
+          {
+            "name": "pred_heatmaps",
+            "type": "float Tensor [B,L,H,W]",
+            "default": "必填",
+            "meaning": "热图预测；MSE版本接收归一化概率，BCE版本接收原始评分，具体见各函数。"
+          },
+          {
+            "name": "gt_heatmaps",
+            "type": "float Tensor [B,L,H,W]",
+            "default": "必填",
+            "meaning": "每个有效列归一化为1的高斯软目标。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "表示哪些边界列有标签。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "valid_expanded",
+            "type": "bool Tensor [B,L,H,W]",
+            "meaning": "有效列扩展至全部高度行。"
+          },
+          {
+            "name": "pred_probs",
+            "type": "float Tensor [B,L,H,W]",
+            "meaning": "sigmoid(pred_heatmaps)；各位置独立压缩到0～1，不保证一列加和为1。"
+          },
+          {
+            "name": "bce_loss",
+            "type": "float Tensor [B,L,H,W]",
+            "meaning": "逐位置交叉熵后乘mask，无效列清零；此时尚未做求和/平均。"
+          },
+          {
+            "name": "valid_count",
+            "type": "标量Tensor",
+            "meaning": "参与监督的列数乘H，用于平均整张有效热图区域。"
+          },
+          {
+            "name": "B,L,H,W",
+            "type": "int",
+            "meaning": "从评分图读取维度；H负责扩展掩码。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L28–29 读取尺寸并扩展mask",
+            "detail": "使每条边界每个有效列的全部H个位置都纳入比较。"
+          },
+          {
+            "title": "L30 转换原始评分",
+            "detail": "p=1/(1+exp(−z))，负评分也能转为合理范围的预测数值。"
+          },
+          {
+            "title": "L31 逐位置比较",
+            "detail": "reduction=\"none\"保留每个位置的损失，再乘有效掩码。"
+          },
+          {
+            "title": "L32–35 求有效平均",
+            "detail": "没有有效列返回0，否则总和除以有效列数×H。"
+          }
+        ],
+        "returns": [
+          "标量BCE热图损失，默认主训练使用这一项。"
+        ],
+        "flow": {
+          "title": "默认热图损失的两路输入",
+          "nodes": [
+            {
+              "id": "z",
+              "title": "模型原始评分",
+              "detail": "任意实数z",
+              "kind": "input"
+            },
+            {
+              "id": "sig",
+              "title": "逐像素sigmoid",
+              "detail": "得到p，整列不一定和为1",
+              "kind": "process"
+            },
+            {
+              "id": "gt",
+              "title": "参考坐标",
+              "detail": "每个有效列一个高度",
+              "kind": "input"
+            },
+            {
+              "id": "g",
+              "title": "高斯加逐列归一化",
+              "detail": "得到软目标q",
+              "kind": "process"
+            },
+            {
+              "id": "bce",
+              "title": "逐位置BCE",
+              "detail": "−q ln p−(1−q)ln(1−p)",
+              "kind": "process"
+            },
+            {
+              "id": "mask",
+              "title": "无效列整列排除",
+              "detail": "有效列包含全部H行",
+              "kind": "process"
+            },
+            {
+              "id": "avg",
+              "title": "除以有效像素数",
+              "detail": "输出标量",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "sig",
+              "from": "z"
+            },
+            {
+              "to": "g",
+              "from": "gt"
+            },
+            {
+              "to": "bce",
+              "from": "sig"
+            },
+            {
+              "to": "bce",
+              "from": "g"
+            },
+            {
+              "to": "mask",
+              "from": "bce"
+            },
+            {
+              "to": "avg",
+              "from": "mask"
+            }
+          ],
+          "caption": "目标按列归一化，预测在此逐位置做 sigmoid；两者比较后屏蔽无效列，再对全部有效热图像素平均。"
+        }
       },
       {
         "start": 38,
         "end": 42,
         "title": "拓扑约束：上边界应位于下边界之上",
         "principle": [
-          "图像y轴向下增大，正常顺序要求y上≤y下。对每对相邻边界算ReLU(y上−y下+margin)：顺序满足时为0，交叉时有罚项。",
-          "margin>0进一步鼓励层间至少margin像素间隔；默认0只鼓励不交叉，不保证正厚度。它是软约束，不能数学保证每一列都不交叉。"
+          "图像行号向下增大，因此上边界应有更小y值。例如上界30、下界50时差为−20，不受罚；上界55、下界50时罚5。",
+          "默认margin=0允许上下边界完全重合。该损失没有真值坐标，也没有valid_mask，只表达预测之间的几何关系。"
         ],
         "syntax": [
-          "y.size(1)是L；y[:,:-1]和y[:,1:]配成相邻边界；mean遍历批、线对、宽度。少于两条线时无拓扑关系。"
+          "y.size(1)读取边界轴长度；y[:,:-1]与y[:,1:]各去掉一端边界。",
+          "F.relu(t)=max(t,0)，mean在所有批、相邻边界与列上平均。"
         ],
         "shapes": "[B,L,W] → 相邻差[B,L−1,W] → 标量",
         "pitfall": "该函数没有valid参数，会约束无标注区域；还依赖GT/通道的稳定上下顺序。",
-        "exercise": "上边界y=80、下边界y=70、margin=0时罚多少？",
-        "answer": "ReLU(80−70)=10；y=70和80则为0。",
-        "diagram": "geometry"
+        "summary": "惩罚相邻边界在同一列发生上下颠倒，保证图像坐标中的上界高度不大于下界。",
+        "parameters": [
+          {
+            "name": "y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "按上到下顺序排列的预测边界高度。"
+          },
+          {
+            "name": "margin",
+            "type": "float",
+            "default": "0.0",
+            "meaning": "要求两条边界至少间隔的行数；默认0，只禁止交叉，不要求正厚度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "diffs",
+            "type": "Tensor [B,L−1,W]",
+            "meaning": "上一条边界高度−下一条高度+margin；正值代表违反顺序或间隔。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L39–40 检查边界数量",
+            "detail": "少于2条无法比较相邻层，返回同设备0。"
+          },
+          {
+            "title": "L41 比较相邻边界",
+            "detail": "在边界轴上用[:-1]与[1:]配对，批和列保持不变。"
+          },
+          {
+            "title": "L42 仅保留违反部分",
+            "detail": "ReLU把负数置0，然后平均。"
+          }
+        ],
+        "returns": [
+          "非负标量，顺序满足约束时为0。"
+        ]
       },
       {
         "start": 45,
         "end": 49,
         "title": "二阶平滑：惩罚曲率而不是绝对位置",
         "principle": [
-          "离散二阶差分y[x−1]−2y[x]+y[x+1]反映斜率变化。取绝对值平均可抑制局部折角，同时允许整条直线倾斜。",
-          "常数线和线性斜坡的二阶差分均为0；所以它与强迫所有点在同一高度不同。"
+          "高度[2,4,6]的二阶差分为0，所以斜着走的直线不会被这一项处罚；[2,4,9]得到3，说明斜率从2突然变成5。",
+          "该项约束形状而非绝对高度。整条曲线同时上下移动，不改变二阶差分。"
         ],
         "syntax": [
-          "省略号...代表保留前面的所有维度；三个切片对齐左、中、右点，长度都是W−2。abs().mean()形成L1型曲率惩罚。"
+          "...是省略号索引，保留前面的批和边界轴；abs()逐元素取绝对值。"
         ],
         "shapes": "[B,L,W] → [B,L,W−2] → 标量",
         "pitfall": "没有valid mask；若真实曲线急弯，正则过强会抹平有效细节。",
-        "exercise": "[2,4,6]和[2,6,2]的二阶差分分别是多少？",
-        "answer": "2−8+6=0；2−12+2=−8，取绝对值后为8。",
-        "diagram": "loss"
+        "summary": "用二阶差分惩罚曲线突然改变斜率，鼓励局部走势平滑。",
+        "parameters": [
+          {
+            "name": "y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "模型预测的逐列边界高度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "y_l,y_c,y_r",
+            "type": "Tensor [B,L,W−2]",
+            "meaning": "分别对齐每组三个相邻列的左、中、右高度。"
+          },
+          {
+            "name": "y_l−2*y_c+y_r",
+            "type": "Tensor [B,L,W−2]",
+            "meaning": "离散二阶差分，等于右侧斜率减左侧斜率。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L46–47 检查列数",
+            "detail": "至少3列才能构成三点差分，否则返回0。"
+          },
+          {
+            "title": "L48 对齐三列窗口",
+            "detail": "用...保留前面所有轴，最后一轴分别取[:-2]、[1:-1]、[2:]。"
+          },
+          {
+            "title": "L49 计算弯曲量",
+            "detail": "对二阶差分取绝对值并平均。"
+          }
+        ],
+        "returns": [
+          "非负标量，单位随坐标尺度为像素；没有使用有效掩码。"
+        ]
       },
       {
         "start": 52,
         "end": 56,
         "title": "一阶总变分：限制相邻列跳动",
         "principle": [
-          "TV=mean|y[x+1]−y[x]|直接抑制相邻高度差。和二阶平滑不同，它也会惩罚持续倾斜的直线。",
-          "TV可减少锯齿，但权重过大使预测偏向水平；需要与定位监督共同平衡。"
+          "与二阶平滑不同，一阶TV连平稳斜坡也会惩罚。[2,4,6]的TV为2，而二阶项为0。因此两项相加时一项抑制变化幅度，另一项抑制斜率突变。"
         ],
         "syntax": [
-          "y.size(-1)读取最后一维宽度；两个相邻切片都长W−1；宽度小于2时返回0。"
+          "两个切片形状相同，逐元素相减；mean把批、边界、相邻列一起平均。"
         ],
         "shapes": "[B,L,W] → [B,L,W−1] → 标量",
         "pitfall": "",
-        "exercise": "[1,2,3]的TV与二阶平滑分别为多少？",
-        "answer": "TV=(1+1)/2=1，二阶平滑为0。",
-        "diagram": "loss"
+        "summary": "计算相邻列高度变化的绝对值平均，限制曲线总体上下跳动。",
+        "parameters": [
+          {
+            "name": "y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "逐列预测高度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "y[...,1:]−y[...,:-1]",
+            "type": "Tensor [B,L,W−1]",
+            "meaning": "每一对相邻列的高度差。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L54–55 检查最小宽度",
+            "detail": "少于2列无法做相邻比较，返回0。"
+          },
+          {
+            "title": "L56 计算一阶差分",
+            "detail": "右列减左列，取绝对值后在全部位置平均。"
+          }
+        ],
+        "returns": [
+          "非负标量TV项；没有有效列掩码。"
+        ]
       },
       {
         "start": 59,
         "end": 71,
         "title": "保留的辅助函数：无标注区域的有效性平滑",
         "principle": [
-          "这个函数接受“有效性logits”，仅对相邻两列都无效的位置，惩罚sigmoid概率的一阶平方差。它处理的是有效性置信度的连续性，不是边界坐标。",
-          "当前LineCoordNetFPN没有有效性预测头，复合损失也没有调用它。因此它是未接入主路径的辅助函数，不应画进实际训练架构。"
+          "选“两个端点都无效”的列对，是为了把惩罚限制在无监督区域内部，不直接跨过有效/无效边界。",
+          "当前LineCoordNetFPN没有单独的有效性输出头，HeatmapCompositeLoss也未调用该函数，不能把它画进实际训练闭环。"
         ],
         "syntax": [
-          "mask_false=(valid_mask==0).float()把无效位置变1；相邻mask相乘实现两列同时无效的交集。",
-          "denom_adj.item()>0把标量取到Python做分支；eps用于分母稳定。"
+          "(valid_mask==0).float()将布尔判定变成0/1浮点；.item()把单元素Tensor取成Python数用于if判断。"
         ],
         "shapes": "通常logits/valid[B,L,W] → 邻接差[B,L,W−1]",
-        "pitfall": "函数存在不代表参与训练；代码阅读应搜索调用点，而非只列出定义。",
-        "exercise": "若一个相邻对左列有效、右列无效，它参与此正则吗？",
-        "answer": "不参与；对应mask乘积为0。",
-        "diagram": "loss"
+        "pitfall": "函数存在不代表已接入训练。",
+        "summary": "在相邻两列都没有有效标签时，约束一个“有效性预测”的概率不要突然变化；当前训练未调用它。",
+        "parameters": [
+          {
+            "name": "pred_valid_logits",
+            "type": "float Tensor，最后一轴为W",
+            "default": "必填",
+            "meaning": "假定另有有效性评分预测；不是边界坐标，也不是本网络的热图评分接口。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor，与评分可对应",
+            "default": "必填",
+            "meaning": "真实有效标记；本函数只选False区域。"
+          },
+          {
+            "name": "eps",
+            "type": "float",
+            "default": "1e−6",
+            "meaning": "分母稳定项，避免计数极小时除零。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "mask_false",
+            "type": "float Tensor",
+            "meaning": "valid_mask==0转换为浮点，原无效列为1。"
+          },
+          {
+            "name": "p",
+            "type": "float Tensor",
+            "meaning": "有效性评分经sigmoid得到的概率。"
+          },
+          {
+            "name": "diff",
+            "type": "Tensor，宽W−1",
+            "meaning": "相邻有效性概率之差。"
+          },
+          {
+            "name": "mask_adj",
+            "type": "float Tensor，宽W−1",
+            "meaning": "相邻两个mask_false相乘，两列都无效时才为1。"
+          },
+          {
+            "name": "denom_adj",
+            "type": "标量Tensor",
+            "meaning": "可比较的无效相邻列对数量。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L61–64 找无效区域并检查宽度",
+            "detail": "构造反向mask、sigmoid概率；少于两列返回0。"
+          },
+          {
+            "title": "L66–68 找可比较列对",
+            "detail": "相邻概率相减，左右无效标记相乘，统计保留列对。"
+          },
+          {
+            "title": "L69–71 有列对才求平均",
+            "detail": "平均这些列对的平方变化，否则返回0。"
+          }
+        ],
+        "returns": [
+          "标量平滑损失；主训练总损失没有使用它。"
+        ],
+        "flow": {
+          "title": "无效区域平滑的筛选",
+          "nodes": [
+            {
+              "id": "mask",
+              "title": "真实有效掩码",
+              "detail": "False位置转成1",
+              "kind": "input"
+            },
+            {
+              "id": "pair",
+              "title": "相邻掩码相乘",
+              "detail": "只保留两列均无效的对",
+              "kind": "process"
+            },
+            {
+              "id": "p",
+              "title": "有效性评分经sigmoid",
+              "detail": "再计算相邻差",
+              "kind": "input"
+            },
+            {
+              "id": "count",
+              "title": "是否有可比较列对？",
+              "detail": "denom_adj>0",
+              "kind": "decision"
+            },
+            {
+              "id": "loss",
+              "title": "平方差加权平均",
+              "detail": "除以列对数+eps",
+              "kind": "output"
+            },
+            {
+              "id": "zero",
+              "title": "返回零",
+              "detail": "没有可监督列对",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "pair",
+              "from": "mask"
+            },
+            {
+              "to": "count",
+              "from": "pair"
+            },
+            {
+              "to": "loss",
+              "from": "p"
+            },
+            {
+              "to": "loss",
+              "label": "是",
+              "from": "count"
+            },
+            {
+              "to": "zero",
+              "label": "否",
+              "from": "count"
+            }
+          ],
+          "caption": "只有相邻两列均无效时才保留该列对的概率差。该辅助函数没有接入当前 HeatmapCompositeLoss。"
+        }
       },
       {
         "start": 74,
         "end": 85,
         "title": "复合损失初始化：实际权重与签名不一致",
         "principle": [
-          "当前有效权重为λheatmap=1、λcoord=0.1、λtopo=0.01、λsmooth=0.1、λTV=0.05，sigma=3。前两项接受构造参数，其余几项直接写死。",
-          "训练传入HeatmapCompositeLoss(sigma=args.heatmap_sigma)，但self.sigma=3.0覆盖它。所以命令行heatmap_sigma会改变数据集热图，却不会改变真正参与本损失的高斯目标。"
+          "权重用于平衡不同量纲和数量的损失，而不是表示“这类样本占多少比例”。坐标MSE是像素²，热图BCE是无量纲量，两者数值规模可能差很多。",
+          "理解代码必须区分函数签名的默认值和函数体真正执行的赋值。修改调用处的lambda_topo/lambda_smooth/sigma在当前实现中不会改变对应实际值。"
         ],
         "syntax": [
-          "self.lambda_heatmap=lambda_heatmap使用实参；self.lambda_topo=1e-2不使用同名形参。科学计数法1e-2即0.01。",
-          "heatmap_loss_type默认为字符串bce，仅支持bce和mse两个分支。"
+          "super().__init__()初始化Module内部管理结构；self.xxx使值能被之后的forward访问。",
+          "1e−2是科学计数法，等于0.01；该处并没有读取同名lambda_topo参数。"
         ],
         "shapes": "",
-        "pitfall": "如果汇报只抄函数默认值，会错误写成topo=0.5、smooth=0.01、sigma=2。应报告实际运行赋值。",
-        "exercise": "传lambda_topo=9会改变拓扑权重吗？",
-        "answer": "不会，实际始终被赋成0.01；需要修改赋值语句才能让形参生效。",
-        "diagram": "loss"
+        "pitfall": "主训练传入的 --heatmap_sigma 也会被这里覆盖成3.0；网页按实际值讲解，未修改原训练源码。",
+        "summary": "设置五项损失的权重和热图形式；其中三个传入配置被固定赋值覆盖。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "HeatmapCompositeLoss 实例",
+            "default": "自动传入",
+            "meaning": "保存超参数，无可学习网络层。"
+          },
+          {
+            "name": "lambda_heatmap",
+            "type": "float",
+            "default": "1.0",
+            "meaning": "热图项权重，按传入值保存。"
+          },
+          {
+            "name": "lambda_coord",
+            "type": "float",
+            "default": "0.1",
+            "meaning": "坐标MSE权重，按传入值保存。"
+          },
+          {
+            "name": "lambda_topo",
+            "type": "float",
+            "default": "0.5",
+            "meaning": "签名有此参数，但实际忽略传值，固定使用0.01。"
+          },
+          {
+            "name": "lambda_smooth",
+            "type": "float",
+            "default": "0.01",
+            "meaning": "签名有此参数，但实际忽略传值，固定使用0.1。"
+          },
+          {
+            "name": "heatmap_loss_type",
+            "type": "str",
+            "default": "\"bce\"",
+            "meaning": "支持bce或mse；决定下一段热图比较分支。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "签名有此参数，但实际忽略传值，固定使用3.0。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.lambda_heatmap,self.lambda_coord",
+            "type": "float",
+            "meaning": "分别保存热图与坐标项传入权重。"
+          },
+          {
+            "name": "self.lambda_topo",
+            "type": "float=0.01",
+            "meaning": "实际拓扑系数，1e−2。"
+          },
+          {
+            "name": "self.lambda_smooth",
+            "type": "float=0.1",
+            "meaning": "实际二阶平滑系数。"
+          },
+          {
+            "name": "self.lambda_tv",
+            "type": "float=0.05",
+            "meaning": "实际一阶TV系数，没有对应构造参数。"
+          },
+          {
+            "name": "self.heatmap_loss_type",
+            "type": "str",
+            "meaning": "记录热图损失分支名。"
+          },
+          {
+            "name": "self.sigma",
+            "type": "float=3.0",
+            "meaning": "真正用于生成高斯软目标的宽度。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L78 初始化父类",
+            "detail": "使复合损失可以按Module方式调用和搬设备。"
+          },
+          {
+            "title": "L79–83 保存实际权重",
+            "detail": "热图、坐标沿用参数，其余三项写死在赋值语句中。"
+          },
+          {
+            "title": "L84–85 保存热图配置",
+            "detail": "类型来自参数，sigma则强制设3.0。"
+          }
+        ],
+        "returns": [
+          "构造可调用损失对象；调用结果由forward决定。"
+        ]
       },
       {
         "start": 87,
         "end": 98,
         "title": "损失前向：现场重建目标并选择热图目标函数",
         "principle": [
-          "从pred_heatmaps读取实际H/W，用当前GT坐标与valid重新生成高斯，保证目标尺寸与预测一致。main从batch拿到的gt_heatmaps没有被传进来。",
-          "mse分支比较列归一化概率；bce分支比较独立sigmoid概率。选择不同分支时梯度和量纲会变化，不能简单理解为一个开关不影响优化。"
+          "数据加载器虽返回heatmaps，训练调用只把坐标、mask和预测评分交给损失。本段重新生成目标，所以不能以数据集工具中未归一化的热图为准解释真正监督。",
+          "两个分支的预测转换不同：MSE对每列概率分布做平方差，BCE对各像素sigmoid值做软交叉熵。两者都保留mask，但不是完全等价的目标函数。"
         ],
         "syntax": [
-          "B,L,H,W解包；generate_gaussian_heatmap(...,self.sigma)使用固定3。if/elif/else对字符串分支；未知字符串显式报错。"
+          "F.softmax(...,dim=2)只在高度轴归一化；elif保证一种调用仅走一个分支。",
+          "generate_gaussian_heatmap的H、W按位置传给image_height、image_width；sigma来自实例实际属性。"
         ],
         "shapes": "GT[B,L,W] + logits[B,L,H,W] → GT热图[B,L,H,W]",
-        "pitfall": "数据集生成、collate、搬运到GPU的gt_heatmaps当前没有被实际损失消费，增加了开销；不能在汇报中称该batch字段直接监督模型。",
-        "exercise": "若要让数据集sigma和训练损失sigma一致，应改哪一层？",
-        "answer": "至少让HeatmapCompositeLoss.__init__使用self.sigma=sigma；还应统一是否列归一化和GT来源。",
-        "diagram": "heatmap"
+        "pitfall": "切换热图loss类型会改变目标函数形式和数值尺度，不能仅凭日志值较小判断效果更好。",
+        "summary": "根据参考坐标现场制作归一化高斯目标，然后选择BCE或MSE热图监督。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "HeatmapCompositeLoss 实例",
+            "default": "自动传入",
+            "meaning": "提供实际sigma、损失类型和权重。"
+          },
+          {
+            "name": "pred_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "模型预测的浮点高度。"
+          },
+          {
+            "name": "gt_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "参考高度，包含插值后的有效列。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "True位置参与坐标监督；原始点与插值点在这里没有不同权重。"
+          },
+          {
+            "name": "pred_heatmaps",
+            "type": "float Tensor [B,L,H,W]",
+            "default": "必填",
+            "meaning": "网络返回的原始评分，不是预先sigmoid后的数值。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "B,L,H,W",
+            "type": "int",
+            "meaning": "从预测热图读出尺寸，使生成目标与预测同网格。"
+          },
+          {
+            "name": "gt_heatmaps",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "根据gt_y/valid_mask和self.sigma重新生成的按列归一化高斯目标。"
+          },
+          {
+            "name": "pred_heatmap_probs",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "只在mse分支出现，沿高度softmax归一化。"
+          },
+          {
+            "name": "Lheatmap",
+            "type": "标量Tensor",
+            "meaning": "所选热图损失；后续与其他四项一起加权。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L88–90 制作目标",
+            "detail": "读取评分图高度与宽度，把参考坐标变为本次损失使用的高斯热图。"
+          },
+          {
+            "title": "L92–94 MSE分支",
+            "detail": "先沿高度softmax，然后调用heatmap_mse_loss。"
+          },
+          {
+            "title": "L95–98 BCE或错误分支",
+            "detail": "bce把原始评分交给内部sigmoid的函数；未知类型抛ValueError，防止静默误用。"
+          }
+        ],
+        "returns": [
+          "本段算出Lheatmap，继续在下一段合成total；尚未独立return。"
+        ],
+        "flow": {
+          "title": "热图损失的类型选择",
+          "nodes": [
+            {
+              "id": "gt",
+              "title": "参考坐标与掩码",
+              "detail": "与预测图尺寸对齐",
+              "kind": "input"
+            },
+            {
+              "id": "target",
+              "title": "构造高斯目标",
+              "detail": "σ=3，列和近似1",
+              "kind": "process"
+            },
+            {
+              "id": "kind",
+              "title": "选择损失类型",
+              "detail": "heatmap_loss_type",
+              "kind": "decision"
+            },
+            {
+              "id": "mse",
+              "title": "mse分支",
+              "detail": "评分softmax → 均方误差",
+              "kind": "process"
+            },
+            {
+              "id": "bce",
+              "title": "bce分支",
+              "detail": "评分sigmoid → 二元交叉熵",
+              "kind": "process"
+            },
+            {
+              "id": "error",
+              "title": "其他值",
+              "detail": "抛ValueError",
+              "kind": "output"
+            },
+            {
+              "id": "out",
+              "title": "Lheatmap",
+              "detail": "进入总损失",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "target",
+              "from": "gt"
+            },
+            {
+              "to": "kind",
+              "from": "target"
+            },
+            {
+              "to": "mse",
+              "label": "mse",
+              "from": "kind"
+            },
+            {
+              "to": "bce",
+              "label": "bce",
+              "from": "kind"
+            },
+            {
+              "to": "error",
+              "label": "其他",
+              "from": "kind"
+            },
+            {
+              "to": "out",
+              "from": "mse"
+            },
+            {
+              "to": "out",
+              "from": "bce"
+            }
+          ],
+          "caption": "两条分支共用同一高斯目标与有效掩码，但预测端转换和损失公式不同。默认主训练选择 bce。"
+        }
       },
       {
         "start": 100,
         "end": 118,
         "title": "五项损失合成与日志梯度隔离",
         "principle": [
-          "完整公式L=Lheatmap+0.1Lcoord+0.01Ltopo+0.1Lsmooth+0.05LTV。定位监督只在有效列上算，后三项当前对全部预测列算。",
-          "返回的total保留计算图，用于backward；日志字典中的各分量detach，便于记录而不会继续持有相关梯度路径。total在字典中仍未detach。"
+          "五项并不是训练五个独立网络，而是共同作用于同一次模型输出。某参数的梯度是各损失对它产生的梯度乘权重后的总和。",
+          "日志分项未乘系数，因此不能直接把日志heatmap、coord等原值相加与total比较，必须按实际系数加权。"
         ],
         "syntax": [
-          "多行括号包裹表达式便于换行；return total,{...}返回元组。detach()得到共享数据但不参与自动求导的Tensor，不等于转Python数值。"
+          "detach()得到共享数值但不追踪上游梯度的张量；不会修改原Lcoord等张量，所以total仍能反传。",
+          "返回字典中的total没有detach。调用方应只保留用于记录的数值，避免长期持有完整计算图。"
         ],
         "shapes": "五个标量 → 可微总损失 + 日志dict",
-        "pitfall": "各项数值尺度不同，权重本身不能代表贡献比例。虽然返回tv，main日志表并未显示TV项。",
-        "exercise": "为什么不能loss_dict[\"coord\"].backward()当作原损失训练？",
-        "answer": "coord已经detach，不再连接模型计算图；应对total调用backward。",
-        "diagram": "loss"
+        "pitfall": "拓扑、二阶平滑和TV当前没有有效掩码，连无标注列也参与；这属于对预测形状的全局约束，并非从无效列读取真值。",
+        "summary": "计算其余四项并与热图项加权相加，同时给日志返回不继续追踪梯度的分项。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "Lcoord",
+            "type": "标量Tensor",
+            "meaning": "有效列坐标MSE，比较预测高度与参考高度。"
+          },
+          {
+            "name": "Ltopo",
+            "type": "标量Tensor",
+            "meaning": "相邻边界顺序惩罚，默认margin=0。"
+          },
+          {
+            "name": "Lsmooth",
+            "type": "标量Tensor",
+            "meaning": "沿列二阶差分绝对值平均。"
+          },
+          {
+            "name": "Ltv",
+            "type": "标量Tensor",
+            "meaning": "沿列一阶差分绝对值平均。"
+          },
+          {
+            "name": "Lheatmap",
+            "type": "标量Tensor",
+            "meaning": "上一段已算出的热图损失。"
+          },
+          {
+            "name": "total",
+            "type": "标量Tensor",
+            "meaning": "实际为1·Lheatmap+0.1·Lcoord+0.01·Ltopo+0.1·Lsmooth+0.05·Ltv（默认调用）。"
+          },
+          {
+            "name": "返回字典",
+            "type": "dict[str,Tensor]",
+            "meaning": "含total、heatmap、coord、topo、smooth、tv；分项为未乘权重的原始数值。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L100–103 计算四项",
+            "detail": "坐标项使用gt和valid，三个几何项只依赖预测y。"
+          },
+          {
+            "title": "L105–109 加权合成",
+            "detail": "按实例系数把五个标量相加，构成唯一训练目标。"
+          },
+          {
+            "title": "L111–118 返回损失及记录",
+            "detail": "total保留图；分项.detach()后返回以便日志记录。"
+          }
+        ],
+        "returns": [
+          "(total, loss_dict) 二元组；对第一个total调用backward可把五项梯度合并传回模型。"
+        ]
       },
       {
         "start": 121,
         "end": 140,
         "title": "兼容分支 CompositeLoss 的实际行为",
         "principle": [
-          "此分支只组合坐标、拓扑和二阶平滑；实际公式为Lcoord+0.0001Ltopo+0.0001Lsmooth。",
-          "lambda_coord虽然保存到属性，forward却没乘它；lambda_topo和lambda_smooth形参被覆盖，lambda_dice也没使用。DiceCELossFunc只是空nn.Module，从未调用，因此这里没有Dice损失。"
+          "这个分支保留旧调用协议，并不等于主训练已经实现了另一种分割算法。没有输入像素级分割标签，也没有实际Dice计算。",
+          "主训练use_heatmap默认True，使用的是HeatmapCompositeLoss。理解主流程时应优先读前面的五项复合损失。"
         ],
         "syntax": [
-          "nn.Module()本身不实现可调用的forward算法；仅占位不能提供分割损失。",
-          "字典键与热图版本共享coord/topo/smooth，便于上层日志兼容。"
+          "nn.Module()只是基础模块对象，不含一个已定义的有效forward算法；当前没有调用它。",
+          "构造参数即使被保存为属性，也要看forward是否读取，才能判断是否生效。"
         ],
         "shapes": "",
-        "pitfall": "main的use_heatmap默认True且仅有store_true参数，没有CLI关闭方式；即便手动设False，当前模型总返回tuple也会与坐标分支接口冲突。",
-        "exercise": "传lambda_coord=100会把坐标项放大100倍吗？",
-        "answer": "不会；forward写的是Lcoord而非self.lambda_coord*Lcoord。",
-        "diagram": "loss"
+        "pitfall": "代码注释“非heatmap”只描述损失接口；LineCoordNetFPN自身仍返回坐标与heatmaps元组。",
+        "summary": "保留旧式坐标损失接口，实际只合成坐标、顺序与二阶平滑三项。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "CompositeLoss 实例",
+            "default": "自动传入",
+            "meaning": "保存兼容接口中的属性。"
+          },
+          {
+            "name": "lambda_coord",
+            "type": "float",
+            "default": "1.0",
+            "meaning": "被保存，但forward中未乘它，坐标项实际系数始终1。"
+          },
+          {
+            "name": "lambda_topo",
+            "type": "float",
+            "default": "0.5",
+            "meaning": "传值被忽略，实际固定1e−4。"
+          },
+          {
+            "name": "lambda_smooth",
+            "type": "float",
+            "default": "0.01",
+            "meaning": "传值被忽略，实际固定1e−4。"
+          },
+          {
+            "name": "lambda_dice",
+            "type": "float",
+            "default": "1.0",
+            "meaning": "未保存也未使用，没有Dice项进入总损失。"
+          },
+          {
+            "name": "pred_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "模型预测的浮点高度。"
+          },
+          {
+            "name": "gt_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "参考高度，包含插值后的有效列。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "True位置参与坐标监督；原始点与插值点在这里没有不同权重。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.lambda_coord",
+            "type": "float",
+            "meaning": "保存但未用于total计算的属性。"
+          },
+          {
+            "name": "self.lambda_topo,self.lambda_smooth",
+            "type": "float=1e−4",
+            "meaning": "真正用于forward的两个几何系数。"
+          },
+          {
+            "name": "self.DiceCELossFunc",
+            "type": "nn.Module()",
+            "meaning": "空的基础模块实例，未被调用，不代表已经实现Dice交叉熵。"
+          },
+          {
+            "name": "Lcoord,Ltopo,Lsmooth",
+            "type": "标量Tensor",
+            "meaning": "分别调用已有三个工具得到的原始损失。"
+          },
+          {
+            "name": "total",
+            "type": "标量Tensor",
+            "meaning": "Lcoord+1e−4·Ltopo+1e−4·Lsmooth。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L123–128 构造兼容对象",
+            "detail": "保存部分属性，建立未使用的空Module。"
+          },
+          {
+            "title": "L130–134 计算三项",
+            "detail": "没有热图输入，计算坐标和两种几何项后相加。"
+          },
+          {
+            "title": "L135–140 返回记录",
+            "detail": "总损失保留梯度，三个分项detach用于日志。"
+          }
+        ],
+        "returns": [
+          "(total, {total,coord,topo,smooth})。"
+        ]
       },
       {
         "start": 143,
         "end": 149,
         "title": "MAE：用于选最佳模型的有效列像素误差",
         "principle": [
-          "MAE=mean|ŷ−y|，只在valid=True的列计算，单位是网络输入尺度的像素。比MSE更直观，例如MAE=2表示有效边界点平均纵向偏差2像素。",
-          "没有有效标注时返回NaN而不是伪造0分；main用nanmean聚合，但全无效时仍可能没有可选择的最佳模型。"
+          "MAE直接表达平均错了多少像素，比平方误差更直观。它是评估指标，不是本函数用于反传的训练目标。",
+          "与坐标MSE一样，此处没有区分人工点和插值点，只看valid_mask；因此评估也是针对构造出的逐列标签。"
         ],
         "syntax": [
-          "@torch.no_grad()是装饰器，使函数内部不记录梯度图；.item()把单元素Tensor变为Python浮点。",
-          "masked_select用于排除未知GT，而不是把无效误差设0后除以所有点。"
+          "@torch.no_grad()是函数装饰器，使函数内运算不记录梯度；.item()将单元素Tensor转为Python标量。",
+          "float(\"nan\")明确表示“没有可计算的监督样本”，不应当作误差为0。"
         ],
         "shapes": "[B,L,W] → 有效误差[Nvalid] → Python float",
         "pitfall": "main按batch均值再取均值，未按各batch有效点数加权；MAE是列对应的纵向误差，并非二维最近边界距离。",
-        "exercise": "10个位置里只有2个有效，误差均为4，MAE是多少？",
-        "answer": "4，而不是0.8；分母是有效位置数2。",
-        "diagram": "loss"
+        "summary": "以像素为单位评估有效位置的平均绝对误差，并返回可记录的Python数值。",
+        "parameters": [
+          {
+            "name": "pred_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "模型预测的浮点高度。"
+          },
+          {
+            "name": "gt_y",
+            "type": "float Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "参考高度，包含插值后的有效列。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool Tensor [B,L,W]",
+            "default": "必填",
+            "meaning": "True位置参与坐标监督；原始点与插值点在这里没有不同权重。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "diff",
+            "type": "Tensor [N_valid]",
+            "meaning": "预测与参考之差的绝对值，仅保留有效列。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L143 禁止梯度记录",
+            "detail": "装饰器让整个函数作为评估计算，不建立自动求导图。"
+          },
+          {
+            "title": "L146 筛选绝对误差",
+            "detail": "先abs再masked_select，不把正负偏差相互抵消。"
+          },
+          {
+            "title": "L147–149 返回指标",
+            "detail": "空监督返回NaN；否则mean后item转成Python float。"
+          }
+        ],
+        "returns": [
+          "Python float；例如2个有效位置误差1和3，则MAE=2像素。无有效位置为NaN。"
+        ]
       }
-    ]
+    ],
+    "role": "HeatmapCompositeLoss 是默认训练损失；CompositeLoss 是兼容分支；false_region_smooth 当前没有接入总损失。",
+    "inputs": [
+      "预测坐标与参考坐标 [B,L,W]，每条边界每列一个高度。",
+      "参考有效掩码 bool [B,L,W]；预测原始热图 [B,L,H,W]。"
+    ],
+    "outputs": [
+      "total：保留自动求导关系的标量Tensor，可调用 backward。",
+      "loss_dict：分项记录；大多数分项detach后用于日志，total本身仍保留梯度。",
+      "line_mae：Python float 的有效位置平均绝对误差，无有效标签时返回NaN。"
+    ],
+    "readingGuide": [
+      "从 HeatmapCompositeLoss.forward 看五项怎样合成，再逐个读坐标、热图、拓扑和平滑工具。",
+      "B=批大小，L=边界数，H=图像高度，W=列数；掩码的一个位置代表一条边界的一整列，而非单个热图像素。",
+      "实际系数以构造器赋值为准：热图1、坐标0.1、顺序0.01、二阶平滑0.1、一阶TV 0.05。",
+      "本文件重新由 gt_y 构造归一化高斯目标，未直接使用数据集返回的未归一化热图。"
+    ],
+    "components": [
+      {
+        "name": "coord_mse_loss",
+        "kind": "函数",
+        "summary": "只在有效边界列上平均坐标平方误差。",
+        "segmentStart": 10
+      },
+      {
+        "name": "heatmap_mse_loss",
+        "kind": "函数",
+        "summary": "对有效列全部高度计算热图平方误差；调用者需先把评分转为概率。",
+        "segmentStart": 17
+      },
+      {
+        "name": "heatmap_bce_loss",
+        "kind": "函数",
+        "summary": "逐位置sigmoid后，与软目标计算二元交叉熵。",
+        "segmentStart": 27
+      },
+      {
+        "name": "topology_loss",
+        "kind": "函数",
+        "summary": "惩罚相邻边界上下顺序颠倒。",
+        "segmentStart": 38
+      },
+      {
+        "name": "smoothness_loss",
+        "kind": "函数",
+        "summary": "惩罚曲线二阶差分，抑制局部折弯。",
+        "segmentStart": 45
+      },
+      {
+        "name": "tv_loss",
+        "kind": "函数",
+        "summary": "惩罚相邻列的一阶差分，限制总变化。",
+        "segmentStart": 52
+      },
+      {
+        "name": "false_region_smooth",
+        "kind": "未接入辅助函数",
+        "summary": "在两端都无效的相邻列上约束有效性评分平滑。",
+        "segmentStart": 59
+      },
+      {
+        "name": "HeatmapCompositeLoss",
+        "kind": "类",
+        "summary": "创建高斯目标，选择热图损失并加权组合五项。",
+        "segmentStart": 74
+      },
+      {
+        "name": "CompositeLoss",
+        "kind": "兼容类",
+        "summary": "提供旧的坐标加几何约束组合，部分参数未实际生效。",
+        "segmentStart": 121
+      },
+      {
+        "name": "line_mae",
+        "kind": "指标函数",
+        "summary": "计算有效列的平均绝对像素误差，不参与反传。",
+        "segmentStart": 143
+      }
+    ],
+    "pipeline": {
+      "title": "五项损失如何汇入同一总目标",
+      "nodes": [
+        {
+          "id": "gt",
+          "title": "参考坐标与有效列",
+          "detail": "[B,L,W]",
+          "kind": "input"
+        },
+        {
+          "id": "gauss",
+          "title": "制作高斯目标",
+          "detail": "σ固定为3，沿高度归一化",
+          "kind": "process"
+        },
+        {
+          "id": "pred",
+          "title": "模型坐标与原始评分",
+          "detail": "来自同一次前向",
+          "kind": "input"
+        },
+        {
+          "id": "hm",
+          "title": "热图项",
+          "detail": "默认sigmoid+BCE",
+          "kind": "process"
+        },
+        {
+          "id": "coord",
+          "title": "坐标项",
+          "detail": "有效列MSE",
+          "kind": "process"
+        },
+        {
+          "id": "geom",
+          "title": "三种几何项",
+          "detail": "顺序、二阶平滑、一阶TV",
+          "kind": "process"
+        },
+        {
+          "id": "sum",
+          "title": "加权相加",
+          "detail": "1 / 0.1 / 0.01 / 0.1 / 0.05",
+          "kind": "process"
+        },
+        {
+          "id": "out",
+          "title": "总损失与日志分项",
+          "detail": "总损失用于backward",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "to": "gauss",
+          "from": "gt"
+        },
+        {
+          "to": "hm",
+          "from": "gauss"
+        },
+        {
+          "to": "hm",
+          "from": "pred"
+        },
+        {
+          "to": "coord",
+          "from": "gt"
+        },
+        {
+          "to": "coord",
+          "from": "pred"
+        },
+        {
+          "to": "geom",
+          "from": "pred"
+        },
+        {
+          "to": "sum",
+          "from": "hm"
+        },
+        {
+          "to": "sum",
+          "from": "coord"
+        },
+        {
+          "to": "sum",
+          "from": "geom"
+        },
+        {
+          "to": "out",
+          "from": "sum"
+        }
+      ],
+      "caption": "当前掩码只用于热图与坐标项，三个几何项仍在全部预测列上计算。"
+    }
   },
   {
     "path": "LineDet/utils.py",
     "title": "推理后处理与可视化",
-    "overview": "推理工具负责统一输入形式、评估模式和曲线平滑；绘图工具生成GT/预测对比与logits热图。它们不会自动读取图像或执行训练的数据预处理。",
+    "overview": "这个文件负责模型之外的推理整理与结果展示。infer_lines 切换模型到评估模式、统一输入批维并调用网络；它可对输出曲线做一维高斯平滑。两个可视化函数分别绘制热图以及原图上的参考/预测边界。这里不训练网络，也不定义训练损失；它帮助把张量变成可检查的结果图片。",
     "segments": [
       {
         "start": 1,
         "end": 4,
         "title": "工具模块依赖",
         "principle": [
-          "torch执行张量计算，NumPy用于绘图前的数据数组，Matplotlib负责离线图片输出。"
+          "PyTorch张量可在GPU上计算；Matplotlib通常需要CPU上的NumPy数据，因此后面会出现cpu().numpy()。"
         ],
         "syntax": [
-          "import matplotlib.pyplot as plt使用绘图状态机接口；这里没有神经网络层定义。"
+          "import numpy as np 和 import matplotlib.pyplot as plt 只是简写别名，不是新的自定义对象。"
         ],
         "shapes": "",
         "pitfall": "",
-        "exercise": "导入utils会运行推理吗？",
-        "answer": "不会，只有调用函数才执行对应计算。",
-        "diagram": ""
+        "summary": "加载张量、数组与绘图工具，分别负责计算、CPU数据交换和保存图像。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "torch",
+            "type": "模块",
+            "meaning": "处理模型输出张量和无梯度推理。"
+          },
+          {
+            "name": "F",
+            "type": "torch.nn.functional",
+            "meaning": "使用pad和conv1d完成一维曲线平滑。"
+          },
+          {
+            "name": "np",
+            "type": "numpy别名",
+            "meaning": "识别数组并创建横向列坐标。"
+          },
+          {
+            "name": "plt",
+            "type": "matplotlib.pyplot",
+            "meaning": "管理画布、子图、色条、曲线和图片保存。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L1–4 载入工具",
+            "detail": "模块被导入时建立四个名字，后续函数复用这些库。"
+          }
+        ],
+        "returns": [
+          "无函数返回值；本段建立依赖。"
+        ]
       },
       {
         "start": 7,
         "end": 27,
         "title": "对预测曲线做一维高斯平滑",
         "principle": [
-          "沿宽度x对每条曲线做加权平均，减少逐列抖动；不在图像上做二维模糊。核大小5、sigma1.5时，每个输出点融合附近5个y值。",
-          "边界使用replicate复制端点，避免零填充把边缘y拉向0。groups=L让每条线独立滤波，防止上边界与下边界相互平均。"
+          "一条边界是一串随列号变化的高度值，把它当成一维信号即可平滑。这里沿W方向平均相邻列，不是在一列内对候选高度再做softmax。",
+          "groups=L确保上边界只和平行的自身邻列混合，不会把上下两条线平均到一起。该后处理不使用真值标签，也不改变返回热图。"
         ],
         "syntax": [
-          "接受[W]、[L,W]或[B,L,W]，通过unsqueeze补成3维；最后按orig_dim还原维数，但返回始终是Tensor。",
-          "gauss.view(1,1,-1).repeat(L,1,1)形成[L,1,K]核；F.conv1d输入按[B,通道L,序列W]解释。"
+          "torch.from_numpy共享NumPy内存且保留原dtype；这里没有.float()，因此调用者应保证类型适配float32高斯核。",
+          "F.pad(y_px,(half,half),mode=\"replicate\") 对最后一维左右补边；replicate复制最靠近端点的数值。",
+          "F.conv1d 输入[B,通道,长度]；这里把L条边界当通道，卷积权重[L,1,K]配groups=L实现独立过滤。",
+          "squeeze(0)只在第0维长度为1时去掉该维；它与前面的unsqueeze对应。"
         ],
         "shapes": "[W]/[L,W]/[B,L,W] → 平滑后相同维数",
-        "pitfall": "假设奇数kernel_size、正sigma、输入为兼容的float32；偶数K会改变输出长度，整数或float64输入可能与float32核类型不匹配。",
-        "exercise": "为何这里L被当成Conv1d的通道数？",
-        "answer": "每条曲线是一条长度W的序列，groups=L让每条序列有独立滤波，不跨曲线融合。",
-        "diagram": "geometry"
+        "pitfall": "未检查sigma>0或奇数核。偶数核可能使输出宽度多1；整数或float64输入与float32核也可能类型不匹配。函数没有有效掩码，所有预测列都会平滑。",
+        "summary": "把每条边界的逐列高度做一维加权平均，抑制预测线在相邻列间的小幅抖动。",
+        "parameters": [
+          {
+            "name": "y_px",
+            "type": "Tensor或np.ndarray，形状[W]/[L,W]/[B,L,W]",
+            "default": "必填",
+            "meaning": "待平滑坐标；应为浮点类型，W是横向列数。"
+          },
+          {
+            "name": "kernel_size",
+            "type": "int",
+            "default": "5",
+            "meaning": "沿列方向的高斯核长度；当前奇数5左右各取2列。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "1.5",
+            "meaning": "一维高斯核宽度，控制邻近列对当前列的影响范围。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "orig_dim",
+            "type": "int",
+            "meaning": "记录原输入维数，以便平滑后恢复相同维数。"
+          },
+          {
+            "name": "B,L,W",
+            "type": "int",
+            "meaning": "补齐到3维后分别表示批、边界条数和列数。"
+          },
+          {
+            "name": "half",
+            "type": "int",
+            "meaning": "kernel_size//2，决定左右复制补边量。"
+          },
+          {
+            "name": "gauss",
+            "type": "Tensor [L,1,K]",
+            "meaning": "从中心化一维坐标生成归一化高斯核，每条线复制一份。"
+          },
+          {
+            "name": "y_pad",
+            "type": "Tensor [B,L,W+2*half]",
+            "meaning": "左右用端点高度复制补齐，不用0填充。"
+          },
+          {
+            "name": "y_smooth",
+            "type": "Tensor [B,L,W]（奇数核）",
+            "meaning": "groups=L的一维卷积结果，各边界独立平滑。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L8–14 统一数据结构",
+            "detail": "NumPy转Tensor，记录原维数；一维补批和边界两轴，二维只补批轴。"
+          },
+          {
+            "title": "L15–20 生成平滑核",
+            "detail": "以0为中心计算一维高斯、除总和，再复制到每条边界。"
+          },
+          {
+            "title": "L21–22 补边并卷积",
+            "detail": "端点复制避免用0把边界拉向图像顶部；按边界分组做conv1d。"
+          },
+          {
+            "title": "L23–27 恢复输入维数",
+            "detail": "原1维去掉两轴，原2维去掉批轴，原3维直接返回。"
+          }
+        ],
+        "returns": [
+          "Tensor，默认奇数核时与输入同形状；即使输入是NumPy，输出也仍是Tensor。"
+        ],
+        "flow": {
+          "title": "一维曲线平滑的实际步骤",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "一至三维坐标",
+              "detail": "NumPy或Tensor",
+              "kind": "input"
+            },
+            {
+              "id": "dims",
+              "title": "补齐[B,L,W]",
+              "detail": "保存orig_dim",
+              "kind": "process"
+            },
+            {
+              "id": "kernel",
+              "title": "创建高斯核",
+              "detail": "归一化并复制L份",
+              "kind": "process"
+            },
+            {
+              "id": "pad",
+              "title": "端点复制补边",
+              "detail": "左2列、右2列",
+              "kind": "process"
+            },
+            {
+              "id": "conv",
+              "title": "分组一维卷积",
+              "detail": "groups=L，不混合边界",
+              "kind": "process"
+            },
+            {
+              "id": "restore",
+              "title": "按orig_dim去掉补充轴",
+              "detail": "恢复原维数",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "dims",
+              "from": "in"
+            },
+            {
+              "to": "kernel",
+              "from": "dims"
+            },
+            {
+              "to": "pad",
+              "from": "kernel"
+            },
+            {
+              "to": "conv",
+              "from": "pad"
+            },
+            {
+              "to": "restore",
+              "from": "conv"
+            }
+          ],
+          "caption": "高斯平均沿横向列进行。groups=L 保证不同边界互不混合；端点复制补边避免被补零值拉低。"
+        }
       },
       {
         "start": 30,
         "end": 47,
         "title": "infer_lines：推理协议与默认平滑",
         "principle": [
-          "model.eval()切换BN等模块为评估行为；no_grad关闭求导，两者职责不同。调用模型后兼容tuple和单Tensor输出，默认对坐标做一维平滑。",
-          "函数把结果装进dict，调用者用out[\"y_px\"]与out[\"heatmaps\"]读取。use_heatmap形参未用于判断，实际根据模型返回值自动判断。"
+          "eval与no_grad作用不同：eval改变BN/Dropout等模块的行为，no_grad停止记录反向传播图。推理一般需要两者。",
+          "平滑改善显示曲线的连续性，但也可能改变局部准确位置。因此比较数值指标时，应确认两边都采用相同后处理。"
         ],
         "syntax": [
-          "NumPy输入经from_numpy(...).float()变float32；3维输入只在最前补批维，默认原输入是[C,H,W]。",
-          "outputs[0], outputs[1] if ...是两元素赋值，第二个值可为None。model.eval()会修改模型状态，函数没有恢复原训练状态。"
+          "@torch.no_grad()装饰整个函数；model.eval()不会自动移动到GPU或把图像标准化。",
+          "outputs[1] if len(outputs)>1 else None 是条件表达式，避免单元素元组越界。",
+          "返回字典提供明确键名，调用者使用out[\"y_px\"]或out.get(\"heatmaps\")读取。"
         ],
         "shapes": "标准输入[B,1,H,W] → {y_px:[B,L,W], heatmaps:[B,L,H,W]}",
-        "pitfall": "不把HWC转CHW、不把二维灰度补通道、不resize、不标准化、不搬到GPU；传入前需完成训练一致的预处理。main验证指标使用未平滑坐标，可视化默认平滑，二者需区分。",
-        "exercise": "一张H×W×1的NumPy图直接传入会得到正确通道位置吗？",
-        "answer": "不会，函数只加batch维，得到[1,H,W,1]，需先转成[1,H,W]并做标准化/设备匹配。",
-        "diagram": "geometry"
+        "pitfall": "use_heatmap参数未生效；解析依据输出实际类型。函数只检查tuple，不把list视为双输出。执行后模型保持eval，若继续训练需调用model.train()。",
+        "summary": "以评估状态运行模型，兼容坐标或元组输出，并可选择平滑预测边界。",
+        "parameters": [
+          {
+            "name": "model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "已加载权重的模型；该函数会原地设置eval状态。"
+          },
+          {
+            "name": "image",
+            "type": "Tensor或np.ndarray",
+            "default": "必填",
+            "meaning": "预处理好的[1,H,W]或[B,1,H,W]图像；3维会被理解为[C,H,W]。"
+          },
+          {
+            "name": "use_heatmap",
+            "type": "bool",
+            "default": "False",
+            "meaning": "保留的兼容参数，函数体没有读取它，不影响返回解析。"
+          },
+          {
+            "name": "smooth",
+            "type": "bool",
+            "default": "True",
+            "meaning": "是否调用smooth_y_px处理坐标。"
+          },
+          {
+            "name": "smooth_kernel",
+            "type": "int",
+            "default": "5",
+            "meaning": "传给平滑函数的核长度。"
+          },
+          {
+            "name": "smooth_sigma",
+            "type": "float",
+            "default": "1.5",
+            "meaning": "传给平滑函数的一维高斯宽度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "outputs",
+            "type": "Tensor或tuple",
+            "meaning": "model(image)返回结果；当前LineCoordNetFPN返回二元组。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor",
+            "meaning": "从输出中解析的坐标，随后可能被平滑结果覆盖。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "Tensor或None",
+            "meaning": "若元组有第二项则取它，否则为None。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L30–33 进入推理状态",
+            "detail": "装饰器关闭梯度记录，model.eval切换BN等层行为。"
+          },
+          {
+            "title": "L35–38 整理输入",
+            "detail": "NumPy转float Tensor；3维输入补批维。不会自动把[H,W]补成单通道4维。"
+          },
+          {
+            "title": "L40–44 调用并解析结果",
+            "detail": "元组取第一项坐标、可选第二项热图；非元组视为仅坐标输出。"
+          },
+          {
+            "title": "L45–47 可选平滑并返回",
+            "detail": "smooth为True时传入kernel/sigma，最后返回两个键的字典。"
+          }
+        ],
+        "returns": [
+          "dict：y_px为坐标Tensor，heatmaps为原始热图Tensor或None。"
+        ],
+        "flow": {
+          "title": "infer_lines 的输入与输出分支",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "模型和预处理图像",
+              "detail": "Tensor或NumPy",
+              "kind": "input"
+            },
+            {
+              "id": "prep",
+              "title": "eval并补批维",
+              "detail": "NumPy另转float",
+              "kind": "process"
+            },
+            {
+              "id": "run",
+              "title": "运行model(image)",
+              "detail": "自动求导关闭",
+              "kind": "process"
+            },
+            {
+              "id": "tuple",
+              "title": "输出是tuple？",
+              "detail": "检查实际类型",
+              "kind": "decision"
+            },
+            {
+              "id": "split",
+              "title": "取坐标与可选热图",
+              "detail": "第0项 / 第1项",
+              "kind": "process"
+            },
+            {
+              "id": "only",
+              "title": "仅坐标输出",
+              "detail": "heatmaps=None",
+              "kind": "process"
+            },
+            {
+              "id": "smooth",
+              "title": "是否smooth？",
+              "detail": "默认True",
+              "kind": "decision"
+            },
+            {
+              "id": "filter",
+              "title": "调用一维高斯平滑",
+              "detail": "只改变坐标",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回结果字典",
+              "detail": "y_px / heatmaps",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "prep",
+              "from": "in"
+            },
+            {
+              "to": "run",
+              "from": "prep"
+            },
+            {
+              "to": "tuple",
+              "from": "run"
+            },
+            {
+              "to": "split",
+              "label": "是",
+              "from": "tuple"
+            },
+            {
+              "to": "only",
+              "label": "否",
+              "from": "tuple"
+            },
+            {
+              "to": "smooth",
+              "from": "split"
+            },
+            {
+              "to": "smooth",
+              "from": "only"
+            },
+            {
+              "to": "filter",
+              "label": "是",
+              "from": "smooth"
+            },
+            {
+              "to": "out",
+              "label": "否",
+              "from": "smooth"
+            },
+            {
+              "to": "out",
+              "from": "filter"
+            }
+          ],
+          "caption": "eval 改变模块行为，no_grad 停止记录梯度。可选平滑只改变输出坐标，heatmaps 仍是模型原始结果。"
+        }
       },
       {
         "start": 50,
         "end": 67,
         "title": "热图可视化：展示原始得分",
         "principle": [
-          "批输入只取第一张，然后为每条线的热图建子图。cmap=hot用颜色表示数值大小；这段直接画logits，没有转成概率。"
+          "热图颜色仅代表传入数组的数值大小。若传的是logits，颜色条展示的就是原始评分，不应直接解读成概率。",
+          "一条边界有一张二维图，横轴是图像列、纵轴是候选高度；与输出通道的数量无关，单张热图里仍包含整幅空间网格。"
         ],
         "syntax": [
-          "Tensor.cpu().numpy()转CPU数组；shape[0]在移除batch后是L。subplots(2,(L+1)//2)分两行，列数为向上取整L/2。",
-          "axes.flatten()把二维坐标轴容器展平，便于按线编号遍历。"
+          "plt.subplots(2,(L+1)//2)固定两行并向上取整列数；axes.flatten把二维子图数组改成一维访问。",
+          "imshow(cmap=\"hot\",interpolation=\"nearest\")采用热色映射，nearest仅影响显示重采样，不改变模型数据。",
+          "cpu().numpy()不能直接用于仍需梯度的Tensor；主调用在no_grad下得到结果，因此满足条件。"
         ],
         "shapes": "",
-        "pitfall": "num_channels=1时axes本是数组，却再包成list后调用flatten，Python list没有该方法，会报错。Tensor若带梯度还需detach才能numpy。",
-        "exercise": "热图颜色很亮是否直接表示概率接近1？",
-        "answer": "不是，画的是原始logits且颜色范围按绘图缩放，不能直接读作概率。",
-        "diagram": "heatmap"
+        "pitfall": "num_channels==1时，代码把axes装进Python列表后又调用.flatten()，会出错；当前两条边界避开此分支。gt_y_px/pred_y_px若仍为[B,L,W]，后面的ndim==2检查会跳过叠线。",
+        "summary": "将各边界通道的评分图显示为热色图，并创建后续叠加边界所需的子图。",
+        "parameters": [
+          {
+            "name": "heatmaps",
+            "type": "Tensor或np.ndarray [B,L,H,W]/[L,H,W]",
+            "default": "必填",
+            "meaning": "要显示的数值；主模型传入原始评分，不会在这里转概率。"
+          },
+          {
+            "name": "gt_y_px",
+            "type": "Tensor/np.ndarray [L,W] 或None",
+            "default": "None",
+            "meaning": "可选参考线；本函数叠加分支只接受二维坐标。"
+          },
+          {
+            "name": "pred_y_px",
+            "type": "Tensor/np.ndarray [L,W] 或None",
+            "default": "None",
+            "meaning": "可选预测线；同样要求二维坐标才能进入叠加。"
+          },
+          {
+            "name": "save_path",
+            "type": "str或Path",
+            "default": "\"heatmaps.png\"",
+            "meaning": "最终图片保存位置；实际保存语句在下一段。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "heatmaps",
+            "type": "np.ndarray [L,H,W]",
+            "meaning": "Tensor移到CPU转数组；四维时只保留批中的第0张。"
+          },
+          {
+            "name": "num_channels",
+            "type": "int",
+            "meaning": "边界通道数L，决定需要多少子图。"
+          },
+          {
+            "name": "fig,axes",
+            "type": "Matplotlib Figure与Axes数组",
+            "meaning": "建立2行、ceil(L/2)列的网格；flatten后用单一索引访问。"
+          },
+          {
+            "name": "i",
+            "type": "int",
+            "meaning": "当前正在绘制的边界通道下标。"
+          },
+          {
+            "name": "ax",
+            "type": "Axes",
+            "meaning": "当前通道对应子图。"
+          },
+          {
+            "name": "im",
+            "type": "AxesImage",
+            "meaning": "imshow返回的绘图对象，后续colorbar依赖它知道数值与颜色映射。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L52–55 转换数据",
+            "detail": "Tensor经cpu().numpy()；四维热图只显示第一个batch样本。"
+          },
+          {
+            "title": "L57–61 准备子图",
+            "detail": "按通道数计算两行网格，并尝试压平axes便于遍历。"
+          },
+          {
+            "title": "L63–67 每通道绘图",
+            "detail": "imshow使用hot配色和nearest显示插值，设置标题并隐藏坐标轴。"
+          }
+        ],
+        "returns": [
+          "本段建立图像和子图，函数在后续叠线与保存后结束，不返回图片对象。"
+        ]
       },
       {
         "start": 69,
         "end": 94,
         "title": "叠加边界并保存热图",
         "principle": [
-          "GT与预测线只有形状为[L,W]才叠加在对应热图上；x坐标由列索引生成，y坐标为边界高度。每个热图有独立colorbar。",
-          "绘图后tight_layout调整间距，savefig写文件，close释放图对象，适合每epoch多次输出。"
+          "同一张热图上叠线可检查“响应峰位置”和“最终坐标”是否一致。双峰时坐标可能落在两个峰之间，图像能直观看到这一点。",
+          "画图使用的valid只是高度非负；插值范围外的端点填充值可能仍为非负，因此显示出来不代表那一列参加了训练监督。"
         ],
         "syntax": [
-          "ndim==2明确要求不带batch；valid=y_coords>=0只按坐标值判断，并未接收真实valid mask。",
-          "for i in range(num_channels,len(axes))关闭多余空子图；dpi=150控制输出像素密度。"
+          "\"g-\"表示绿色实线，\"r--\"表示红色虚线；linewidth设置线宽，alpha设置透明度，label提供图例文字。",
+          "plt.colorbar(im,ax=ax,fraction=0.046,pad=0.04)把色条绑定当前热图和子图，并控制宽度/间距。",
+          "savefig(dpi=150,bbox_inches=\"tight\")控制分辨率并裁去多余边缘；close防止循环画图时累积图对象。"
         ],
         "shapes": "",
-        "pitfall": "main传的是batch[\"y_px\"][:1]与out坐标，形状[1,L,W]，不满足这里ndim==2，因此训练调用中叠加线分支不会执行。",
-        "exercise": "要在当前函数正确叠GT，调用时应传什么形状？",
-        "answer": "传gt_y_px[0]得到[L,W]，或在函数中明确移除batch维；还应传真实valid避免画出无效GT。",
-        "diagram": "heatmap"
+        "pitfall": "本分支不检查y<图像高度，也不接收真实valid_mask。主调用若传入带batch维坐标，线会因ndim==2不成立而不显示，热图仍会保存。",
+        "summary": "在已画好的热图上叠加参考/预测坐标，添加颜色条并保存图片。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "gt_y_px_np,pred_y_px_np",
+            "type": "np.ndarray",
+            "meaning": "把可选坐标移到CPU并转数组，不自动去掉批维。"
+          },
+          {
+            "name": "y_coords",
+            "type": "np.ndarray [W]",
+            "meaning": "当前边界在每一列的高度。"
+          },
+          {
+            "name": "valid",
+            "type": "bool np.ndarray [W]",
+            "meaning": "这里只判断y>=0，不等价于训练数据的valid_mask。"
+          },
+          {
+            "name": "np.arange(len(y_coords))",
+            "type": "np.ndarray [W]",
+            "meaning": "生成横坐标列号0…W−1；与y一起按valid筛选。"
+          },
+          {
+            "name": "i",
+            "type": "int",
+            "meaning": "先遍历边界通道，随后遍历多余子图并关闭。"
+          },
+          {
+            "name": "im,ax",
+            "type": "Matplotlib绘图对象",
+            "meaning": "承接上一段的当前热图及子图，用于颜色条和图例。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L69–75 叠加参考线",
+            "detail": "仅当gt存在且为二维、通道下标合法时取对应线；筛选非负高度后画绿色实线。"
+          },
+          {
+            "title": "L77–83 叠加预测线",
+            "detail": "采用同样检查，画红色虚线。"
+          },
+          {
+            "title": "L85–90 补展示元素",
+            "detail": "每通道加colorbar，按是否传入参考/预测参数决定图例；多余子图隐藏。"
+          },
+          {
+            "title": "L92–94 保存并释放",
+            "detail": "tight_layout调整布局，150dpi保存到save_path，close释放图资源。"
+          }
+        ],
+        "returns": [
+          "文件系统中的结果图片；函数没有显式return，所以返回None。"
+        ],
+        "flow": {
+          "title": "热图上的可选叠线",
+          "nodes": [
+            {
+              "id": "map",
+              "title": "当前通道热图",
+              "detail": "上一段已绘制",
+              "kind": "input"
+            },
+            {
+              "id": "gt",
+              "title": "参考坐标存在且二维？",
+              "detail": "通道索引也需合法",
+              "kind": "decision"
+            },
+            {
+              "id": "gtplot",
+              "title": "绿色参考线",
+              "detail": "只筛选y>=0",
+              "kind": "process"
+            },
+            {
+              "id": "pred",
+              "title": "预测坐标存在且二维？",
+              "detail": "通道索引也需合法",
+              "kind": "decision"
+            },
+            {
+              "id": "predplot",
+              "title": "红色预测虚线",
+              "detail": "只筛选y>=0",
+              "kind": "process"
+            },
+            {
+              "id": "finish",
+              "title": "颜色条、图例和布局",
+              "detail": "多余子图隐藏",
+              "kind": "process"
+            },
+            {
+              "id": "save",
+              "title": "保存并关闭画布",
+              "detail": "返回None",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "gt",
+              "from": "map"
+            },
+            {
+              "to": "gtplot",
+              "label": "是",
+              "from": "gt"
+            },
+            {
+              "to": "pred",
+              "label": "否",
+              "from": "gt"
+            },
+            {
+              "to": "pred",
+              "from": "gtplot"
+            },
+            {
+              "to": "predplot",
+              "label": "是",
+              "from": "pred"
+            },
+            {
+              "to": "finish",
+              "label": "否",
+              "from": "pred"
+            },
+            {
+              "to": "finish",
+              "from": "predplot"
+            },
+            {
+              "to": "save",
+              "from": "finish"
+            }
+          ],
+          "caption": "参考线和预测线分别检查是否为二维 [L,W]。主调用传入带批维坐标时，叠线分支会跳过，热图仍正常保存。"
+        }
       },
       {
         "start": 97,
         "end": 146,
         "title": "GT/预测双栏图：坐标的直观核对",
         "principle": [
-          "把第一张图转成可显示的灰度或HWC数组，再左右分别叠GT与预测。它展示边界是否跟随图像结构，是排查整体偏移、上下颠倒、局部异常的重要手段。",
-          "显示前把图像线性归一化到[0,1]仅用于对比度，不会改变模型输出。不同边界循环使用固定颜色。"
+          "这张图显示坐标是否贴近可见组织边界，能帮助发现翻转、平移、缩放是否与标签同步。但它只展示选择的样本，不替代完整验证集指标。",
+          "显示归一化只为了把图像亮度映射到可见范围，不会再次输入模型，也不改变线坐标。"
         ],
         "syntax": [
-          "permute(1,2,0)把CHW换为HWC；squeeze(0)按预期去掉batch=1的坐标首维。",
-          "np.arange(len(y_coords))得到每列x；有效显示范围为0≤y<H；save_path决定PNG保存位置。",
-          "gt_mask、pred_seg、heatmaps参数在函数内均未使用，这个函数实际上只画曲线，不画区域mask或热图。"
+          "permute(1,2,0)重排通道轴；squeeze(0)用于去掉batch维，NumPy版本指定轴时要求该轴长度恰好1。",
+          "valid=(y>=0)&(y<H)中&是逐元素逻辑与，括号避免比较运算优先级误解。",
+          "plt.subplot(1,2,1/2)表示一行两列的第1或第2个子图；colors[i%5]用取模循环选色。"
         ],
         "shapes": "",
-        "pitfall": "常量图归一化分母为0；坐标要求batch维大小1。GT判断仅看坐标范围，标注无效但占位y=0也可能被画成顶部线。",
-        "exercise": "GT曲线画在图顶端一定代表人工标注在顶部吗？",
-        "answer": "不一定，无效GT占位值0也会通过范围筛选；应结合valid mask核对。",
-        "diagram": "geometry"
+        "pitfall": "常量图像的max−min为0，此处没加epsilon；真实valid掩码被忽略，gt_mask等三个参数未使用。二维[L,W]直接传入且L>1时，NumPy的squeeze(0)可能报错；调用处应传[1,L,W]。",
+        "summary": "以同一图像为背景，左侧画参考边界、右侧画预测边界，保存直观对照图。",
+        "parameters": [
+          {
+            "name": "img_tensor",
+            "type": "Tensor [B,C,H,W]或[C,H,W]",
+            "default": "必填",
+            "meaning": "输入图像；有批维时仅取第0张。"
+          },
+          {
+            "name": "gt_y_px",
+            "type": "Tensor或np.ndarray，通常[1,L,W]",
+            "default": "必填",
+            "meaning": "参考坐标；代码会沿axis=0做squeeze，实际需要该轴长度为1。"
+          },
+          {
+            "name": "pred_y_px",
+            "type": "Tensor或np.ndarray，通常[1,L,W]",
+            "default": "必填",
+            "meaning": "预测坐标，与参考同一网格。"
+          },
+          {
+            "name": "gt_mask",
+            "type": "任意或None",
+            "default": "None",
+            "meaning": "保留参数，当前函数体未使用，不会控制参考线有效区域。"
+          },
+          {
+            "name": "pred_seg",
+            "type": "任意或None",
+            "default": "None",
+            "meaning": "保留参数，未绘制分割区域。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "任意或None",
+            "default": "None",
+            "meaning": "保留参数，未用于这张对照图。"
+          },
+          {
+            "name": "save_path",
+            "type": "str或Path",
+            "default": "\"inference_gt.png\"",
+            "meaning": "保存位置。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "img_np",
+            "type": "np.ndarray [H,W]或[H,W,C]",
+            "meaning": "图像转为Matplotlib通道布局，再按全图min/max拉伸到0～1以便显示。"
+          },
+          {
+            "name": "gt_y_px,pred_y_px",
+            "type": "np.ndarray [L,W]",
+            "meaning": "从Tensor转CPU数组，并去掉长度1的批维。"
+          },
+          {
+            "name": "colors",
+            "type": "list[str]",
+            "meaning": "五种边界线颜色，i%len(colors)循环使用。"
+          },
+          {
+            "name": "i",
+            "type": "int",
+            "meaning": "边界通道编号，两栏分别遍历。"
+          },
+          {
+            "name": "y_coords",
+            "type": "np.ndarray [W]",
+            "meaning": "当前边界逐列高度。"
+          },
+          {
+            "name": "x_coords",
+            "type": "np.ndarray [W]",
+            "meaning": "0…W−1的列坐标。"
+          },
+          {
+            "name": "valid",
+            "type": "bool [W]",
+            "meaning": "坐标是否落在0<=y<H内；只保证可画，不表示真实监督有效。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L100–107 整理底图",
+            "detail": "若有批维取第0张；灰度去掉通道轴，彩色将[C,H,W]换成[H,W,C]，再min/max显示归一化。"
+          },
+          {
+            "title": "L109–113 整理坐标",
+            "detail": "Tensor转数组，去掉长度1批维，得到[L,W]。"
+          },
+          {
+            "title": "L115–129 绘参考栏",
+            "detail": "创建画布和颜色表，左栏显示原图，逐边界过滤越界高度后叠线。"
+          },
+          {
+            "title": "L131–142 绘预测栏",
+            "detail": "右栏同样显示原图并叠预测，便于同尺度比较。"
+          },
+          {
+            "title": "L144–146 保存并关闭",
+            "detail": "调整布局，150dpi保存图片，释放画布。"
+          }
+        ],
+        "returns": [
+          "保存对照图片；Python返回None。"
+        ],
+        "flow": {
+          "title": "坐标对照图的准备与绘制",
+          "nodes": [
+            {
+              "id": "input",
+              "title": "图像与两套坐标",
+              "detail": "只显示一张图",
+              "kind": "input"
+            },
+            {
+              "id": "img",
+              "title": "调整图像轴与亮度",
+              "detail": "灰度[H,W]或彩色[H,W,C]",
+              "kind": "process"
+            },
+            {
+              "id": "coords",
+              "title": "去掉坐标批维",
+              "detail": "得到[L,W]",
+              "kind": "process"
+            },
+            {
+              "id": "left",
+              "title": "左栏参考边界",
+              "detail": "按0<=y<H过滤",
+              "kind": "process"
+            },
+            {
+              "id": "right",
+              "title": "右栏预测边界",
+              "detail": "使用相同原图和颜色规则",
+              "kind": "process"
+            },
+            {
+              "id": "save",
+              "title": "保存并关闭",
+              "detail": "不返回计算指标",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "img",
+              "from": "input"
+            },
+            {
+              "to": "coords",
+              "from": "input"
+            },
+            {
+              "to": "left",
+              "from": "img"
+            },
+            {
+              "to": "right",
+              "from": "img"
+            },
+            {
+              "to": "left",
+              "from": "coords"
+            },
+            {
+              "to": "right",
+              "from": "coords"
+            },
+            {
+              "to": "save",
+              "from": "left"
+            },
+            {
+              "to": "save",
+              "from": "right"
+            }
+          ],
+          "caption": "两栏共享同一底图和坐标尺度。高度范围筛选仅保证坐标可画，并未使用数据集真实有效掩码。"
+        }
       }
-    ]
+    ],
+    "role": "训练过程的定期预测展示和独立推理辅助；平滑属于输出后处理。",
+    "inputs": [
+      "已经构建并加载参数的模型，以及正确设备、通道和预处理的图像张量。",
+      "坐标 [B,L,W] 或 [L,W]，热图 [B,L,H,W] 或 [L,H,W]，以及可选参考线。"
+    ],
+    "outputs": [
+      "infer_lines 返回字典 {y_px,heatmaps}；默认坐标经过宽度方向平滑。",
+      "可视化函数按save_path保存PNG等图片，并关闭Matplotlib图对象。"
+    ],
+    "readingGuide": [
+      "先读infer_lines，看到smooth=True再读smooth_y_px；最后读两个画图函数了解如何把数值映射到图像。",
+      "这里没有自动按模型设备搬输入，也没有负责灰度转换和训练所用z-score；调用者要准备好输入。",
+      "infer_lines的默认平滑只影响其返回坐标。评估循环直接调用model时，不一定使用同一后处理。",
+      "图中能画出的坐标不等于真实有效标签；画图函数主要按高度范围判断，未完整使用数据集valid掩码。"
+    ],
+    "components": [
+      {
+        "name": "smooth_y_px",
+        "kind": "函数",
+        "summary": "把每条预测边界当成一维信号，沿横向列做独立高斯平滑。",
+        "segmentStart": 7
+      },
+      {
+        "name": "infer_lines",
+        "kind": "函数",
+        "summary": "禁止梯度、切换eval、统一批维，调用模型并可选平滑坐标。",
+        "segmentStart": 30
+      },
+      {
+        "name": "visualize_heatmaps",
+        "kind": "函数",
+        "summary": "每个边界通道绘一张热图，可叠加参考和预测线。",
+        "segmentStart": 50
+      },
+      {
+        "name": "visualize_pred_gt",
+        "kind": "函数",
+        "summary": "以同一原图作底，左右对照参考边界和预测边界。",
+        "segmentStart": 97
+      }
+    ],
+    "pipeline": {
+      "title": "推理到两种展示方式",
+      "nodes": [
+        {
+          "id": "input",
+          "title": "已预处理图像与模型",
+          "detail": "设备、灰度和数值范围由调用者准备",
+          "kind": "input"
+        },
+        {
+          "id": "eval",
+          "title": "eval + no_grad",
+          "detail": "关闭训练态行为和梯度记录",
+          "kind": "process"
+        },
+        {
+          "id": "forward",
+          "title": "网络前向",
+          "detail": "坐标与热图评分",
+          "kind": "process"
+        },
+        {
+          "id": "smooth",
+          "title": "是否平滑坐标？",
+          "detail": "infer_lines 默认True",
+          "kind": "decision"
+        },
+        {
+          "id": "filter",
+          "title": "逐边界一维滤波",
+          "detail": "沿横向列做5点高斯平均",
+          "kind": "process"
+        },
+        {
+          "id": "result",
+          "title": "返回结果字典",
+          "detail": "y_px / heatmaps",
+          "kind": "output"
+        },
+        {
+          "id": "hm",
+          "title": "绘制热图",
+          "detail": "可叠加坐标",
+          "kind": "process"
+        },
+        {
+          "id": "overlay",
+          "title": "绘制原图对照",
+          "detail": "参考与预测分两栏",
+          "kind": "process"
+        }
+      ],
+      "edges": [
+        {
+          "to": "eval",
+          "from": "input"
+        },
+        {
+          "to": "forward",
+          "from": "eval"
+        },
+        {
+          "to": "smooth",
+          "from": "forward"
+        },
+        {
+          "to": "filter",
+          "label": "是",
+          "from": "smooth"
+        },
+        {
+          "to": "result",
+          "from": "filter"
+        },
+        {
+          "to": "result",
+          "label": "否",
+          "from": "smooth"
+        },
+        {
+          "to": "hm",
+          "from": "result"
+        },
+        {
+          "to": "overlay",
+          "from": "result"
+        }
+      ],
+      "caption": "模型结果可选择先平滑坐标，再绘制热图或原图对照；这些工具负责推理和展示，不更新模型权重。"
+    }
   },
   {
     "path": "LineDet/export.py",
     "title": "把边界网络与质量分类器封装成端侧程序",
-    "overview": "导出加载额外的MobileNetV3-small质量权重，与训练好的边界模型串联在同一个输入下运行。它输出边界坐标和质量类别，不输出脂肪区域mask、热图或质量概率。",
+    "overview": "这个文件把训练好的边界网络和一个独立的图像质量分类网络组合成可在端侧运行的程序。包装器先标准化输入，同一张图分别送入边界网络和质量网络，输出逐列边界坐标与“bad/good”的类别编号。export_pte_model 捕获组合模型的计算图，转换到ExecuTorch并使用XNNPACK后端，写出best.pte，再用运行时实际执行一次。文件中还保留了一个名称含LRASPP的浅层分类器构建函数，但真正导出使用的是load_quality_model加载的MobileNetV3-small分类网络。",
     "segments": [
       {
         "start": 1,
         "end": 12,
         "title": "导出依赖与外部质量权重",
         "principle": [
-          "ExecuTorch把PyTorch图转换为适合端侧运行的程序；XNNPACK分区器尝试将支持的子图交给CPU后端。",
-          "QUALITY_CHECKPOINT_PATH指向原作者Linux环境中的独立质量模型checkpoint，这个路径不是仓库内相对文件。运行导出前必须提供兼容权重或调整路径。"
+          "边界检测回答“组织分界在哪里”，质量分类回答“图像质量属于哪一类”。两个网络独立加载，包装器把它们放在同一端侧程序里。"
         ],
         "syntax": [
-          "模块顶层导入executorch，缺少该包时导出模块立即导入失败；括号中的相邻字符串字面量会自动拼接。"
+          "括号中的相邻字符串无需+即可连接；常量名全大写是命名约定，不会在Python中自动只读。"
         ],
         "shapes": "",
-        "pitfall": "main在训练结束才导入此模块；所以可能训练已成功而导出因依赖或外部权重缺失而失败。--skip_export可仅保留训练检查点。",
-        "exercise": "存在best.pth是否自动足够生成best.pte？",
-        "answer": "不够，还需要模型结构、ExecuTorch环境、独立质量分类器权重和匹配的输入规范。",
-        "diagram": "export"
+        "pitfall": "固定路径属于原训练环境，换机器时需要提供对应权重位置。仅有边界网络权重不足以完成此导出链。",
+        "summary": "导入端侧转换所需工具，并指定独立质量模型检查点的固定路径。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "torch,nn,models",
+            "type": "模块",
+            "meaning": "分别提供图捕获/张量、网络层，以及torchvision MobileNet分类结构。"
+          },
+          {
+            "name": "to_edge_transform_and_lower",
+            "type": "ExecuTorch函数",
+            "meaning": "接收导出程序并转换到Edge表示，同时按后端分区降低。"
+          },
+          {
+            "name": "XnnpackPartitioner",
+            "type": "分区器类",
+            "meaning": "识别可交给XNNPACK CPU后端执行的算子子图。"
+          },
+          {
+            "name": "QUALITY_CHECKPOINT_PATH",
+            "type": "str",
+            "meaning": "由括号内两个相邻字符串自动拼接成Linux绝对路径，指向quality模型best.pth。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L1–6 导入框架与后端",
+            "detail": "文件导入时就需要torchvision和ExecuTorch；这些不是在训练循环里创建的网络。"
+          },
+          {
+            "title": "L9–12 定义权重位置",
+            "detail": "多行字符串字面量在编译时拼接，供load_quality_model默认参数使用。"
+          }
+        ],
+        "returns": [
+          "模块内得到导出工具和质量权重路径常量。"
+        ]
       },
       {
         "start": 15,
         "end": 34,
         "title": "导出包装：标准化、双模型与质量类别",
         "principle": [
-          "输入先减去全张量均值并除标准差，再同时送给边界模型与质量分类器。边界输出float32坐标；质量输出取分类logits最大值位置，0/1类别编码为uint8。",
-          "虽然变量叫score，但torch.max(...)[1]取得的是索引，不是分数或置信度。质量模型与线模型是独立网络，这份训练代码没有联合训练quality头。"
+          "argmax只用于质量类别选择，不用于边界坐标。边界仍由base_model内部soft_argmax输出小数高度。",
+          "两个网络共享输入，不共享网络参数。返回uint8类别减少结果表示宽度，但会丢掉完整的类别分数与置信度。"
         ],
         "syntax": [
-          "self.base_model和self.cls_model注册两个子模块；torch.mean(x)/std(x)未指定dim，因此跨batch、channel和空间一起统计。",
-          "torch.max(score,dim=1)返回(values,indices)，[1]取indices；type(torch.uint8)转8位无符号整数。"
+          "super(ModelWithArgmax,self).__init__()是显式类名形式的父类初始化。",
+          "torch.mean(x)、torch.std(x)未指定dim，聚合整个输入张量。torch.max(score,dim=1)返回(最大值,索引)，[1]取索引。",
+          ".type(torch.float32/torch.uint8)改变输出dtype；uint8是0到255的无符号整数。"
         ],
         "shapes": "[1,1,H,W] → 标准化 → ([1,L,W] float32, [1] uint8)",
-        "pitfall": "没有std+epsilon，常量图会除0；batch>1时会跨图共同标准化，与数据集逐图标准化不同。导出无infer_lines的平滑，因此绘图与端侧输出并不完全同一路径。",
-        "exercise": "需要good概率时，当前score能直接使用吗？",
-        "answer": "不能；要从两类logits做softmax并取good索引1的概率，且需明确改变导出返回协议。",
-        "diagram": "export"
+        "pitfall": "std没有epsilon保护，常量输入可能除零。标准化跨整个batch；batch>1时与逐张标准化不同。实际导出样例batch固定1。",
+        "summary": "把图像标准化、边界模型和质量分类模型封装成一个端侧forward，只返回坐标与类别编号。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "ModelWithArgmax实例",
+            "default": "自动传入",
+            "meaning": "注册两个子模型。"
+          },
+          {
+            "name": "cls_model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "独立质量分类器，期望输出[B,2]分数。"
+          },
+          {
+            "name": "base_model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "边界模型，期望返回(y_px,heatmaps)。"
+          },
+          {
+            "name": "x",
+            "type": "float Tensor [B,C,H,W]",
+            "default": "forward必填",
+            "meaning": "待导出的原始输入；当前样例为单张单通道图。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.base_model,self.cls_model",
+            "type": "nn.Module",
+            "meaning": "注册为子模块，使参数和计算图都纳入导出。"
+          },
+          {
+            "name": "b,c,h,w",
+            "type": "int",
+            "meaning": "解包输入形状后未再使用；并未据此逐张标准化。"
+          },
+          {
+            "name": "mean,std",
+            "type": "标量Tensor",
+            "meaning": "对整个输入张量的所有元素求均值与标准差，不只沿空间维。"
+          },
+          {
+            "name": "x",
+            "type": "float Tensor",
+            "meaning": "本地变量覆盖为(x−mean)/std，两网络收到同一标准化结果。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [B,L,W]",
+            "meaning": "边界网络输出的坐标；最终转换float32。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "边界网络第二个返回值，本包装器不对外返回。"
+          },
+          {
+            "name": "score",
+            "type": "Tensor [B,2]后变[B]",
+            "meaning": "先是质量类别分数，再由torch.max(...,dim=1)[1]变成最大分数对应类别索引。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L17–20 注册子模型",
+            "detail": "构造器保存分类与边界网络。"
+          },
+          {
+            "title": "L22–26 全输入标准化",
+            "detail": "读取形状，计算全张量mean/std并执行z-score。"
+          },
+          {
+            "title": "L29–32 双模型前向",
+            "detail": "先算边界，再算质量分数；质量分数取类别轴最大值的索引。"
+          },
+          {
+            "title": "L34 转型并返回",
+            "detail": "坐标转float32，类别索引转uint8，构成二元组。"
+          }
+        ],
+        "returns": [
+          "(float32 y_px [B,L,W], uint8 score [B])；类别通常0=bad、1=good，由检查点映射确认。"
+        ],
+        "flow": {
+          "title": "包装器的一次前向",
+          "nodes": [
+            {
+              "id": "x",
+              "title": "输入灰度图",
+              "detail": "当前样例[1,1,H,W]",
+              "kind": "input"
+            },
+            {
+              "id": "norm",
+              "title": "全张量z-score",
+              "detail": "减mean再除std",
+              "kind": "process"
+            },
+            {
+              "id": "line",
+              "title": "边界网络",
+              "detail": "得到坐标与热图",
+              "kind": "process"
+            },
+            {
+              "id": "quality",
+              "title": "质量网络",
+              "detail": "得到[B,2]类别分数",
+              "kind": "process"
+            },
+            {
+              "id": "arg",
+              "title": "类别轴argmax",
+              "detail": "取最大值的索引",
+              "kind": "process"
+            },
+            {
+              "id": "coord",
+              "title": "坐标转float32",
+              "detail": "热图不对外返回",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "输出二元组",
+              "detail": "坐标 + uint8类别",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "norm",
+              "from": "x"
+            },
+            {
+              "to": "line",
+              "from": "norm"
+            },
+            {
+              "to": "quality",
+              "from": "norm"
+            },
+            {
+              "to": "coord",
+              "from": "line"
+            },
+            {
+              "to": "arg",
+              "from": "quality"
+            },
+            {
+              "to": "out",
+              "from": "coord"
+            },
+            {
+              "to": "out",
+              "from": "arg"
+            }
+          ],
+          "caption": "两网络使用同一份全张量标准化输入。argmax 只选择质量类别；边界保留 base_model 输出的小数坐标。"
+        }
       },
       {
         "start": 37,
         "end": 68,
         "title": "遗留分类构建器：截取低层特征",
         "principle": [
-          "这个名称带LRASPP的函数实际上准备一个浅层二分类网络，只使用MobileNet的前3个features模块。它不属于当前export_pte_model调用链，当前导出走load_quality_model。",
-          "large和small都可选择，但底部high_level_features虽然构造出来，嵌套模型没有保存或使用它；不能把未用的高层画入这个函数的执行流程。"
+          "名称带LRASPP不代表这里实现了完整的语义分割头。实际保留浅层特征后做全局分类，输出两个质量分数。",
+          "当前export_pte_model并不调用此构建器；真实质量模型通过后面的load_quality_model建立，不能把两套结构混为一谈。"
         ],
         "syntax": [
-          "in_channel=1时替换第一层卷积；3时保留RGB；其他值抛ValueError。model_size也只接受large/small。",
-          "features[:3]包含stem和后续两个块；num_classes形参传下去，但实际分类Linear输出固定2。"
+          "elif处理互斥的规模/通道分支；pass表示什么都不做，3通道时保留原RGB卷积。",
+          "nn.Sequential(*features[:3])中的*将切片列表展开；[:3]包括索引0、1、2，并非一定等同三个倒残差块。"
         ],
         "shapes": "",
-        "pitfall": "函数名不代表实现了标准LR-ASPP分割头；这里没有ASPP多分支、分割掩码或21类输出。",
-        "exercise": "num_classes=21会使这个函数输出21类吗？",
-        "answer": "不会，嵌套模型最后一层硬编码为Linear(...,2)。",
-        "diagram": "export"
+        "pitfall": "num_classes参数传递后未生效。深层模块被建立但未使用，后续解释应按实际forward而不是变量名字判断结构。",
+        "summary": "旧构建器选择large/small骨干、适配灰度输入并切取浅层，交给下一段的两类分类头。",
+        "parameters": [
+          {
+            "name": "in_channel",
+            "type": "int",
+            "default": "1",
+            "meaning": "支持1或3通道；1时替换首层，3时保留，其他值抛错。"
+          },
+          {
+            "name": "num_classes",
+            "type": "int",
+            "default": "21",
+            "meaning": "传给内部类，但最终Linear固定输出2，此参数没有决定类别数。"
+          },
+          {
+            "name": "pretrained_backbone",
+            "type": "bool",
+            "default": "False",
+            "meaning": "传给torchvision骨干的pretrained开关。"
+          },
+          {
+            "name": "model_size",
+            "type": "str",
+            "default": "\"large\"",
+            "meaning": "只接受large或small，选择MobileNetV3变体。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "mobilenet",
+            "type": "torchvision MobileNetV3",
+            "meaning": "按model_size创建的基础网络。"
+          },
+          {
+            "name": "high_level_channels",
+            "type": "int",
+            "meaning": "large分支设960、small设576，传入内部类后又被覆盖为24。"
+          },
+          {
+            "name": "features",
+            "type": "list[nn.Module]",
+            "meaning": "骨干features的直接子模块列表。"
+          },
+          {
+            "name": "first_conv",
+            "type": "nn.Conv2d",
+            "meaning": "替换灰度首层时用于读取原配置。"
+          },
+          {
+            "name": "low_level_features",
+            "type": "nn.Sequential",
+            "meaning": "features[:3]组成的浅层网络，是旧分类器唯一真正使用的骨干。"
+          },
+          {
+            "name": "low_level_channels",
+            "type": "int=24",
+            "meaning": "后续浅层分类头固定使用24个通道。"
+          },
+          {
+            "name": "high_level_features",
+            "type": "nn.Sequential",
+            "meaning": "features[3:]，虽创建并传给内部类，但内部没有保存/调用。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L38–45 选择骨干规模",
+            "detail": "large/small两分支分别实例化模型，未知字符串抛ValueError。"
+          },
+          {
+            "title": "L47–61 适配通道",
+            "detail": "单通道新建灰度首卷积，三通道保持原层；其他通道数报错。"
+          },
+          {
+            "title": "L64–68 切分模块",
+            "detail": "前3个子模块作为浅层，其余作为名义深层；下段实际上只用浅层。"
+          }
+        ],
+        "returns": [
+          "本段准备内部类构造参数；整个函数在L119返回旧分类模型实例。"
+        ]
       },
       {
         "start": 70,
         "end": 119,
         "title": "遗留浅层分类器的内部结构",
         "principle": [
-          "低层24通道特征先做3×3逐通道卷积，再1×1跨通道混合；每层后接BN与ReLU。全局平均池化把每张特征图压成一个数，再用线性层得到两个logits。",
-          "这与边界任务保留每个x列信息不同：图像级质量分类需要整体摘要，池化掉H/W正好符合目标。"
+          "第一层groups=24，每个通道各自过滤邻域；第二层groups=1的1×1卷积混合24个通道。这与普通卷积一次同时混合空间和所有通道的连接方式不同。",
+          "全局平均池化使输出只保留每个通道的总体响应，丢弃空间位置，因此得到图像级分类而非逐像素分割。"
         ],
         "syntax": [
-          "嵌套class在函数调用时定义；groups=24使第一卷积每通道独立；第二层groups=1是普通1×1。",
-          "AdaptiveAvgPool2d(1)对任意空间大小输出1×1；view(batch,-1)把其余维度展平；nn.Linear(24,2)输出两类。"
+          "AdaptiveAvgPool2d(1)无论输入高宽多少，都给每通道输出1×1；view(batch,-1)中的−1自动推算展平后的特征数。",
+          "Conv2d中groups=low_level_channels*factor=24是深度卷积，groups=1是普通通道混合；两层bias=False，之后各自带BN。",
+          "嵌套类在外层函数调用时定义；只通过外层返回的实例被调用。"
         ],
         "shapes": "[B,24,h,w] → [B,24,1,1] → [B,24] → [B,2]",
-        "pitfall": "high_level_channels被重设为24；num_classes及传入high_level_features未使用。此函数目前未被导出调用。",
-        "exercise": "AdaptiveAvgPool2d(1)与Flatten直接展开有什么差异？",
-        "answer": "前者每通道只保留全局均值，固定24维；Flatten会保留24×h×w个数，依赖输入分辨率。",
-        "diagram": "export"
+        "pitfall": "这个旧网络没有被真实导出函数调用。内部num_classes、high_level_features等参数留在签名里不代表有相应功能。",
+        "summary": "定义旧分类器内部结构：浅层特征经深度卷积和逐点卷积，再全局平均并输出两类分数。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "MobileNetV3_LRASPP实例",
+            "default": "自动传入",
+            "meaning": "内部类实例，作用域位于旧构建器内。"
+          },
+          {
+            "name": "low_level_features",
+            "type": "nn.Sequential",
+            "default": "必填",
+            "meaning": "真正注册并在forward调用的浅层骨干。"
+          },
+          {
+            "name": "high_level_features",
+            "type": "nn.Sequential",
+            "default": "必填",
+            "meaning": "虽然接收，但构造器未保存也未调用。"
+          },
+          {
+            "name": "num_classes",
+            "type": "int",
+            "default": "必填",
+            "meaning": "未参与Linear输出维度，实际固定2。"
+          },
+          {
+            "name": "high_level_channels",
+            "type": "int",
+            "default": "必填",
+            "meaning": "传入后被重新赋值24，原值未用于卷积。"
+          },
+          {
+            "name": "low_level_channels",
+            "type": "int",
+            "default": "必填",
+            "meaning": "当前24，决定分组数、卷积宽度和Linear输入维。"
+          },
+          {
+            "name": "x",
+            "type": "Tensor [B,1或3,H,W]",
+            "default": "forward必填",
+            "meaning": "与外层构建器in_channel一致的图像。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "high_level_channels",
+            "type": "局部int=24",
+            "meaning": "覆盖外部传入深层通道数，实际表示浅层头的输入宽度。"
+          },
+          {
+            "name": "factor",
+            "type": "int=1",
+            "meaning": "通道宽度倍率；当前所有low_level_channels*factor仍为24。"
+          },
+          {
+            "name": "self.cls_conv",
+            "type": "nn.Sequential",
+            "meaning": "3×3逐通道卷积24→24、BN、ReLU，再1×1普通卷积24→24、BN、ReLU。"
+          },
+          {
+            "name": "self.avg_pool",
+            "type": "AdaptiveAvgPool2d(1)",
+            "meaning": "把每个通道整个空间平均成1×1。"
+          },
+          {
+            "name": "self.cls",
+            "type": "Sequential(Linear(24,2))",
+            "meaning": "将24个全局特征映射成两个类别评分。"
+          },
+          {
+            "name": "low_level_feat",
+            "type": "Tensor [B,24,h,w]",
+            "meaning": "浅层骨干输出。"
+          },
+          {
+            "name": "score",
+            "type": "Tensor [B,2]",
+            "meaning": "卷积、池化、展平、线性分类后的分数。"
+          },
+          {
+            "name": "model",
+            "type": "MobileNetV3_LRASPP实例",
+            "meaning": "外层构建器创建内部类实例并返回。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L71–94 建立卷积头",
+            "detail": "只保存浅层骨干，固定通道24，构建逐通道3×3与混合通道1×1两层卷积。"
+          },
+          {
+            "title": "L95–98 建立分类输出",
+            "detail": "空间自适应平均到1×1，Linear输出固定2类。"
+          },
+          {
+            "title": "L100–108 定义前向",
+            "detail": "浅层提特征，cls_conv处理，avg_pool后view成[B,24]，再算分类分数。"
+          },
+          {
+            "title": "L110–119 实例化并返回",
+            "detail": "外层函数将准备的参数传给内部类，返回模型对象。"
+          }
+        ],
+        "returns": [
+          "外层构建器返回模型；内部forward返回[B,2]浮点评分。"
+        ],
+        "flow": {
+          "title": "旧浅层质量分类器",
+          "nodes": [
+            {
+              "id": "x",
+              "title": "输入图像",
+              "detail": "灰度或RGB",
+              "kind": "input"
+            },
+            {
+              "id": "low",
+              "title": "前3个features模块",
+              "detail": "24通道浅层特征",
+              "kind": "process"
+            },
+            {
+              "id": "dw",
+              "title": "3×3逐通道卷积",
+              "detail": "groups=24 + BN + ReLU",
+              "kind": "process"
+            },
+            {
+              "id": "pw",
+              "title": "1×1通道混合",
+              "detail": "groups=1",
+              "kind": "process"
+            },
+            {
+              "id": "pool",
+              "title": "全局平均池化",
+              "detail": "每通道变1个数",
+              "kind": "process"
+            },
+            {
+              "id": "flat",
+              "title": "展平成[B,24]",
+              "detail": "保留批轴",
+              "kind": "process"
+            },
+            {
+              "id": "linear",
+              "title": "Linear(24,2)",
+              "detail": "输出两类评分",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "low",
+              "from": "x"
+            },
+            {
+              "to": "dw",
+              "from": "low"
+            },
+            {
+              "to": "pw",
+              "from": "dw"
+            },
+            {
+              "to": "pool",
+              "from": "pw"
+            },
+            {
+              "to": "flat",
+              "from": "pool"
+            },
+            {
+              "to": "linear",
+              "from": "flat"
+            }
+          ],
+          "caption": "逐点卷积之后也有BN和ReLU。此图只解释遗留构建器，当前导出不走此链。"
+        }
       },
       {
         "start": 122,
         "end": 150,
         "title": "加载实际使用的 quality 模型",
         "principle": [
-          "检查checkpoint含model参数字典，并在存在architecture/class_to_idx元数据时核对其含义；预期small骨干与bad=0、good=1。",
-          "实际重建完整MobileNetV3-small，换单通道首层与两类末层，再严格加载权重。该模型与上面的浅层遗留构建器结构不同。"
+          "load_state_dict只能把数值填进已经存在的匹配结构，因此要先建small、改输入和输出层，再加载。不能把含两类输出的权重直接塞进原始1000类分类器。",
+          "类别索引本身没有自然语义，class_to_idx验证确保0/1与bad/good的预期一致；否则端侧返回同一个整数可能被业务解释反。",
+          "这里直接创建torchvision网络并加载状态字典，没有调用上面的浅层LRASPP构建器，也没有动态导入其他训练脚本。"
         ],
         "syntax": [
-          "torch.load(map_location=\"cpu\",weights_only=False)将checkpoint读到CPU；weights_only=False允许普通pickle对象，因此仅用于可信的本地权重。",
-          "checkpoint.get返回缺失时None，代码允许元数据缺省；strict=True要求参数名称和形状一致。classifier[3]是small分类器末层。"
+          "torch.load(map_location=\"cpu\",weights_only=False)把存储张量放CPU并读取完整检查点对象，包含元数据。",
+          ".get(key)在缺键时返回None；architecture not in (None,...)允许未保存该元数据的旧检查点。",
+          "model.load_state_dict(...,strict=True)要求键和结构匹配；weights=None只表示构造时不自动下载预训练参数。"
         ],
         "shapes": "输入[B,1,H,W] → 完整MobileNetV3-small → 两类logits[B,2]",
-        "pitfall": "允许class_to_idx=None意味着代码不能从该checkpoint验证类别语义，调用端仍需确认0/1含义；strict=True验证参数结构，不验证标签含义。",
-        "exercise": "为什么只把num_classes写成2还不够加载灰度模型？",
-        "answer": "首卷积也必须从3输入通道改成1，使checkpoint的首层权重形状匹配。",
-        "diagram": "export"
+        "pitfall": "元数据缺失被允许，因此仅靠这个函数不能验证权重训练时的全部预处理设置。外部检查点必须可访问并与所建结构匹配。",
+        "summary": "按照质量检查点元数据构建真实的灰度MobileNetV3-small两类网络，并严格加载其参数。",
+        "parameters": [
+          {
+            "name": "checkpoint_path",
+            "type": "str或Path",
+            "default": "QUALITY_CHECKPOINT_PATH",
+            "meaning": "质量模型检查点文件，需包含键model的状态字典。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "checkpoint",
+            "type": "dict",
+            "meaning": "torch.load读取的完整对象，包含model权重及可选architecture/class_to_idx。"
+          },
+          {
+            "name": "architecture",
+            "type": "str或None",
+            "meaning": "可选架构元数据；仅允许缺省或mobilenet_v3_small。"
+          },
+          {
+            "name": "class_to_idx",
+            "type": "dict或None",
+            "meaning": "可选类别映射；只允许缺省或{bad:0,good:1}。"
+          },
+          {
+            "name": "model",
+            "type": "torchvision MobileNetV3-small",
+            "meaning": "使用weights=None创建结构，再替换灰度首层和两类输出层。"
+          },
+          {
+            "name": "first_conv",
+            "type": "原首层Conv2d",
+            "meaning": "提取输出通道、核、步长和补边，供新灰度卷积沿用。"
+          },
+          {
+            "name": "model.classifier[3]",
+            "type": "nn.Linear",
+            "meaning": "使用原输入特征数，但输出维改成2。"
+          },
+          {
+            "name": "load_result",
+            "type": "状态加载结果",
+            "meaning": "strict=True返回的匹配信息；缺键/多键/尺寸不符会导致加载失败。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L123–125 读取和校验基本结构",
+            "detail": "映射到CPU加载，要求对象是dict且有model键。"
+          },
+          {
+            "title": "L127–133 校验模型语义",
+            "detail": "若架构或类别元数据存在，必须与预期一致；缺少元数据被允许。"
+          },
+          {
+            "title": "L135–145 创建正确网络",
+            "detail": "新建small，第一层改单通道，最后分类Linear改2输出。"
+          },
+          {
+            "title": "L146–150 严格加载并返回",
+            "detail": "从checkpoint[\"model\"]读取参数，打印加载状态后返回网络。"
+          }
+        ],
+        "returns": [
+          "已加载权重的nn.Module；此函数尚未主动eval，后续包装器eval会递归设置。"
+        ],
+        "flow": {
+          "title": "质量模型载入检查",
+          "nodes": [
+            {
+              "id": "file",
+              "title": "读取检查点到CPU",
+              "detail": "checkpoint_path",
+              "kind": "input"
+            },
+            {
+              "id": "dict",
+              "title": "是dict且含model？",
+              "detail": "否则抛ValueError",
+              "kind": "decision"
+            },
+            {
+              "id": "meta",
+              "title": "核对可选元数据",
+              "detail": "small架构与bad/good映射",
+              "kind": "process"
+            },
+            {
+              "id": "net",
+              "title": "建立MobileNetV3-small",
+              "detail": "weights=None",
+              "kind": "process"
+            },
+            {
+              "id": "adapt",
+              "title": "改输入和分类层",
+              "detail": "1通道输入、2类输出",
+              "kind": "process"
+            },
+            {
+              "id": "load",
+              "title": "严格加载状态字典",
+              "detail": "strict=True",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回质量模型",
+              "detail": "后续由包装器eval",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "dict",
+              "from": "file"
+            },
+            {
+              "to": "meta",
+              "from": "dict"
+            },
+            {
+              "to": "net",
+              "from": "meta"
+            },
+            {
+              "to": "adapt",
+              "from": "net"
+            },
+            {
+              "to": "load",
+              "from": "adapt"
+            },
+            {
+              "to": "out",
+              "from": "load"
+            }
+          ],
+          "caption": "先匹配输入和输出层结构，再 strict=True 加载权重。当前使用完整 MobileNetV3-small 分类器，不使用前面的遗留浅层构建器。"
+        }
       },
       {
         "start": 153,
         "end": 170,
         "title": "导出静态图、后端转换和保存 PTE",
         "principle": [
-          "将边界模型搬到CPU，和质量模型组成包装器，切换eval后使用样例输入捕获图。再转换/降低为ExecuTorch程序，序列化为best.pte。",
-          "PTE是可执行图与参数的部署产物，PTH是训练参数等Python保存对象，二者用途不同。导出没有启用量化，不能因为使用XNNPACK就称它为INT8模型。"
+          "torch.export捕获的是模型可执行张量计算图；转换后端将支持的算子组织为端侧可运行形式。它与保存state_dict不同，后者只保存参数而没有完整端侧执行程序。",
+          "未声明dynamic_shapes，因此以示例输入捕获的是受固定形状约束的接口。batch、通道和空间尺寸不应假设能任意改变。",
+          "包装器eval会递归设置两个子模型的BN等层；导出的推理行为不使用训练批统计更新。"
         ],
         "syntax": [
-          "img_size约定(W,H)，因此randn形状用(1,1,img_size[1],img_size[0])。样例被包成单元素元组，末尾逗号不能省。",
-          "torch.export.export未传dynamic_shapes，按样例约束导出；partitioner=[XnnpackPartitioner()]传分区器列表。",
-          "with open(...,\"wb\")二进制写文件；write_to_file保存编译产物。line_model.cpu()会原位移动传入模型。"
+          "(tensor,)中的逗号构造单元素tuple；torch.export.export要求args以元组提供。",
+          "partitioner=[XnnpackPartitioner()]传入后端分区器列表；.to_executorch()将Edge程序转换为运行时格式。",
+          "open(...,\"wb\")使用二进制写入模式；with确保即使异常也关闭文件句柄。"
         ],
         "shapes": "固定样例[1,1,H,W] → export图 → edge/lowered图 → best.pte",
-        "pitfall": "没有声明动态batch/H/W，端侧不能假设接受任意尺寸。输出目录由主训练代码提前创建，单独调用需自行确保存在。",
-        "exercise": "为什么sample_inputs=(tensor,)必须有逗号？",
-        "answer": "(tensor)只是括号表达式，(tensor,)才是单元素tuple，torch.export接口要求位置参数元组。",
-        "diagram": "export"
+        "pitfall": "line_model.cpu()会改变调用者持有的模型设备，之后若继续GPU训练须处理设备恢复。函数不会创建save_path，也不会验证任意尺寸输入。",
+        "summary": "用固定尺寸样例捕获组合网络，再转换、后端分区并保存ExecuTorch程序。",
+        "parameters": [
+          {
+            "name": "line_model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "已训练的边界模型；此函数会调用.cpu()把它原地移到CPU。"
+          },
+          {
+            "name": "save_path",
+            "type": "str或Path",
+            "default": "必填",
+            "meaning": "保存best.pte的目录；本函数不会主动创建目录。"
+          },
+          {
+            "name": "img_size",
+            "type": "int或tuple[int,int]",
+            "default": "(256,256)",
+            "meaning": "按(W,H)理解；整数扩成正方形，样例张量以[1,1,H,W]创建。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "cls_model",
+            "type": "nn.Module",
+            "meaning": "调用load_quality_model得到真正的外部质量网络。"
+          },
+          {
+            "name": "export_model",
+            "type": "ModelWithArgmax",
+            "meaning": "包装CPU边界模型和CPU质量模型，包含输入标准化与质量argmax。"
+          },
+          {
+            "name": "sample_inputs",
+            "type": "单元素tuple[Tensor]",
+            "meaning": "torch.randn创建固定batch=1、单通道、指定高宽的示例输入；末尾逗号保证它是元组。"
+          },
+          {
+            "name": "et_program",
+            "type": "ExecuTorch程序对象",
+            "meaning": "经过torch.export捕获、Edge转换、XNNPACK分区降低和to_executorch得到。"
+          },
+          {
+            "name": "file",
+            "type": "二进制文件对象",
+            "meaning": "写入save_path/best.pte，with结束后自动关闭。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L155–160 统一尺寸并组合模型",
+            "detail": "整数尺寸扩为(W,H)，加载质量模型，把边界模型移CPU后包装。"
+          },
+          {
+            "title": "L162 构造示例输入",
+            "detail": "按H=img_size[1]、W=img_size[0]生成[1,1,H,W]随机张量，外包单元素元组。"
+          },
+          {
+            "title": "L163–167 捕获及转换",
+            "detail": "no_grad下将包装器eval，torch.export捕获，交给XNNPACK分区器降低，再生成ExecuTorch程序。"
+          },
+          {
+            "title": "L169–170 写出文件",
+            "detail": "二进制模式打开best.pte，write_to_file序列化程序。"
+          }
+        ],
+        "returns": [
+          "在指定目录生成best.pte；函数接着执行下一段的端侧运行检查，没有返回模型文件对象。"
+        ],
+        "flow": {
+          "title": "计算图到PTE文件",
+          "nodes": [
+            {
+              "id": "line",
+              "title": "已加载边界模型",
+              "detail": "原地移CPU",
+              "kind": "input"
+            },
+            {
+              "id": "quality",
+              "title": "加载质量网络",
+              "detail": "检查元数据与参数",
+              "kind": "process"
+            },
+            {
+              "id": "wrap",
+              "title": "组合包装器并eval",
+              "detail": "含标准化与类别选择",
+              "kind": "process"
+            },
+            {
+              "id": "sample",
+              "title": "固定形状样例",
+              "detail": "(Tensor[1,1,H,W],)",
+              "kind": "input"
+            },
+            {
+              "id": "export",
+              "title": "捕获计算图",
+              "detail": "torch.export.export",
+              "kind": "process"
+            },
+            {
+              "id": "edge",
+              "title": "转Edge并交给XNNPACK",
+              "detail": "后端分区与降低",
+              "kind": "process"
+            },
+            {
+              "id": "et",
+              "title": "转换ExecuTorch程序",
+              "detail": "to_executorch",
+              "kind": "process"
+            },
+            {
+              "id": "save",
+              "title": "二进制写入best.pte",
+              "detail": "输出目录需存在",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "wrap",
+              "from": "line"
+            },
+            {
+              "to": "wrap",
+              "from": "quality"
+            },
+            {
+              "to": "export",
+              "from": "wrap"
+            },
+            {
+              "to": "export",
+              "from": "sample"
+            },
+            {
+              "to": "edge",
+              "from": "export"
+            },
+            {
+              "to": "et",
+              "from": "edge"
+            },
+            {
+              "to": "save",
+              "from": "et"
+            }
+          ],
+          "caption": "导出包含包装器里的标准化和类别选择。未声明动态尺寸，示例输入确定当前固定形状接口。"
+        }
       },
       {
         "start": 172,
         "end": 182,
         "title": "运行时烟雾检查的边界",
         "principle": [
-          "加载刚生成的PTE，取得forward方法，用同一随机样例执行，打印每个输出的shape和dtype。它能检查文件可加载、程序可运行与基本接口。",
-          "这还不能证明PTE与原PyTorch数值一致，也不能证明真实超声图上的精度。成熟验证还应比较两端输出差值，并用真实且预处理一致的样本做回归。"
+          "这一步比“文件成功写出”更进一步：它验证运行时能加载图并执行当前样例。",
+          "它没有计算端侧输出与PyTorch输出的最大/平均差，也没有比较真实验证集指标，因此不能据此宣称两端数值等价或精度完全一致。"
         ],
         "syntax": [
-          "Runtime.get()取运行时对象；load_program读PTE；load_method(\"forward\")选入口；execute([input_tensor])传Tensor列表。",
-          "for output in outputs遍历两个输出，分别读.shape与.dtype；第二句日志标签仍写shape，但内容实际是dtype。"
+          "load_method(\"forward\")按方法名查找；execute([input_tensor])使用输入列表，区别于前面torch.export所需的元组。",
+          "for output in outputs遍历返回序列；Tensor.shape给维度，Tensor.dtype给数值类型。"
         ],
         "shapes": "预期两个输出：[1,L,W] / float32 与 [1] / uint8",
-        "pitfall": "打印成功不等于性能测试、量化校准或准确率测试；当前未使用torch.testing.assert_close等数值断言。",
-        "exercise": "最小数值等价测试应比较什么？",
-        "answer": "同一eval包装模型、同一输入下的PyTorch坐标与PTE坐标的最大绝对误差，并检查质量类别一致；不能与另一套预处理输出直接比。",
-        "diagram": "export"
+        "pitfall": "随机单样例的结构检查不能覆盖真实数据分布、常量图像、动态尺寸或数值精度问题。",
+        "summary": "把刚写出的PTE交给ExecuTorch运行时执行一次，检查能否运行和输出结构是否符合预期。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "Runtime",
+            "type": "运行时入口类",
+            "meaning": "在这里才导入executorch.runtime的执行接口。"
+          },
+          {
+            "name": "runtime",
+            "type": "Runtime实例",
+            "meaning": "由Runtime.get()取得。"
+          },
+          {
+            "name": "program",
+            "type": "已加载程序",
+            "meaning": "从best.pte读取端侧程序。"
+          },
+          {
+            "name": "method",
+            "type": "可执行方法",
+            "meaning": "program.load_method(\"forward\")选择包装器导出的前向方法。"
+          },
+          {
+            "name": "input_tensor",
+            "type": "Tensor [1,1,H,W]",
+            "meaning": "复用上一段的随机样例sample_inputs[0]。"
+          },
+          {
+            "name": "outputs",
+            "type": "输出序列",
+            "meaning": "method.execute返回的两项结果：边界坐标和质量类别。"
+          },
+          {
+            "name": "output",
+            "type": "Tensor",
+            "meaning": "循环中的一个输出，仅打印shape与dtype。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L172–175 装载执行环境",
+            "detail": "导入Runtime，取实例并加载刚生成的best.pte。"
+          },
+          {
+            "title": "L176 选择方法",
+            "detail": "按导出方法名forward取得可执行入口。"
+          },
+          {
+            "title": "L178–179 实际执行",
+            "detail": "把单个输入装入列表，交给method.execute。"
+          },
+          {
+            "title": "L181–182 打印结构",
+            "detail": "逐输出打印shape和dtype；源代码两条日志文字都写shape，但第二个实际打印的是dtype。"
+          }
+        ],
+        "returns": [
+          "控制台输出运行结果形状与类型；整个export_pte_model隐式返回None。"
+        ],
+        "flow": {
+          "title": "端侧运行检查",
+          "nodes": [
+            {
+              "id": "file",
+              "title": "best.pte",
+              "detail": "上一段保存的文件",
+              "kind": "input"
+            },
+            {
+              "id": "runtime",
+              "title": "Runtime加载程序",
+              "detail": "load_program",
+              "kind": "process"
+            },
+            {
+              "id": "method",
+              "title": "选择forward",
+              "detail": "load_method",
+              "kind": "process"
+            },
+            {
+              "id": "sample",
+              "title": "复用随机输入",
+              "detail": "sample_inputs[0]",
+              "kind": "input"
+            },
+            {
+              "id": "exec",
+              "title": "执行端侧方法",
+              "detail": "execute([input_tensor])",
+              "kind": "process"
+            },
+            {
+              "id": "log",
+              "title": "打印两个输出",
+              "detail": "shape与dtype",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "to": "runtime",
+              "from": "file"
+            },
+            {
+              "to": "method",
+              "from": "runtime"
+            },
+            {
+              "to": "exec",
+              "from": "method"
+            },
+            {
+              "to": "exec",
+              "from": "sample"
+            },
+            {
+              "to": "log",
+              "from": "exec"
+            }
+          ],
+          "caption": "运行时执行的是已保存文件中的 forward。当前仅打印形状和类型，没有与 PyTorch 输出比较数值误差。"
+        }
       }
-    ]
+    ],
+    "role": "端侧导出与运行验证；不属于每批训练的前向/反向路径。质量模型来自外部已有检查点。",
+    "inputs": [
+      "line_model：已经训练并加载参数的边界模型。",
+      "save_path：已存在的输出目录；img_size按(W,H)传入。",
+      "QUALITY_CHECKPOINT_PATH：外部质量分类模型检查点路径。"
+    ],
+    "outputs": [
+      "save_path/best.pte：包含标准化、边界预测和质量分类的ExecuTorch程序。",
+      "端侧forward输出：float32坐标[B,L,W]与uint8类别[B]，不返回热图。",
+      "控制台打印质量模型载入信息及端侧输出形状、dtype。"
+    ],
+    "readingGuide": [
+      "先看export_pte_model掌握导出主链，再看ModelWithArgmax理解实际导出的输入输出。",
+      "load_quality_model才是当前质量模型来源；create_mobilenetv3_lraspp_model及其内部类没有被导出主函数调用。",
+      "该文件在顶层就导入ExecuTorch，导入文件时需要相应依赖；不会等到执行export函数才导入这些入口。",
+      "执行样例只检查程序能跑及输出形状/类型，没有与PyTorch结果逐项比较数值误差，也没有验证端侧准确率。"
+    ],
+    "components": [
+      {
+        "name": "QUALITY_CHECKPOINT_PATH",
+        "kind": "常量",
+        "summary": "指定外部质量分类权重文件；不是边界网络权重。",
+        "segmentStart": 1
+      },
+      {
+        "name": "ModelWithArgmax",
+        "kind": "包装类",
+        "summary": "标准化输入、并行运行边界与质量模型，将质量分数取最大类别。",
+        "segmentStart": 15
+      },
+      {
+        "name": "create_mobilenetv3_lraspp_model",
+        "kind": "未接入构建器",
+        "summary": "创建一个只使用浅层MobileNet特征的两类分类器，名字含LRASPP但并非当前导出网络。",
+        "segmentStart": 37
+      },
+      {
+        "name": "MobileNetV3_LRASPP",
+        "kind": "内部类",
+        "summary": "旧构建器内部的浅层卷积、全局池化和线性两类输出。",
+        "segmentStart": 70
+      },
+      {
+        "name": "load_quality_model",
+        "kind": "函数",
+        "summary": "检查质量checkpoint元数据，构造灰度MobileNetV3-small并严格加载权重。",
+        "segmentStart": 122
+      },
+      {
+        "name": "export_pte_model",
+        "kind": "函数",
+        "summary": "组合模型，捕获与降低计算图，保存PTE并运行一次检查。",
+        "segmentStart": 153
+      }
+    ],
+    "pipeline": {
+      "title": "真正执行的导出主链",
+      "nodes": [
+        {
+          "id": "line",
+          "title": "已训练边界模型",
+          "detail": "调用者传入",
+          "kind": "input"
+        },
+        {
+          "id": "ckpt",
+          "title": "质量检查点",
+          "detail": "外部.pth文件",
+          "kind": "input"
+        },
+        {
+          "id": "quality",
+          "title": "load_quality_model",
+          "detail": "构造small并严格加载",
+          "kind": "process"
+        },
+        {
+          "id": "wrapper",
+          "title": "ModelWithArgmax",
+          "detail": "标准化后分别运行两模型",
+          "kind": "process"
+        },
+        {
+          "id": "sample",
+          "title": "示例输入",
+          "detail": "[1,1,H,W]，静态尺寸",
+          "kind": "input"
+        },
+        {
+          "id": "capture",
+          "title": "torch.export.export",
+          "detail": "捕获评估态计算图",
+          "kind": "process"
+        },
+        {
+          "id": "lower",
+          "title": "Edge转换与XNNPACK",
+          "detail": "降低为端侧可执行表示",
+          "kind": "process"
+        },
+        {
+          "id": "save",
+          "title": "写出best.pte",
+          "detail": "to_executorch后保存",
+          "kind": "process"
+        },
+        {
+          "id": "run",
+          "title": "端侧运行一次",
+          "detail": "打印输出形状和类型",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "to": "wrapper",
+          "from": "line"
+        },
+        {
+          "to": "quality",
+          "from": "ckpt"
+        },
+        {
+          "to": "wrapper",
+          "from": "quality"
+        },
+        {
+          "to": "capture",
+          "from": "wrapper"
+        },
+        {
+          "to": "capture",
+          "from": "sample"
+        },
+        {
+          "to": "lower",
+          "from": "capture"
+        },
+        {
+          "to": "save",
+          "from": "lower"
+        },
+        {
+          "to": "run",
+          "from": "save"
+        },
+        {
+          "to": "run",
+          "from": "sample"
+        }
+      ],
+      "caption": "遗留LRASPP构建器不在这条导出链上。"
+    }
   },
   {
     "path": "LineDet/__init__.py",
     "title": "LineDet 顶层包入口",
-    "overview": "顶层只重导出数据集与批组装函数；模型、损失和导出模块仍可通过各自子包路径访问。",
+    "overview": "把数据集类和批整理函数提升为 LineDet 包的公共接口。 本文件没有新增算法，只决定包向外暴露哪些名字。",
     "segments": [
       {
         "start": 1,
         "end": 1,
         "title": "把常用数据接口提升到顶层",
         "principle": [
-          "这个入口把LineDataset/default_collate作为包对外符号，减少调用代码导入路径。它没有训练状态或模型权重。"
+          "包入口把内部文件组织与外部调用隔开；只要公开名字不变，调用方不必直接依赖更深层文件路径。"
         ],
         "syntax": [
-          "from .dataset指LineDet/dataset包；导入顶层时会触发相应数据模块及其依赖导入。"
+          "from .xxx import A,B 中的一个点代表当前包；逗号表示一次导入多个名字。__init__.py 会在包首次加载时执行。"
         ],
         "shapes": "",
         "pitfall": "",
-        "exercise": "from LineDet import LineDataset与from LineDet.dataset import LineDataset会创建两套数据集类吗？",
-        "answer": "不会，通常引用的是同一已导入类对象；实例要在调用LineDataset(...)时才创建。",
-        "diagram": ""
+        "summary": "把数据集类和批整理函数提升为 LineDet 包的公共接口。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "LineDataset",
+            "type": "类或函数对象",
+            "meaning": "从.dataset导入并绑定到当前包的同名属性。"
+          },
+          {
+            "name": "default_collate",
+            "type": "类或函数对象",
+            "meaning": "从.dataset导入并绑定到当前包的同名属性。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L1 相对导入并重导出",
+            "detail": "加载同包下的目标模块，将指定名字绑定在当前包中；不创建类实例，也不执行训练。"
+          }
+        ],
+        "returns": [
+          "没有函数返回；调用者可以使用 from LineDet import LineDataset, default_collate。"
+        ]
+      }
+    ],
+    "role": "包初始化与导入接口。",
+    "inputs": [
+      "Python 首次导入该包时执行此文件。"
+    ],
+    "outputs": [
+      "在包命名空间中提供 LineDataset、default_collate。"
+    ],
+    "readingGuide": [
+      "定义仍位于被导入的内部模块；理解具体处理逻辑应继续进入对应实现文件。"
+    ],
+    "components": [
+      {
+        "name": "LineDataset",
+        "kind": "重导出",
+        "summary": "数据读取与批整理入口",
+        "segmentStart": 1
+      },
+      {
+        "name": "default_collate",
+        "kind": "重导出",
+        "summary": "数据读取与批整理入口",
+        "segmentStart": 1
       }
     ]
   }

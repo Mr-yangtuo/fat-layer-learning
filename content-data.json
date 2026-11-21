@@ -2,848 +2,5710 @@
   {
     "path": "LineDet/dataset/__init__.py",
     "title": "数据包的公共入口",
-    "overview": "把真正位于 dataset.py 的类和函数导出到包这一层，使 main.py 可以直接 from LineDet.dataset import LineDataset, default_collate。",
+    "overview": "这个文件是数据包的公开入口：把真正定义在 dataset.py 中的 LineDataset 和 default_collate 暴露到 LineDet.dataset 这一层。它不读取图像、不生成标签，也不实现训练；导入它以后，训练脚本可以用稳定的包名取得“单样本读取器”和“批次拼装器”。",
     "segments": [
       {
         "start": 1,
         "end": 1,
         "title": "相对导入与包接口",
         "principle": [
-          "这里没有新的算法。它定义包对外暴露的入口；调用者不必知道内部实现放在哪个文件。"
+          "包入口集中导出接口，使调用方不需要依赖内部模块路径。导出引用不会复制类定义，也不会自动运行 __getitem__。"
         ],
         "syntax": [
-          "一个点 . 代表当前包 LineDet.dataset；from .dataset 指向同目录 dataset.py。逗号后是第二个被导入的名字。"
+          "from .dataset 中的一个点表示当前包；后面的 dataset 表示同目录 dataset.py。逗号分隔两个导入名称。"
         ],
         "shapes": "",
         "pitfall": "",
-        "exercise": "手写主程序里的对应导入语句。",
-        "answer": "from LineDet.dataset import LineDataset, default_collate",
-        "diagram": ""
+        "summary": "给训练脚本提供两个稳定的数据接口。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "LineDataset",
+            "type": "class",
+            "meaning": "来自同目录 dataset.py，继承 PyTorch Dataset。"
+          },
+          {
+            "name": "default_collate",
+            "type": "function",
+            "meaning": "来自同目录 dataset.py，供 DataLoader 的 collate_fn 使用。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "导入实现",
+            "detail": "L1：执行相对导入，取得类和函数引用；这里不创建数据集实例。"
+          }
+        ],
+        "returns": [
+          "导入完成后，调用方可使用这两个名字。"
+        ]
+      }
+    ],
+    "role": "主训练使用：包级导出入口",
+    "inputs": [
+      "Python 执行 import LineDet.dataset，或从该包导入指定名字。"
+    ],
+    "outputs": [
+      "LineDataset 类、default_collate 函数的引用。"
+    ],
+    "readingGuide": [
+      "实际数据逻辑在 dataset.py；这里的导入会触发该模块的顶层语句，包括读取统一尺寸环境变量。"
+    ],
+    "components": [
+      {
+        "name": "LineDataset",
+        "kind": "导出的类",
+        "summary": "按索引读取并预处理一张图像及其两条边界。",
+        "segmentStart": 1
+      },
+      {
+        "name": "default_collate",
+        "kind": "导出的函数",
+        "summary": "把多个单样本字典叠成一个 batch。",
+        "segmentStart": 1
       }
     ]
   },
   {
     "path": "LineDet/dataset/dataset.py",
     "title": "Dataset：从磁盘样本到训练张量",
-    "overview": "这个文件把图像、标注、固定划分、尺寸变换、增强和热图串起来。理解它的关键是始终追踪图像与 y 坐标是否使用了同一个几何变换，以及 valid 是否仍代表可信的标注列。",
+    "overview": "这是训练数据进入网络前的总装配文件。初始化时，它先决定用哪些图像，再按配置添加裁剪视野，并创建随机增强器；取样时，它读取一张灰度图和两条边界，把稀疏点转为逐列坐标，完成图像与标签的几何变换、归一化和增强，最后返回一个字典。文件末尾的 default_collate 把这些字典拼成训练批次。理解这个文件，就能知道网络输入和监督答案从哪里来、在哪一步被改变。",
     "segments": [
       {
         "start": 1,
         "end": 32,
         "title": "依赖与全局尺寸策略",
         "principle": [
-          "PIL 负责读图；NumPy 处理标注数组；PyTorch 接收训练张量。尺寸统一通过环境变量决定，导入模块时就读取，不是在每次取样时重新读取。",
-          "none 直接进入最终缩放；crop 从右边/底部裁到不超过目标尺寸；resize 先整体缩放；unify 保留原图并有条件追加按目标宽高比裁底的副本。"
+          "视野统一和网络输入缩放是两回事：前者决定保留图像的哪一部分，后者最终把样本变为 img_size。",
+          "环境变量在导入此模块时读取一次；训练脚本应在启动 Python 前设置。"
         ],
         "syntax": [
-          "os.environ.get(key, default) 返回字符串；strip().lower() 去空格并统一大小写。split(\",\") 后用 int 转换，tuple 收集为 (W,H)。",
-          "ImageFile.LOAD_TRUNCATED_IMAGES=True 允许 PIL 尝试读取不完整图像。UNIFY_SIZE 默认 (516,594)，最终模型 img_size 通常 (256,256)。"
+          "os.environ.get(key, default) 在环境变量缺失时返回默认字符串。strip().lower() 使模式匹配不受空格、大小写影响。",
+          "split(\",\") 产生两个字符串，生成器逐个 int 转换，tuple 收集为 (W,H)。",
+          "Image.LANCZOS 用于图像重采样；坐标不调用图像滤波，而由线性插值函数处理。"
         ],
         "shapes": "PIL size=(W,H)；张量 image=[C,H,W]",
-        "pitfall": "augment 参数后面虽保存，但没有用于控制这些增强开关；导入后再改变环境变量不会自动更新模块常量。",
-        "exercise": "解释为何 img_size[1] 才是热图高度。",
-        "answer": "img_size 遵循 PIL 的 (宽,高)，而张量空间维度遵循 (高,宽)。",
-        "diagram": "data"
+        "pitfall": "这里没有校验 UNIFY_SIZE 必须恰好两个正整数；非法环境变量可能在导入或后续除法时失败。",
+        "summary": "导入数据处理依赖，并在模块加载时确定统一视野策略。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "UNIFY_MODE",
+            "type": "str",
+            "meaning": "从 LINEDET_UNIFY_MODE 读取后去空格、转小写；none/crop/resize/unify 四种路径。"
+          },
+          {
+            "name": "UNIFY_SIZE",
+            "type": "tuple[int,int]",
+            "meaning": "从 LINEDET_UNIFY_SIZE 拆出 (宽,高)，默认 (516,594)，并非模型最终输入尺寸。"
+          },
+          {
+            "name": "ImageFile.LOAD_TRUNCATED_IMAGES",
+            "type": "bool",
+            "meaning": "设为 True，让 PIL 尝试载入被截断的图像文件。"
+          },
+          {
+            "name": "JointAugment / special_enhancement / special_augmentation2",
+            "type": "可调用对象",
+            "meaning": "分别负责常规几何增强、uint8 外观增强和张量阶段特殊增强。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "加载依赖",
+            "detail": "L1–19：导入图像、数组、张量、变换器和本项目的解析函数。"
+          },
+          {
+            "title": "允许截断图像",
+            "detail": "L21：修改 PIL 的模块级开关。"
+          },
+          {
+            "title": "读取统一配置",
+            "detail": "L31–32：从进程环境取得模式与目标宽高。"
+          }
+        ],
+        "returns": [
+          "模块全局配置；后续初始化和取样共同读取这些值。"
+        ]
       },
       {
         "start": 35,
         "end": 48,
         "title": "crop_annotation：裁图也要裁监督",
         "principle": [
-          "只保留左侧 new_w 列；底部被裁掉的点 y≥new_h 置为无效。坐标值清零只是占位，不能把这些零当作真实的图像上边界。",
-          "这里没有做坐标缩放，因为裁剪原点仍是左上角。有效的剩余点坐标不变。"
+          "裁剪从左上角开始，所以保留范围内的坐标不需要减去偏移。底部被裁掉的点用零占位，但零不表示“边界在顶部”；有效性必须看对应掩码。"
         ],
         "syntax": [
-          "np.asarray(...,dtype=bool) 建布尔掩码；[None,:] 为一维数组补行维。np.where(condition,0.0,y) 逐元素选择。",
-          "valid_arr & ~out_of_h 是逐元素逻辑与和取反；返回二元 tuple，由调用者解包。"
+          "np.asarray(...,dtype=...) 固定数组类型；[None,:] 在最前面增加长度为 1 的轴。",
+          "np.where(condition,0.0,y) 逐元素选择占位值；& 是逐元素逻辑与，~ 是布尔取反。"
         ],
         "shapes": "[L,W₀] → [L,min(new_w,W₀)]",
-        "pitfall": "只检查底部越界，不检查负 y；前置解析器已过滤原始负坐标，但单独复用该函数需注意。",
-        "exercise": "若 y=[10,90,20]，valid 全真，new_h=80，写出结果。",
-        "answer": "y=[10,0,20]，valid=[True,False,True]。",
-        "diagram": "geometry"
+        "pitfall": "只检查 y>=new_h，不额外检查负值；正常入口解析阶段已过滤负高度。",
+        "summary": "把裁剪窗口外的标注排除，避免被裁掉的边界继续监督网络。",
+        "parameters": [
+          {
+            "name": "y_px_list",
+            "type": "array-like [L,W]",
+            "default": "必填",
+            "meaning": "每条边界逐列的纵坐标，允许小数。"
+          },
+          {
+            "name": "valid_list",
+            "type": "array-like bool [L,W]",
+            "default": "必填",
+            "meaning": "哪些原始列的坐标可信。"
+          },
+          {
+            "name": "new_w",
+            "type": "int",
+            "default": "必填",
+            "meaning": "保留的左侧列数，不会因它变大而补列。"
+          },
+          {
+            "name": "new_h",
+            "type": "int",
+            "default": "必填",
+            "meaning": "裁剪后高度；y>=new_h 的标签落在裁掉区域。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "y_px_arr / valid_arr",
+            "type": "ndarray [L,W]",
+            "meaning": "转换为浮点坐标和布尔掩码；一维输入先补线条维。"
+          },
+          {
+            "name": "keep_x",
+            "type": "int ndarray [min(new_w,W)]",
+            "meaning": "需要保留的列下标。"
+          },
+          {
+            "name": "out_of_h",
+            "type": "bool ndarray [L,W_keep]",
+            "meaning": "标记纵坐标落到保留窗口下面的位置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "统一数据结构",
+            "detail": "L37–41：将输入转换为 NumPy 数组，一维时增加线条轴。"
+          },
+          {
+            "title": "截取横向范围",
+            "detail": "L42–44：只保留 [0,min(new_w,W)) 内的列。"
+          },
+          {
+            "title": "处理底部越界",
+            "detail": "L45–47：越界高度填 0，掩码与非越界条件取交集。"
+          },
+          {
+            "title": "返回配对结果",
+            "detail": "L48：坐标与掩码具有相同形状。"
+          }
+        ],
+        "returns": [
+          "裁剪后的浮点坐标数组和布尔有效掩码。"
+        ]
       },
       {
         "start": 51,
         "end": 69,
         "title": "裁剪前预检：每条目标线至少保留一列",
         "principle": [
-          "unify 不希望生成完全看不到某条目标线的副本，因此先解析标注、模拟裁剪，再逐行检查 valid.any()。如果任一条线完全消失，就不追加裁剪副本。"
+          "这里不是要求每一列都有标签，而是每条目标线至少留一个有效点。裁剪副本如果完全失去一条线，训练就会少一条边界的监督，因此先拦截。"
         ],
         "syntax": [
-          "try/except Exception 把解析异常转成 True；for r in range(shape[0]) 按线检查；any() 判断是否至少一个 True。"
+          "except Exception 捕获所有常规异常；这段选择允许继续，不会把解析失败作为拒绝依据。",
+          "valid_cropped[r].any() 将一行布尔数组归约成“至少有一个 True”。"
         ],
         "shapes": "每条线的 valid[r] 是长度 W 的布尔数组",
-        "pitfall": "异常时返回 True 是放行策略，不保证坏标注能训练；后续 __getitem__ 仍可能报错。",
-        "exercise": "为什么不能用 valid_cropped.all()？",
-        "answer": "all() 会要求每一列都有效，稀疏或局部标注也会被误判；当前目标仅是每条线至少留下一列。",
-        "diagram": "geometry"
+        "pitfall": "解析失败时返回 True 只为保持旧行为，并不能证明样本有效；__getitem__ 真正解析时仍可能报错。 该函数只遍历解析器实际返回的线，没有另外断言必须正好两条；目标名存在但 data 为空的情况仍需结合解析过程理解。",
+        "summary": "在创建裁剪副本前，确认每条已解析目标线都没有被整条裁没。",
+        "parameters": [
+          {
+            "name": "ann_path",
+            "type": "str",
+            "default": "必填",
+            "meaning": "原始标注 JSON 路径。"
+          },
+          {
+            "name": "img_size",
+            "type": "tuple[int,int]",
+            "default": "必填",
+            "meaning": "原图 (宽,高)，传给标注解析。"
+          },
+          {
+            "name": "crop_h",
+            "type": "int",
+            "default": "必填",
+            "meaning": "预计保留的顶部高度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "y_px / valid",
+            "type": "ndarray [L,W]",
+            "meaning": "解析后的稀疏坐标与有效点。"
+          },
+          {
+            "name": "valid_cropped",
+            "type": "bool ndarray [L,W]",
+            "meaning": "模拟裁剪后的有效列。"
+          },
+          {
+            "name": "r",
+            "type": "int",
+            "meaning": "逐条检查的边界通道索引。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "读取标签",
+            "detail": "L58–61：尝试解析 JSON；任何异常都直接返回 True。"
+          },
+          {
+            "title": "模拟裁剪",
+            "detail": "L62–65：确保二维后调用 crop_annotation，只关心返回的有效掩码。"
+          },
+          {
+            "title": "检查每条线",
+            "detail": "L66–69：任一条线的有效点全无就返回 False，否则 True。"
+          }
+        ],
+        "returns": [
+          "bool：True 表示允许追加裁剪副本；False 表示不追加。"
+        ],
+        "flow": {
+          "title": "裁剪副本的预检",
+          "nodes": [
+            {
+              "id": "parse",
+              "title": "解析原始标注",
+              "detail": "取出目标线及有效点",
+              "kind": "input"
+            },
+            {
+              "id": "ok",
+              "title": "解析是否成功",
+              "detail": "异常时不在此处丢数据",
+              "kind": "decision"
+            },
+            {
+              "id": "crop",
+              "title": "模拟裁剪标签",
+              "detail": "不读取或生成裁剪图像",
+              "kind": "process"
+            },
+            {
+              "id": "keep",
+              "title": "每条线都至少留一点",
+              "detail": "对每条有效掩码调用 any",
+              "kind": "decision"
+            },
+            {
+              "id": "yes",
+              "title": "允许追加",
+              "detail": "返回 True",
+              "kind": "output"
+            },
+            {
+              "id": "no",
+              "title": "跳过副本",
+              "detail": "返回 False",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "parse",
+              "to": "ok",
+              "label": ""
+            },
+            {
+              "from": "ok",
+              "to": "yes",
+              "label": "异常"
+            },
+            {
+              "from": "ok",
+              "to": "crop",
+              "label": "成功"
+            },
+            {
+              "from": "crop",
+              "to": "keep",
+              "label": ""
+            },
+            {
+              "from": "keep",
+              "to": "yes",
+              "label": "是"
+            },
+            {
+              "from": "keep",
+              "to": "no",
+              "label": "否"
+            }
+          ],
+          "caption": "原始图像始终保留；此判断只控制是否额外增加裁剪版本。"
+        }
       },
       {
         "start": 72,
         "end": 100,
         "title": "选择样本：manifest 与 train100 的根本区别",
         "principle": [
-          "提供 split_manifest 时，训练和验证分别读固定名单；不提供时先找到全部有效图像对。train 分支使用 pass，意味着保留全部数据；val 才切出末尾约 10%。",
-          "因此 train100 的验证样本来自训练样本内部。它可用于观察拟合，但不能把其验证数值当成独立泛化性能。"
+          "固定清单路径先按目录组划分源图，再允许后续视野扩充，避免同源原图/裁剪图跨训练验证。",
+          "旧路径的 train 分支是 pass，所以训练并非前 90%；验证最后 10% 实际包含在训练集之中。这个行为会影响指标含义。"
         ],
         "syntax": [
-          "self 保存实例状态。列表推导式 [p[0] for p in pairs] 取每个二元组的图像路径；切片 [train_len:] 取尾部。",
-          "mode==\"all\" 也保留全部。split_ratio=0.9 只用于算 val 起始位置；它没有把 train 截到前 90%。"
+          "列表推导式 [p[0] for p in pairs] 逐对提取图像路径，p[1] 提取标注路径。",
+          "pass 表示什么也不做；[train_len:] 是从该下标到结尾的切片。",
+          "Dataset 约定实现 __len__ 和 __getitem__，DataLoader 才能按索引获取样本。"
         ],
         "shapes": "pairs: list[tuple[str,str]]；img_paths 与 ann_paths 等长",
-        "pitfall": "文件遍历顺序不等于随机划分，且按目录的患者/采集组独立性只有 manifest 方案才有显式检查。",
-        "exercise": "手写真正互斥的普通 90/10 切分，还需要注意什么？",
-        "answer": "train=pairs[:k]，val=pairs[k:]；但相邻帧仍可能属于同一人，最好先按患者或采集组分组。",
-        "diagram": "split"
+        "pitfall": "augment=False 不会停止当前训练增强；无清单时验证重叠是实际实现，不能当作独立泛化评估。",
+        "summary": "建立数据集的样本索引，并选择清单划分或旧式扫描路径。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "LineDataset 实例",
+            "default": "自动传入",
+            "meaning": "保存配置和样本路径供后续方法复用。"
+          },
+          {
+            "name": "data_root",
+            "type": "str",
+            "default": "必填",
+            "meaning": "数据根目录。"
+          },
+          {
+            "name": "img_size",
+            "type": "tuple[int,int]",
+            "default": "(256,256)",
+            "meaning": "模型输入 (宽,高)。"
+          },
+          {
+            "name": "mode",
+            "type": "str",
+            "default": "train",
+            "meaning": "决定清单选集与是否搭建训练增强；通常为 train/val/all。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "数据集返回的高斯热图宽度；当前损失另用固定 3.0。"
+          },
+          {
+            "name": "augment",
+            "type": "bool",
+            "default": "True",
+            "meaning": "保存为 self.augment，但后续没有用它控制增强。"
+          },
+          {
+            "name": "split_manifest",
+            "type": "str 或 None",
+            "default": "None",
+            "meaning": "固定划分清单目录；提供时必须通过清单校验。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "pairs",
+            "type": "list[tuple[str,str]]",
+            "meaning": "当前数据来源返回的图像路径、标注路径对。"
+          },
+          {
+            "name": "self.img_paths / self.ann_paths",
+            "type": "list[str]",
+            "meaning": "按同一下标一一对应，后面可能追加裁剪副本。"
+          },
+          {
+            "name": "split_ratio",
+            "type": "float",
+            "meaning": "旧路径固定 0.9，仅用于计算验证切片起点。"
+          },
+          {
+            "name": "total_len / train_len",
+            "type": "int",
+            "meaning": "扫描总数，以及 int(total_len*0.9) 的切片位置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "保存配置",
+            "detail": "L76–80：实例属性记录根目录、尺寸、sigma、augment 和 mode。"
+          },
+          {
+            "title": "选择数据来源",
+            "detail": "L82–85：提供清单时 load_manifest_pairs 按 mode 取固定集合；否则递归扫描。"
+          },
+          {
+            "title": "拆开路径对",
+            "detail": "L86–88：用列表推导式分别保存图像、标注路径。"
+          },
+          {
+            "title": "处理旧式划分",
+            "detail": "L90–100：train 和 all 保留全部样本，其他模式只保留末尾约 10%。"
+          }
+        ],
+        "returns": [
+          "初始化出的路径列表；构造方法本身不返回样本。"
+        ]
       },
       {
         "start": 102,
         "end": 128,
         "title": "unify：原图与裁剪副本共存",
         "principle": [
-          "对每个源图先追加一次 crop_flag=False；若高度超过 floor(w×594/516)，且裁后两条线都仍有监督，再追加同一路径但 crop_flag=True 的样本。",
-          "例如宽 422、高 728 的图，裁剪候选高度约 485。原图与裁剪图之后都拉伸到模型尺寸，相当于提供不同纵向尺度的观察。"
+          "追加索引而不立即复制图像，能让两种视野分别参与取样，同时不改变磁盘数据。",
+          "例如原图宽 422、目标比例 594/516，裁剪高度是 floor(422×594/516)=485；若原高 728，则原图版和保留顶部 485 行的裁剪版都会留下。"
         ],
         "syntax": [
-          "zip 同步遍历图像与标注；with Image.open(...) 读取尺寸并关闭文件。三个列表通过相同 append 顺序维持索引对应。",
-          "crop_flags 是 list[bool]，决定 __getitem__ 使用原图还是裁剪图；没有把副本保存到磁盘。"
+          "zip 同步迭代两组路径；with Image.open 在读取尺寸后关闭文件。",
+          "append 同一个路径不会创建图像副本；真正的差异来自 crop_flags。",
+          "这里没有 mode==train 限制，因此验证集也会按自己的源图执行 unify 扩充。"
         ],
         "shapes": "一个源图 → 1 或 2 个 dataset items",
-        "pitfall": "该分支没有 mode==train 限制，因此验证集也会扩充；样本数不是唯一源图数，而且可裁图在平均指标里权重更高。",
-        "exercise": "为何应在追加裁剪副本之前进行数据集分组？",
-        "answer": "否则同一源图的原版和裁剪版可能落入训练与验证两侧，产生泄漏。",
-        "diagram": "data"
+        "pitfall": "注释写“两份都参与训练”，但这段对所有 mode 都运行；解释样本数时必须先区分源图数和扩充后的索引数。",
+        "summary": "在 unify 模式中保留每张原图，并按条件追加同源裁剪样本。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "tgt_w / tgt_h",
+            "type": "int",
+            "meaning": "UNIFY_SIZE 的目标宽高，仅用于计算目标长宽比。"
+          },
+          {
+            "name": "new_imgs / new_anns / new_flags",
+            "type": "三个等长 list",
+            "meaning": "扩充后的路径与裁剪标记；False=原图版，True=裁剪版。"
+          },
+          {
+            "name": "ip / ap",
+            "type": "str",
+            "meaning": "当前图像和标注路径。"
+          },
+          {
+            "name": "w / h",
+            "type": "int",
+            "meaning": "原图实际宽高。"
+          },
+          {
+            "name": "crop_h",
+            "type": "int",
+            "meaning": "int(w*tgt_h/tgt_w)，保留原宽并按目标比例求新高。"
+          },
+          {
+            "name": "n_crop / n_crop_skipped",
+            "type": "int",
+            "meaning": "成功追加和因目标线丢失而跳过的副本计数。"
+          },
+          {
+            "name": "self.crop_flags",
+            "type": "list[bool]",
+            "meaning": "取样时决定是否真正裁剪，与路径列表按索引对应。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "保留原图",
+            "detail": "L108–109：每对路径先追加一次，标记 False。"
+          },
+          {
+            "title": "计算可裁高度",
+            "detail": "L110–112：只读取图像尺寸，再按目标宽高比计算 crop_h。"
+          },
+          {
+            "title": "判断是否追加",
+            "detail": "L113–119：仅 h>crop_h 且预检通过才再追加同一对路径，标记 True。"
+          },
+          {
+            "title": "替换索引",
+            "detail": "L120–126：保存扩充后的三组列表；其他模式全部标记 False。"
+          }
+        ],
+        "returns": [
+          "包含原图版与可选裁剪版的样本索引。"
+        ]
       },
       {
         "start": 130,
         "end": 149,
         "title": "训练增强链与 __len__",
         "principle": [
-          "训练模式配置噪声、模糊、亮度、对比度、低分辨率和两种 gamma 变换，以扩展成像外观；验证模式只做 ToTensor。几何增强另由 JointAugment 执行。",
-          "__len__ 返回扩充后的索引总量，DataLoader 用它建立采样索引。"
+          "外观增强改变成像质量但不主动移动边界，所以这里不传 y_px。噪声、模糊、低分辨率模拟不同采集条件；联合几何增强要在后面同时处理坐标。"
         ],
         "syntax": [
-          "p_per_sample 是样本级触发概率，p_per_channel 是通道级概率；Compose 顺序调用变换。GammaTransform 的 True/False 参数对应两种强度处理路径，retain_stats=True 尝试保留统计量。",
-          "GaussianBlurTransform((0.5,1.)) 配置模糊尺度区间；SimulateLowResolutionTransform 用先降采样后升采样模拟分辨率损失。"
+          "p_per_sample 是每个样本触发概率；GaussianNoise 为 0.1，模糊为 0.2，亮度/对比度各 0.15，低分辨率为 0.25，两次 Gamma 分别 0.1/0.3。",
+          "GaussianBlurTransform 的 (0.5,1.) 是模糊 sigma 范围，different_sigma_per_channel=True 允许通道独立取值，p_per_channel=0.5 控制通道是否处理。",
+          "BrightnessMultiplicativeTransform(multiplier_range=(0.75,1.25)) 随机乘亮度系数。SimulateLowResolutionTransform 的 zoom_range=(0.5,1) 控制先缩小比例；order_downsample=0 为最近邻、order_upsample=3 为三次插值。",
+          "GammaTransform((0.7,1.5), invert_image, per_channel, retain_stats=True, ...) 控制指数范围、是否先反相、是否逐通道，并恢复强度统计；两次实例的 invert_image 分别 True/False。",
+          "Compose 依序执行；不是七选一。ToTensor 会把 uint8 的 0–255 数值映射到 0–1。"
         ],
         "shapes": "训练最终应维持 [1,H,W]",
-        "pitfall": "代码把 [1,H,W] NumPy 数组传入 batchgenerators；该库通常面向含 batch 和 channel 维的数据，需结合实际版本确认维度解释，不应仅凭接口名称断言这里等同标准二维增强。",
-        "exercise": "为什么验证集不随机增强？",
-        "answer": "否则每轮验证输入变化，指标波动会混入增强随机性，难以公平选择最佳模型。",
-        "diagram": "data"
+        "pitfall": "外部 batchgenerators 的常规输入约定包含批次/通道维；此处单样本传入 [1,H,W]，实际轴语义需要结合所用版本核对，不能想当然当作标准 [B,C,H,W]。",
+        "summary": "为训练构建随机外观增强和联合几何增强，并提供样本数。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "LineDataset 实例",
+            "default": "自动传入",
+            "meaning": "__len__ 从实例已构建的路径列表得到样本数量。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "tr_transforms",
+            "type": "list[变换器]",
+            "meaning": "依次包含噪声、模糊、亮度、对比度、低分辨率、两次 Gamma 变换。"
+          },
+          {
+            "name": "self.transform",
+            "type": "Compose 或 ToTensor",
+            "meaning": "训练传入带 data 键的字典；验证把 uint8 数组变为 [1,H,W] 张量。"
+          },
+          {
+            "name": "self.JointAugment",
+            "type": "JointAugment 或 None",
+            "meaning": "训练创建联合几何增强器，其他模式不创建。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "训练模式装配",
+            "detail": "L130–141：按列表顺序组合七个外观变换。"
+          },
+          {
+            "title": "选择几何入口",
+            "detail": "L142–145：训练创建 JointAugment；其他模式用 ToTensor 且不做联合增强。"
+          },
+          {
+            "title": "报告样本数量",
+            "detail": "L147–149：返回 img_paths 长度，包含 unify 新增的副本。"
+          }
+        ],
+        "returns": [
+          "__len__ 返回 int；初始化保存两个变换器。"
+        ]
       },
       {
         "start": 151,
         "end": 183,
         "title": "__getitem__ 前半：统一图像与标注几何",
         "principle": [
-          "按 idx 读灰度图并在原图尺寸解析 y。crop 分支同步裁标注；resize 分支同步缩放标注；unify 仅在该索引标记为裁剪副本时裁底。",
-          "unified_size 记录当前图像坐标系，让下一次缩放知道 y 属于哪个高度。没有这一中间尺寸，标签就可能按错误比例变换。"
+          "几何变换必须让图像和标注使用同一个坐标系。比如先裁掉底部后，下一次缩放的纵向比例应由裁剪高度计算，不能仍除以原始高度。",
+          "PIL.size 和 self.img_size 的顺序是 (W,H)，而张量的空间轴是 (H,W)，这是后续调用容易写反的地方。"
         ],
         "syntax": [
-          "Image.open(...).convert(\"L\") 得单通道灰度图；image.size 返回 (W,H)。PIL crop((left,top,right,bottom)) 的右/下边界不包含在结果中。",
-          "elif 使四种策略互斥；unified_size=original_size 表示此阶段尚未改变几何。"
+          "convert(\"L\") 把图像变为 8 位灰度。crop((left,top,right,bottom)) 的右、下边界不包含在窗口内。",
+          "resize(size,Image.LANCZOS) 用 Lanczos 处理图像像素；resize_y_and_valid 单独线性重采样标签，不会把标签当图片缩放。",
+          "self.crop_flags[idx] 只对 unify 扩展样本起效；三个模式由 if/elif 互斥选择。"
         ],
         "shapes": "原图 [H₀,W₀]，标注 [2,W₀] → 统一阶段图像与同坐标系标签",
-        "pitfall": "unify 的未裁剪原图仍保持原始比例；它不是把所有输入都强制裁成同一比例。",
-        "exercise": "给裁剪副本写出 crop_h 的公式。",
-        "answer": "crop_h=min(H₀, int(W₀×目标高/目标宽))。",
-        "diagram": "geometry"
+        "pitfall": "读取失败、JSON 格式错误没有在 __getitem__ 内捕获，异常会传给 DataLoader。",
+        "summary": "读取一张图及标注，按统一视野模式完成第一阶段几何变换。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "LineDataset 实例",
+            "default": "自动传入",
+            "meaning": "提供路径索引、模式、尺寸与变换器。"
+          },
+          {
+            "name": "idx",
+            "type": "int",
+            "default": "必填",
+            "meaning": "当前样本下标；unify 下同一原图可能有两个不同 idx。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "img_path / ann_path",
+            "type": "str",
+            "meaning": "按 idx 对齐的图像与标注路径。"
+          },
+          {
+            "name": "image",
+            "type": "PIL 灰度图",
+            "meaning": "convert('L') 后为单通道；裁剪和缩放在内存进行。"
+          },
+          {
+            "name": "original_size",
+            "type": "tuple[int,int]",
+            "meaning": "PIL 的 (宽,高)，供原始点坐标解析。"
+          },
+          {
+            "name": "y_px_list / valid_list",
+            "type": "ndarray [L,W_original]",
+            "meaning": "每列边界坐标和有效掩码，初始只人工点列有效。"
+          },
+          {
+            "name": "new_w / new_h",
+            "type": "int",
+            "meaning": "crop 模式的实际保留宽高，不会超过原图或目标尺寸。"
+          },
+          {
+            "name": "unified_size",
+            "type": "tuple[int,int]",
+            "meaning": "第一阶段处理后的 (宽,高)，第二阶段缩放的坐标参考。"
+          },
+          {
+            "name": "orig_w / orig_h / crop_h",
+            "type": "int",
+            "meaning": "unify 副本沿原宽按目标比例裁高所需尺寸。"
+          },
+          {
+            "name": "tgt_w / tgt_h",
+            "type": "int",
+            "meaning": "unify 裁剪分支从 UNIFY_SIZE 解包的目标宽高；用 tgt_h/tgt_w 决定裁剪后的长宽比。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "读取原始数据",
+            "detail": "L152–158：按索引打开灰度图，解析同一尺寸下的标注。"
+          },
+          {
+            "title": "crop 分支",
+            "detail": "L161–166：保留左上角窗口，同时裁掉横向标签并使底部越界点无效。"
+          },
+          {
+            "title": "resize 分支",
+            "detail": "L167–170：整图拉伸到 UNIFY_SIZE，同时重采样坐标与有效范围。"
+          },
+          {
+            "title": "unify 分支",
+            "detail": "L171–181：只有 crop_flags=True 才裁底部；原图版保留全部视野。"
+          },
+          {
+            "title": "none 分支",
+            "detail": "L182–183：图像和标签维持原尺寸，等待最终缩放。"
+          }
+        ],
+        "returns": [
+          "第一阶段处理后的 image、y_px_list、valid_list、unified_size。"
+        ],
+        "flow": {
+          "title": "单样本的视野处理分支",
+          "nodes": [
+            {
+              "id": "read",
+              "title": "原图和稀疏标签",
+              "detail": "共用原图宽高",
+              "kind": "input"
+            },
+            {
+              "id": "mode",
+              "title": "UNIFY_MODE",
+              "detail": "四种互斥策略",
+              "kind": "decision"
+            },
+            {
+              "id": "crop",
+              "title": "crop",
+              "detail": "裁右侧和底部，更新掩码",
+              "kind": "process"
+            },
+            {
+              "id": "resize",
+              "title": "resize",
+              "detail": "先拉伸到统一尺寸",
+              "kind": "process"
+            },
+            {
+              "id": "flag",
+              "title": "unify 的裁剪标记",
+              "detail": "由初始化时预检决定",
+              "kind": "decision"
+            },
+            {
+              "id": "uc",
+              "title": "裁剪副本",
+              "detail": "保留原宽，裁去底部",
+              "kind": "process"
+            },
+            {
+              "id": "keep",
+              "title": "保留原图",
+              "detail": "none 或原图版",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "记录 unified_size",
+              "detail": "作为最终缩放的原坐标系",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "read",
+              "to": "mode",
+              "label": ""
+            },
+            {
+              "from": "mode",
+              "to": "crop",
+              "label": "crop"
+            },
+            {
+              "from": "mode",
+              "to": "resize",
+              "label": "resize"
+            },
+            {
+              "from": "mode",
+              "to": "flag",
+              "label": "unify"
+            },
+            {
+              "from": "mode",
+              "to": "keep",
+              "label": "none"
+            },
+            {
+              "from": "flag",
+              "to": "uc",
+              "label": "True"
+            },
+            {
+              "from": "flag",
+              "to": "keep",
+              "label": "False"
+            },
+            {
+              "from": "crop",
+              "to": "out",
+              "label": ""
+            },
+            {
+              "from": "resize",
+              "to": "out",
+              "label": ""
+            },
+            {
+              "from": "uc",
+              "to": "out",
+              "label": ""
+            },
+            {
+              "from": "keep",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "图像与标签始终走相同视野分支，再一起进入最终模型尺寸。"
+        }
       },
       {
         "start": 185,
         "end": 207,
         "title": "__getitem__ 中段：最终缩放、标准化、联合增强",
         "principle": [
-          "所有分支最终都把图像和标注变成模型尺寸。图像先做外观增强，再执行逐图 z-score：(I−mean)/(std+10⁻⁷)，把不同整体亮度对齐到相近数值尺度。",
-          "标准化后执行会改变位置的 JointAugment；另以 0.3 概率选择 special_augmentation2。标签必须和图像一起动，单独增强图像会破坏监督关系。"
+          "z-score 让图像整体亮暗和强度尺度更接近，但每张图用自己的统计量，没有使用训练集全局均值。",
+          "最终坐标保留小数；例如标签高度 43.5 可直接生成中心位于 43.5 的高斯目标。"
         ],
         "syntax": [
-          "torch.from_numpy 共享 NumPy 数组底层内存；astype(np.float32) 保证浮点标签。np.bool 的可用性与 NumPy 版本有关，可移植写法通常使用 np.bool_。",
-          "[None] 给灰度图补通道维；ToTensor 把 uint8 图转换为通道优先浮点张量。img.mean()/std() 沿整幅图求标量统计量。"
+          "torch.from_numpy 与 NumPy 数组共享内存；astype(np.float32) 在转换前明确坐标精度。",
+          "[None] 给 [H,W] 增加通道轴；self.transform(data=img)[\"data\"] 从变换器返回的字典取出处理结果。",
+          "random.random() 返回 [0,1) 随机数，每次取样独立触发；这不是固定抽取某 20%/30% 的样本。",
+          "torch.std 默认的校正方式由所用 PyTorch 接口决定；此处没有显式指定 correction。"
         ],
         "shapes": "image: float32[1,H,W]；y_px: float32[2,W]；valid: bool[2,W]",
-        "pitfall": "special_augmentation2 不接收 valid；裁掉的点被 clamp 回边界但仍可能标为有效。self.augment 没有被判断，augment=False 不会关闭训练增强。",
-        "exercise": "若 I 是常数图，标准化后是什么？",
-        "answer": "分子全零，加 epsilon 避免除零，输出全零。",
-        "diagram": "data"
+        "pitfall": "valid_list.astype(np.bool) 是旧别名，在部分 NumPy 版本中不可用。special_augmentation2 只返回图像和坐标，不处理 valid；裁切、边界钳制和横向位移可能使监督不完全对齐。",
+        "summary": "把数据变为网络输入尺寸和数值范围，再做训练专属增强。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "y_px",
+            "type": "float32 Tensor [L,W]",
+            "meaning": "最终尺寸下的浮点边界高度，插值点与原始点不再区分来源。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [L,W]",
+            "meaning": "最终重采样后的有效列，后面部分增强没有同步更新它。"
+          },
+          {
+            "name": "image_np",
+            "type": "uint8 ndarray [H,W]",
+            "meaning": "最终尺寸灰度图，适合 OpenCV 外观增强。"
+          },
+          {
+            "name": "img",
+            "type": "float32 Tensor [1,H,W]",
+            "meaning": "先缩放到约 0–1，再逐图 z-score；后续噪声可超出此范围。"
+          },
+          {
+            "name": "img_mean / img_std",
+            "type": "标量 Tensor",
+            "meaning": "当前图像全部像素的均值、标准差。"
+          },
+          {
+            "name": "1e-7",
+            "type": "float",
+            "meaning": "防止接近常量图像时标准差为零。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "最终同步缩放",
+            "detail": "L185–187：坐标重采样到 self.img_size，再转换为浮点/布尔张量。"
+          },
+          {
+            "title": "特殊外观扰动",
+            "detail": "L189–191：图像缩放到相同尺寸；训练以 20% 概率执行一次 special_enhancement。"
+          },
+          {
+            "title": "转为数值张量",
+            "detail": "L193–198：训练先除 255 再调用 Compose；验证经 ToTensor 转换。"
+          },
+          {
+            "title": "逐图标准化",
+            "detail": "L200–202：减去均值，除以标准差加小量。"
+          },
+          {
+            "title": "联合与特殊几何增强",
+            "detail": "L204–207：调用 JointAugment；随后以 30% 概率执行 special_augmentation2。"
+          }
+        ],
+        "returns": [
+          "已处理的 img、y_px、valid，准备生成热图并打包。"
+        ]
       },
       {
         "start": 209,
         "end": 217,
         "title": "返回样本字典：坐标与热图同时存在",
         "principle": [
-          "依据最终 y 和 valid 生成按列高斯热图。返回 dict 使训练循环按明确键读取图像、坐标与有效性，路径则用于追溯样本。",
-          "注意训练主循环虽然把 batch[\"heatmaps\"] 搬到设备，实际 HeatmapCompositeLoss 又根据 gt_y 自己生成热图；这份 dataset 热图没有直接参与当前损失。"
+          "单样本字典能让训练循环明确区分输入和监督。训练时有效点不止人工点，插值范围内的点同样被监督。",
+          "这里的热图不等于当前损失实际使用的热图：训练代码虽然读取 batch[\"heatmaps\"]，复合损失却只接收坐标、掩码与预测，并内部重新生成归一化目标。"
         ],
         "syntax": [
-          "generate_heatmap_targets 的 height 使用 img_size[1]，width 使用 img_size[0]；self.sigma 默认 2.0。dict 中值可以同时包含 Tensor 和字符串。"
+          "字典以字符串索引各项数据；name 和 ann_path 不会被当成数值输入。",
+          "同一 self.img_size 在 PIL 和热图接口中的参数顺序不同，显式 [1]/[0] 防止高宽颠倒。"
         ],
         "shapes": "image [1,H,W]；heatmaps [L,H,W]；y_px/valid [L,W]",
-        "pitfall": "不要把 dataset sigma=2 与实际损失热图的宽度混为一谈；loss.py 的构造函数把 self.sigma 固定写成 3.0。",
-        "exercise": "一个 256×256、两条线样本的热图元素数？",
-        "answer": "2×256×256=131072 个浮点数。",
-        "diagram": "heatmap"
+        "pitfall": "数据集 sigma 默认 2.0，而 HeatmapCompositeLoss 内部实际固定为 3.0；改这里的 sigma 不会自动改变默认训练损失的目标宽度。",
+        "summary": "把一个样本的输入、监督和追踪信息放入固定字典。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "heatmap_tensor",
+            "type": "Tensor [L,H,W]",
+            "meaning": "按当前 y_px 和 valid 生成的未逐列归一化高斯热图。"
+          },
+          {
+            "name": "image / heatmaps / y_px / valid",
+            "type": "字典键",
+            "meaning": "分别是网络输入、热图标签、坐标标签和坐标有效性。"
+          },
+          {
+            "name": "name / ann_path",
+            "type": "str",
+            "meaning": "原图路径与标注路径，用于追踪来源；name 不是只含文件名。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "生成辅助热图",
+            "detail": "L209：传入高度 self.img_size[1]、宽度 self.img_size[0] 与 self.sigma。"
+          },
+          {
+            "title": "返回样本",
+            "detail": "L210–217：六个键共同描述同一个样本。"
+          }
+        ],
+        "returns": [
+          "dict：image、heatmaps、y_px、valid、name、ann_path。"
+        ]
       },
       {
         "start": 220,
         "end": 237,
         "title": "default_collate：把样本列表堆成 batch",
         "principle": [
-          "Dataset 只返回一个样本；DataLoader 收集 B 个样本后，collate 函数沿新增第 0 维堆叠 Tensor。名称字符串保留为列表，方便对应到每个样本。"
+          "torch.stack 会增加一个新的 batch 轴，要求所有样本张量形状一致。前面统一到固定尺寸，就是为了保证这一步能成功。"
         ],
         "syntax": [
-          "torch.stack 需要每个输入 shape 一致；它新增维度，不同于 cat 沿已有维拼接。if \"heatmaps\" in batch[0] 检查首样本后决定是否打包热图。"
+          "torch.stack 默认 dim=0；B 个 [1,H,W] 变成 [B,1,H,W]，而不是沿通道拼成 [B,H,W]。",
+          "batch[0] 假定列表非空，并假定同批次样本字段一致；只有首样本有 heatmaps 而其他样本没有会报错。"
         ],
         "shapes": "list[B 个样本] → image[B,1,H,W]、y/valid[B,L,W]、heatmaps[B,L,H,W]",
-        "pitfall": "ann_path 没有加入 batch；若某标注缺一条目标线，各样本 L 不一致，stack 将失败。",
-        "exercise": "stack 与 cat 用在两个 [2,256] 标签上，结果分别是什么？",
-        "answer": "stack(...,dim=0) 得 [2,2,256]；cat(...,dim=0) 得 [4,256]。",
-        "diagram": "data"
+        "pitfall": "原始 ann_path 字段在组批时被丢弃；追踪验证样本只能使用保留下来的 name 或另行维护映射。",
+        "summary": "把多个单样本合成一批，明确张量轴与非张量信息的处理。",
+        "parameters": [
+          {
+            "name": "batch",
+            "type": "list[dict]",
+            "default": "必填",
+            "meaning": "DataLoader 收集的 B 个 __getitem__ 返回值，通常非空。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "imgs",
+            "type": "Tensor [B,1,H,W]",
+            "meaning": "按新轴堆叠图像。"
+          },
+          {
+            "name": "y / v",
+            "type": "Tensor [B,L,W]",
+            "meaning": "堆叠坐标和布尔掩码。"
+          },
+          {
+            "name": "names",
+            "type": "list[str] 长 B",
+            "meaning": "路径保留为列表，不转张量。"
+          },
+          {
+            "name": "result",
+            "type": "dict",
+            "meaning": "组批结果；ann_path 没有保留。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "Tensor [B,L,H,W]",
+            "meaning": "若第一个样本有热图键，则为所有样本堆叠热图。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "提取并堆叠",
+            "detail": "L221–224：用列表推导式取每个字典的同名字段。"
+          },
+          {
+            "title": "建立结果字典",
+            "detail": "L226–231：保存图像、坐标、掩码、名称。"
+          },
+          {
+            "title": "可选热图",
+            "detail": "L233–235：检查首样本是否含 heatmaps，再堆叠该字段。"
+          },
+          {
+            "title": "返回批次",
+            "detail": "L237：交给训练或验证循环。"
+          }
+        ],
+        "returns": [
+          "dict：image、y_px、valid、name，以及可选 heatmaps。"
+        ]
       }
-    ]
+    ],
+    "role": "主训练使用：样本读取、预处理与组批的入口",
+    "inputs": [
+      "data_root：包含 images/annotations 的数据根目录。",
+      "JSON 边界点标注；可选的训练/验证固定划分清单。",
+      "模型输入尺寸、训练/验证模式、统一视野环境变量。"
+    ],
+    "outputs": [
+      "单样本 image=[1,H,W]、y_px=[2,W]、valid=[2,W]、heatmaps=[2,H,W]。",
+      "组批后增加 B 维；name 保持 Python 路径列表。"
+    ],
+    "readingGuide": [
+      "先看 __init__ 如何决定样本集合，再看 __getitem__ 的处理顺序，最后看 default_collate 的维度变化。",
+      "坐标解析和插值下沉到 line_utils.py；常规联合增强在 dataset_utils.py；特殊增强在两个 special 文件。",
+      "augment 参数被保存却未用作开关。实际是否增强由 mode==train 和随机条件决定。",
+      "默认训练损失会重新生成归一化高斯目标；这里返回的 heatmaps 虽被训练循环读出，但没有传入当前复合损失。"
+    ],
+    "components": [
+      {
+        "name": "crop_annotation",
+        "kind": "函数",
+        "summary": "裁掉越界列，并把底部越界高度改为无效。",
+        "segmentStart": 35
+      },
+      {
+        "name": "crop_would_keep_target_lines",
+        "kind": "函数",
+        "summary": "预检裁剪后每条目标线是否还有标注，决定是否追加裁剪副本。",
+        "segmentStart": 51
+      },
+      {
+        "name": "LineDataset.__init__",
+        "kind": "构造方法",
+        "summary": "选择来源、划分集合、扩展视野索引并搭建增强器。",
+        "segmentStart": 72
+      },
+      {
+        "name": "LineDataset.__len__",
+        "kind": "方法",
+        "summary": "报告扩充后的样本数，供 DataLoader 决定索引范围。",
+        "segmentStart": 130
+      },
+      {
+        "name": "LineDataset.__getitem__",
+        "kind": "方法",
+        "summary": "按索引读取图像、转换坐标、增强并返回单样本字典。",
+        "segmentStart": 151
+      },
+      {
+        "name": "default_collate",
+        "kind": "函数",
+        "summary": "沿新 batch 维堆叠单样本，保留名称列表。",
+        "segmentStart": 220
+      }
+    ],
+    "pipeline": {
+      "title": "从数据来源到训练批次",
+      "nodes": [
+        {
+          "id": "source",
+          "title": "选择图像列表",
+          "detail": "固定清单或递归扫描目录",
+          "kind": "input"
+        },
+        {
+          "id": "split",
+          "title": "是否提供固定清单",
+          "detail": "清单按组隔离；旧路径训练使用全部样本",
+          "kind": "decision"
+        },
+        {
+          "id": "expand",
+          "title": "构建样本索引",
+          "detail": "unify 保留原图，满足条件再追加裁剪版",
+          "kind": "process"
+        },
+        {
+          "id": "read",
+          "title": "读取一张图和标注",
+          "detail": "灰度图 + 两条稀疏边界",
+          "kind": "process"
+        },
+        {
+          "id": "geo",
+          "title": "统一视野与尺寸",
+          "detail": "裁剪/缩放图像，同步更新坐标与有效列",
+          "kind": "process"
+        },
+        {
+          "id": "train",
+          "title": "是否为训练模式",
+          "detail": "训练才执行随机强度与几何增强",
+          "kind": "decision"
+        },
+        {
+          "id": "aug",
+          "title": "增强与标准化",
+          "detail": "外观扰动、z-score、联合几何变换",
+          "kind": "process"
+        },
+        {
+          "id": "val",
+          "title": "标准化",
+          "detail": "验证仅转换张量并做 z-score",
+          "kind": "process"
+        },
+        {
+          "id": "pack",
+          "title": "返回单样本字典",
+          "detail": "图像、坐标、掩码、热图及路径",
+          "kind": "output"
+        },
+        {
+          "id": "batch",
+          "title": "按批次堆叠",
+          "detail": "default_collate 增加 batch 维",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "source",
+          "to": "split",
+          "label": ""
+        },
+        {
+          "from": "split",
+          "to": "expand",
+          "label": "确定当前集合"
+        },
+        {
+          "from": "expand",
+          "to": "read",
+          "label": "按 idx 取样"
+        },
+        {
+          "from": "read",
+          "to": "geo",
+          "label": ""
+        },
+        {
+          "from": "geo",
+          "to": "train",
+          "label": ""
+        },
+        {
+          "from": "train",
+          "to": "aug",
+          "label": "是"
+        },
+        {
+          "from": "train",
+          "to": "val",
+          "label": "否"
+        },
+        {
+          "from": "aug",
+          "to": "pack",
+          "label": ""
+        },
+        {
+          "from": "val",
+          "to": "pack",
+          "label": ""
+        },
+        {
+          "from": "pack",
+          "to": "batch",
+          "label": "DataLoader"
+        }
+      ],
+      "caption": "初始化负责选样本和搭建变换；真正的图像处理发生在 __getitem__。同一图像的原图版与裁剪版是两个索引，不会覆盖磁盘原图。"
+    }
   },
   {
     "path": "LineDet/dataset/line_utils.py",
     "title": "标注解析：把点集变成每列一个 y",
-    "overview": "任务的标签不是整幅二值 mask，而是两条边界各自的 y(x)。这个文件固定通道语义，过滤非法点，并把不同宽度的离散标注插值到模型宽度。",
+    "overview": "这个文件把标注软件导出的离散坐标转换成训练需要的逐列边界标签。它先按中文标签名选出两条目标边界，清理坏点并把同列点合并，再在图像尺寸变化时逐列反查原图位置、做线性插值和纵坐标缩放。坐标值与“是否有效”始终成对返回：数值存在不代表一定可用于监督。",
     "segments": [
       {
         "start": 1,
         "end": 29,
         "title": "标签规范化与通道顺序",
         "principle": [
-          "TARGET_LABELS 指定第 0 条线是真皮层下界、第 1 条是脂肪层下界；模型输出通道必须遵守这个顺序，拓扑约束才有意义。",
-          "先用别名字典规范化，再按目标列表重新排序；同名重复标注只取第一个非空 data。表皮层相关标签被忽略。"
+          "模型输出通道的含义必须稳定，否则一张图的第 0 通道学上边界、另一张图却学下边界会导致监督冲突。按名称筛选避免依赖 JSON 的书写顺序。"
         ],
         "syntax": [
-          "dict.get(key,default) 允许键缺失；label not in selected 防止覆盖首个结果。返回列表推导式按 TARGET_LABELS 的顺序取值。"
+          "dict.get(key,default) 在键缺失时给默认值；空列表在 if 条件中为 False。",
+          "label not in selected 让同名后续线不会覆盖第一条有效记录。",
+          "末尾列表推导式带 if l in selected，因此缺失某条线时不会补空行。"
         ],
         "shapes": "items list[dict] → 至多 2 个目标线 dict",
-        "pitfall": "缺失的目标线不会补一条全无效占位线，而是直接消失；因此数据入口的校验十分关键。",
-        "exercise": "如果 JSON 把脂肪下界写在真皮下界之前，输出顺序会变吗？",
-        "answer": "不会；返回值由 TARGET_LABELS 重排。",
-        "diagram": "data"
+        "pitfall": "同一标签的多段线不会合并；只保留第一条非空记录。缺失目标时返回少于两条，可能导致跨样本无法组批。",
+        "summary": "确定目标边界的名字和固定通道顺序，并忽略其他标注线。",
+        "parameters": [
+          {
+            "name": "label",
+            "type": "str",
+            "default": "_canonical_label 必填",
+            "meaning": "标注中的原始标签名。"
+          },
+          {
+            "name": "data",
+            "type": "dict",
+            "default": "select_target_lines 必填",
+            "meaning": "JSON 根对象，预期 data['items'] 是标注线列表。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "TARGET_LABELS",
+            "type": "list[str]",
+            "meaning": "['真皮层下界','脂肪层下界']，对应上边界通道和下边界通道。"
+          },
+          {
+            "name": "LABEL_ALIASES",
+            "type": "dict[str,str]",
+            "meaning": "把“线条 2”映射到“表皮层下界”；该线仍不是两个目标之一。"
+          },
+          {
+            "name": "selected",
+            "type": "dict[str,dict]",
+            "meaning": "以标准标签名去重，保存第一条 data 非空的目标线。"
+          },
+          {
+            "name": "line / label",
+            "type": "dict / str",
+            "meaning": "当前线对象及规范化后的名称。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "规范名字",
+            "detail": "L13–16：命中别名映射就替换，否则原样返回。"
+          },
+          {
+            "title": "遍历并筛选",
+            "detail": "L24–28：只接收目标标签、尚未出现且点列表非空的线。"
+          },
+          {
+            "title": "固定输出顺序",
+            "detail": "L29：按照 TARGET_LABELS 顺序取存在的线。"
+          }
+        ],
+        "returns": [
+          "select_target_lines 返回线对象列表；_canonical_label 返回字符串。"
+        ]
       },
       {
         "start": 31,
         "end": 75,
         "title": "parse_djm_annotation：分桶、均值与 valid",
         "principle": [
-          "将每个连续 x 四舍五入到列 xi，同列若有多个 y 就取均值，从而得到单值曲线 y(x)。缺标注列先填零且 valid=False，这个零只是容器默认值。",
-          "过滤缺键、NaN/Inf、横向越界、纵向越界点。原始函数不做跨列插值；插值发生在 resize_y_and_valid。"
+          "这里还没有插值。例如只标 x=10 和 x=14，11–13 列的高度是占位 0、valid=False。只有后续 resize_y_and_valid 才会把中间缺列补齐。",
+          "同一列出现 y=40 和 y=42 时，程序取均值 41，避免用最后一个点任意覆盖前面的点。"
         ],
         "syntax": [
-          "per_x_ys.setdefault(xi,[]).append(yi) 是 dict[int,list[float]] 分桶；np.stack(list,axis=0) 把每条长度 W 数组堆成二维。",
-          "类型注解 Tuple[np.ndarray,np.ndarray] 说明返回两个数组；max_lines 参数当前未使用，不会截断线条数量。"
+          "np.isfinite 拦截 NaN 和无穷大；它不保证字符串等错误类型可直接处理。",
+          "int(round(float(x))) 先浮点转换、再取最近整数；Python round 在恰好 .5 时使用到偶数规则，如 2.5→2、3.5→4。",
+          "setdefault(xi,[]) 若没有桶就创建列表，然后 append 高度。np.mean 计算该列的平均高度。",
+          "np.stack(...,axis=0) 增加线条轴；所有线的宽度相同。"
         ],
         "shapes": "y_px=float[L,W₀]；valid=bool[L,W₀]",
-        "pitfall": "没有任何目标线时 np.stack([]) 会报错；所有点非法时可得到整行 valid=False。Python round 的半值取偶数规则也会影响恰好 x.5 的列归属。",
-        "exercise": "同一列有 y=20 和 y=24，会生成什么标签？",
-        "answer": "该列 y=22，valid=True。",
-        "diagram": "geometry"
+        "pitfall": "max_lines 没有生效。若没有任何可选择目标线，np.stack 空列表会报错；有线但点全被过滤，则这条线仍返回全零、全无效。",
+        "summary": "把每条线的离散点清理、按整数列聚合，形成坐标与有效掩码。",
+        "parameters": [
+          {
+            "name": "json_path",
+            "type": "str",
+            "default": "必填",
+            "meaning": "标注 JSON 文件路径，按 UTF-8 读取。"
+          },
+          {
+            "name": "original_size",
+            "type": "tuple[int,int]",
+            "default": "必填",
+            "meaning": "原图 (宽,高)，用于检查坐标范围。"
+          },
+          {
+            "name": "max_lines",
+            "type": "int 或 None",
+            "default": "None",
+            "meaning": "签名中保留，但函数体未使用，不能限制输出线条数。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "data / lines",
+            "type": "dict / list[dict]",
+            "meaning": "载入的 JSON 与选出的两种目标线。"
+          },
+          {
+            "name": "orig_w / orig_h",
+            "type": "int",
+            "meaning": "合法 x 为 0..W-1、y 为 0..H-1。"
+          },
+          {
+            "name": "points / p",
+            "type": "list[dict] / dict",
+            "meaning": "当前线的点列表及当前点。"
+          },
+          {
+            "name": "x / y",
+            "type": "数值或 None",
+            "meaning": "标注中的原始横纵坐标。"
+          },
+          {
+            "name": "xi / yi",
+            "type": "int / float",
+            "meaning": "横坐标四舍五入后用作列下标；纵坐标保留小数。"
+          },
+          {
+            "name": "per_x_ys",
+            "type": "dict[int,list[float]]",
+            "meaning": "将同一整数列的多个高度存入同一个桶。"
+          },
+          {
+            "name": "y_coords",
+            "type": "float ndarray [W]",
+            "meaning": "该线逐列高度；未标列暂时为 0。"
+          },
+          {
+            "name": "valid_mask",
+            "type": "bool ndarray [W]",
+            "meaning": "只有至少一个清洁标注点的列为 True。"
+          },
+          {
+            "name": "y_px_list / valid_list",
+            "type": "list[ndarray]",
+            "meaning": "逐线收集，最后沿线条轴堆叠。"
+          },
+          {
+            "name": "line",
+            "type": "dict",
+            "meaning": "当前选中的目标线对象，line.get(\"data\",[]) 提供该线的点列表。"
+          },
+          {
+            "name": "y_list",
+            "type": "list[float]",
+            "meaning": "同一整数列 xi 聚合到的全部合法纵坐标，取均值后成为这一列的一个标签。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "加载和选线",
+            "detail": "L37–45：读取 JSON，按固定目标顺序取得线对象与原图宽高。"
+          },
+          {
+            "title": "过滤坏点",
+            "detail": "L47–63：丢弃缺 x/y、非有限数、越界列或越界高度的点。"
+          },
+          {
+            "title": "同列聚合",
+            "detail": "L57–64：x 取整数后，纵坐标进入该列的列表。"
+          },
+          {
+            "title": "建立稀疏标签",
+            "detail": "L66–71：每列求平均，并把对应 valid 设 True。"
+          },
+          {
+            "title": "按线堆叠",
+            "detail": "L73–75：得到 [L,W] 坐标和掩码。"
+          }
+        ],
+        "returns": [
+          "两个 NumPy 数组：浮点坐标 [L,W]、bool 掩码 [L,W]。"
+        ]
       },
       {
         "start": 78,
         "end": 87,
         "title": "parse_annotation_valid：标签存在性检查",
         "principle": [
-          "扫描 JSON 中的标签，只有两个目标标签都存在才保留该样本。它是粗筛，不是完整的数据质量验证。"
+          "扫描所有样本时先排除明显缺线的标注，能避免把不满足双边界任务的文件加入索引。这个筛选比完整坐标解析简单。"
         ],
         "syntax": [
-          "all(t in labels for t in TARGET_LABELS) 要求每个目标标签出现；生成器表达式可以短路，某个条件假就无需继续。"
+          "all(t in labels for t in TARGET_LABELS) 只有每个检查都成立才返回 True；遇到 False 可提前结束。"
         ],
         "shapes": "JSON → bool",
-        "pitfall": "它不检查 data 非空、坐标有限、范围合法、两条线顺序正确。即使返回 True，parse_djm_annotation 仍可能得到缺线或空有效区域。",
-        "exercise": "应补哪些校验才能保证能组成两线 batch？",
-        "answer": "确认每条目标线有至少一个合法点、解析后 shape[0]==2，并记录全无效或交叉样本。",
-        "diagram": "data"
+        "pitfall": "只检查标签名，不检查 data 是否非空、点是否有限或越界。文件通过本检查不等于一定能产生两条有效边界；JSON 读取异常也不会在此捕获。",
+        "summary": "用标签名做样本扫描阶段的轻量筛选。",
+        "parameters": [
+          {
+            "name": "json_path",
+            "type": "str",
+            "default": "必填",
+            "meaning": "待检查的 JSON 标注文件。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "data",
+            "type": "dict",
+            "meaning": "载入的 JSON 根对象。"
+          },
+          {
+            "name": "labels",
+            "type": "list[str]",
+            "meaning": "items 中每条线经过别名规范化后的标签名。"
+          },
+          {
+            "name": "t",
+            "type": "str",
+            "meaning": "TARGET_LABELS 中当前要检查的目标名。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "读取标签名",
+            "detail": "L79–82：解析 JSON，遍历 items 取得 label 并规范别名。"
+          },
+          {
+            "title": "检查两种目标",
+            "detail": "L83–87：两个名字都在列表中则 True，否则打印路径并 False。"
+          }
+        ],
+        "returns": [
+          "bool：仅表示两个目标标签名是否齐全。"
+        ]
       },
       {
         "start": 90,
         "end": 120,
         "title": "resize_y_and_valid：建立目标列到原图的查询坐标",
         "principle": [
-          "横向重采样决定“新列对应原来的哪一列”，纵向缩放决定“原来的高度现在应是多少”。设 sx=W新/W旧、sy=H新/H旧，则查询 x旧=x新/sx，输出 y新=插值(y旧)×sy。",
-          "known 同时要求 valid=True 且 y 有限；一条线没有任何 known 点时，新线全零且全无效。"
+          "必须对每个输出列反查原图位置。例如宽度从 8 变 16，scale_x=2，新第 5 列对应原 x=2.5，再问原边界在 2.5 处有多高。",
+          "横坐标和纵坐标缩放不能混用：先在原图横向位置插值得到原高度，再乘 scale_y。"
         ],
         "syntax": [
-          "np.asarray 统一为数组；None 维把 [W] 变 [1,W]；np.linspace(start,end,num) 生成均匀坐标网格。",
-          "valid & np.isfinite(y) 是逐元素布尔合取，不是 Python 的 and。continue 跳到下一条线。"
+          "np.linspace(start,stop,num) 包含首末端；这里 num 为目标宽，因此 x_new 恰好是整数列序列。",
+          "valid & np.isfinite(y) 逐元素合并两个条件；np.any(known) 判断是否有任何可插值点。",
+          "continue 跳过当前线后续插值，继续下一条线。"
         ],
         "shapes": "[L,W旧] → [L,W新]",
-        "pitfall": "这里采用尺寸比 W新/W旧，而非端点比 (W新−1)/(W旧−1)，与某些 align_corners 约定不同。",
-        "exercise": "原图高 600，目标高 300，原 y=200 对应新 y？",
-        "answer": "sy=0.5，y新=100；横向还需根据新列插值。",
-        "diagram": "geometry"
+        "pitfall": "该实现采用 x_new/scale_x，不是图像双线性插值常见的像素中心对齐公式；边缘有效范围应按本代码的查询坐标判断。",
+        "summary": "为目标图的每一列找到它在原图中的横向查询位置，并选出可用标注点。",
+        "parameters": [
+          {
+            "name": "y_px_list",
+            "type": "ndarray [L,W_old] 或 [W_old]",
+            "default": "必填",
+            "meaning": "当前坐标系下逐列高度，允许无效占位。"
+          },
+          {
+            "name": "valid_list",
+            "type": "bool ndarray，同坐标形状",
+            "default": "必填",
+            "meaning": "哪些输入列可作为已知点。"
+          },
+          {
+            "name": "original_size",
+            "type": "tuple[int,int]",
+            "default": "必填",
+            "meaning": "当前图像的 (宽,高)，不是必然为磁盘原图尺寸。"
+          },
+          {
+            "name": "target_size",
+            "type": "tuple[int,int]",
+            "default": "必填",
+            "meaning": "期望输出图像的 (宽,高)。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "scale_x / scale_y",
+            "type": "float",
+            "meaning": "目标宽/原宽、目标高/原高，分别处理横纵坐标。"
+          },
+          {
+            "name": "y_px_arr / valid_arr",
+            "type": "ndarray [L,W_old]",
+            "meaning": "统一后的二维坐标、掩码。"
+          },
+          {
+            "name": "new_y_px_list / new_valid_list",
+            "type": "list[ndarray]",
+            "meaning": "收集每条线的目标宽数组。"
+          },
+          {
+            "name": "line_idx",
+            "type": "int",
+            "meaning": "当前边界编号。"
+          },
+          {
+            "name": "y / valid",
+            "type": "ndarray [W_old]",
+            "meaning": "取出的单条线。"
+          },
+          {
+            "name": "width_old / width_new",
+            "type": "int",
+            "meaning": "输入标签列数、目标图宽度。"
+          },
+          {
+            "name": "x_old",
+            "type": "float ndarray [W_old]",
+            "meaning": "从 0 到 original_width-1 均匀生成的输入列位置。"
+          },
+          {
+            "name": "x_new",
+            "type": "float ndarray [W_new]",
+            "meaning": "目标列位置，通常为 0..W_new-1。"
+          },
+          {
+            "name": "x_query",
+            "type": "float ndarray [W_new]",
+            "meaning": "每个目标列反查到原图的横坐标 x_new/scale_x。"
+          },
+          {
+            "name": "known",
+            "type": "bool ndarray [W_old]",
+            "meaning": "输入 valid=True 且高度为有限数的位置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "计算比例",
+            "detail": "L91–92：分别求横向、纵向缩放比例。"
+          },
+          {
+            "title": "统一维度",
+            "detail": "L94–100：单线数组增加线条轴，后续同一循环处理。"
+          },
+          {
+            "title": "构造坐标网格",
+            "detail": "L105–115：逐线建立原位置和新位置，再把新位置映射回原坐标。"
+          },
+          {
+            "title": "没有已知点的分支",
+            "detail": "L117–120：直接输出目标宽的零坐标与全 False 掩码。"
+          }
+        ],
+        "returns": [
+          "本段建立插值查询位置；无点的线直接产生全无效输出，其余进入下一段。"
+        ]
       },
       {
         "start": 122,
         "end": 142,
         "title": "插值与有效区间：插值不是凭空得到真实标签",
         "principle": [
-          "np.interp 在相邻已知点之间线性插值；区间之外用端点高度延伸。多点情况下，只有最左到最右已知点覆盖的查询列设为 valid，其余虽然有数值但不监督。",
-          "内部标注空洞会被插值跨越，并成为有效区间的一部分。若只剩一个已知点，代码把整幅宽度的标签都设为该高度且 valid=True。"
+          "若相邻已知点是 (10,40)、(14,47)，则每右移一列增加 7/4=1.75：中间列高度为 41.75、43.5、45.25。公式是 y_left+(x-x_left)/(x_right-x_left)×(y_right-y_left)，不需要取整。",
+          "np.interp 在每对相邻已知点之间做直线插值，形成折线；它不是三次样条，也不依据图像纹理自动寻找真实边界。",
+          "多点时，即使某段中间本来没有人工标注，插值后它仍有效。训练只知道补完后的高度和 valid，不保留“人工/插值”来源，也没有较低的插值权重。",
+          "首点左侧、末点右侧也会得到端点填充值，但 valid=False，所以这些填充值不会参加坐标和热图标签监督。几何正则是否使用掩码需看 loss.py。"
         ],
         "syntax": [
-          "np.argsort 返回排序索引，再同时重排 x、y；left/right 控制插值范围外的常量外推。",
-          "np.ones(width_new,dtype=bool) 在单点分支创建全真掩码；最终 stack 保留线维。"
+          "np.argsort 给排序索引，不直接修改数组；x_known[order] 和 y_known[order] 保持点对对应。",
+          "np.interp(x_query,x_known,y_known,left=...,right=...) 的 left/right 明确指定范围外的端点填充值。",
+          "比较运算产生布尔数组，再用 & 取闭区间条件；左右端点本身也有效。",
+          "np.ones(...,dtype=bool) 是当前单点特殊处理：所有目标列都有效。"
         ],
         "shapes": "两个已知端点 → 一段线性 y 与区间 mask",
-        "pitfall": "单点推广到全宽监督是很强的假设；crop 后的 invalid 空洞也可能被本函数重新插值为 valid，裁剪无效掩码并不保证完整保留。",
-        "exercise": "已知 x=0,y=10 与 x=4,y=18，查询 x=2 得到多少？",
-        "answer": "线性插值得 14；再乘纵向缩放系数。",
-        "diagram": "geometry"
+        "pitfall": "单点时全列有效属于这份实现的特殊约定，不是“无标注列必须有效”的普遍规则。多点长缺口没有距离阈值，真实弯曲可能被直线近似抹掉。",
+        "summary": "用相邻已知点线性补齐缺列，保留浮点高度，并重新决定哪些列有效。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "x_known / y_known",
+            "type": "float ndarray [K]",
+            "meaning": "从 known 选出的 K 个原位置与高度。"
+          },
+          {
+            "name": "order",
+            "type": "int ndarray [K]",
+            "meaning": "让横坐标升序排列的索引，坐标和高度必须同步重排。"
+          },
+          {
+            "name": "y_new",
+            "type": "float ndarray [W_new]",
+            "meaning": "原位置线性插值结果乘 scale_y，保留小数。"
+          },
+          {
+            "name": "valid_new",
+            "type": "bool ndarray [W_new]",
+            "meaning": "多点时查询位置位于首末已知点之间才 True；单点时全部 True。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "提取并排序",
+            "detail": "L123–127：布尔索引取出已知点，按横坐标升序排列。"
+          },
+          {
+            "title": "线性插值与缩放",
+            "detail": "L129：对每个 x_query 用相邻已知点连线求高度，再乘纵向缩放比例。"
+          },
+          {
+            "title": "重建有效范围",
+            "detail": "L131–134：单点与多点分开处理；多点仅首末范围内有效。"
+          },
+          {
+            "title": "组装输出",
+            "detail": "L136–142：逐线收集；无任何线时返回形状 (0,W_new) 的空数组，否则 stack。"
+          }
+        ],
+        "returns": [
+          "浮点坐标 [L,W_new] 与 bool 掩码 [L,W_new]。"
+        ],
+        "flow": {
+          "title": "插值值与有效掩码分别计算",
+          "nodes": [
+            {
+              "id": "known",
+              "title": "取出有效已知点",
+              "detail": "去除无效占位与非有限高度",
+              "kind": "input"
+            },
+            {
+              "id": "count",
+              "title": "K 个有效点",
+              "detail": "点数决定处理分支",
+              "kind": "decision"
+            },
+            {
+              "id": "empty",
+              "title": "K=0",
+              "detail": "输出零高度和全 False",
+              "kind": "output"
+            },
+            {
+              "id": "value",
+              "title": "K≥1：求高度",
+              "detail": "排序、线性插值、端点填充、乘 scale_y",
+              "kind": "process"
+            },
+            {
+              "id": "single",
+              "title": "是否只有一个点",
+              "detail": "单点与多点掩码不同",
+              "kind": "decision"
+            },
+            {
+              "id": "all",
+              "title": "K=1",
+              "detail": "所有列 True",
+              "kind": "output"
+            },
+            {
+              "id": "range",
+              "title": "K≥2",
+              "detail": "x_query 在首末点闭区间内为 True",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "known",
+              "to": "count",
+              "label": ""
+            },
+            {
+              "from": "count",
+              "to": "empty",
+              "label": "0"
+            },
+            {
+              "from": "count",
+              "to": "value",
+              "label": "≥1"
+            },
+            {
+              "from": "value",
+              "to": "single",
+              "label": ""
+            },
+            {
+              "from": "single",
+              "to": "all",
+              "label": "是"
+            },
+            {
+              "from": "single",
+              "to": "range",
+              "label": "否"
+            }
+          ],
+          "caption": "坐标数组里的一个非零值不自动代表有效标签，必须同时查看 valid。"
+        }
       }
-    ]
+    ],
+    "role": "主训练使用：标注解析、标签筛选、插值与有效范围处理",
+    "inputs": [
+      "含 items/label/data/x/y 的标注 JSON。",
+      "原图与目标图的 (宽,高)。"
+    ],
+    "outputs": [
+      "按固定线条顺序排列的浮点坐标 [L,W] 与布尔有效掩码 [L,W]。"
+    ],
+    "readingGuide": [
+      "先读 select_target_lines，确定通道语义；再读 parse_djm_annotation 的稀疏列表示；最后读 resize_y_and_valid 如何填充中间缺列。",
+      "解析后只有原始点列有效；插值后首末点之间所有查询列有效，来源信息没有保留，训练不区分人工与插值点权重。"
+    ],
+    "components": [
+      {
+        "name": "_canonical_label",
+        "kind": "函数",
+        "summary": "把已知别名统一成标准中文标签。",
+        "segmentStart": 1
+      },
+      {
+        "name": "select_target_lines",
+        "kind": "函数",
+        "summary": "选第一条非空的同名目标线，并按上到下顺序返回。",
+        "segmentStart": 1
+      },
+      {
+        "name": "parse_djm_annotation",
+        "kind": "函数",
+        "summary": "清洗点坐标、按列取均值，生成稀疏坐标与掩码。",
+        "segmentStart": 31
+      },
+      {
+        "name": "parse_annotation_valid",
+        "kind": "函数",
+        "summary": "快速检查两种标签名是否都存在，供扫描样本时筛选。",
+        "segmentStart": 78
+      },
+      {
+        "name": "resize_y_and_valid",
+        "kind": "函数",
+        "summary": "反向查询、线性插值、缩放纵坐标并重建有效范围。",
+        "segmentStart": 90
+      }
+    ],
+    "pipeline": {
+      "title": "离散标注如何变成逐列标签",
+      "nodes": [
+        {
+          "id": "json",
+          "title": "读取 JSON",
+          "detail": "每条线包含 label 和点列表",
+          "kind": "input"
+        },
+        {
+          "id": "select",
+          "title": "选择目标线",
+          "detail": "固定上边界、下边界顺序",
+          "kind": "process"
+        },
+        {
+          "id": "clean",
+          "title": "清理并按列合并",
+          "detail": "横坐标取整，同列高度求均值",
+          "kind": "process"
+        },
+        {
+          "id": "sparse",
+          "title": "形成稀疏数组",
+          "detail": "未标列填零且 valid=False",
+          "kind": "process"
+        },
+        {
+          "id": "query",
+          "title": "目标列反查原图",
+          "detail": "x_query=x_new/scale_x",
+          "kind": "process"
+        },
+        {
+          "id": "known",
+          "title": "有效点数量",
+          "detail": "无点、单点、多点分别处理",
+          "kind": "decision"
+        },
+        {
+          "id": "zero",
+          "title": "没有有效点",
+          "detail": "全零且全部无效",
+          "kind": "output"
+        },
+        {
+          "id": "one",
+          "title": "只有一个点",
+          "detail": "整行填同一高度，全部有效",
+          "kind": "output"
+        },
+        {
+          "id": "interp",
+          "title": "多个有效点",
+          "detail": "相邻点线性插值，再缩放 y",
+          "kind": "process"
+        },
+        {
+          "id": "mask",
+          "title": "重建有效范围",
+          "detail": "首末点内有效；范围外填值但无效",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "json",
+          "to": "select",
+          "label": ""
+        },
+        {
+          "from": "select",
+          "to": "clean",
+          "label": ""
+        },
+        {
+          "from": "clean",
+          "to": "sparse",
+          "label": ""
+        },
+        {
+          "from": "sparse",
+          "to": "query",
+          "label": ""
+        },
+        {
+          "from": "query",
+          "to": "known",
+          "label": ""
+        },
+        {
+          "from": "known",
+          "to": "zero",
+          "label": "0"
+        },
+        {
+          "from": "known",
+          "to": "one",
+          "label": "1"
+        },
+        {
+          "from": "known",
+          "to": "interp",
+          "label": "≥2"
+        },
+        {
+          "from": "interp",
+          "to": "mask",
+          "label": ""
+        }
+      ],
+      "caption": "插值发生在标签预处理，不是网络预测。当前实现对长缺口也做直线连接，没有最大间隔限制。"
+    }
   },
   {
     "path": "LineDet/dataset/utils.py",
     "title": "发现数据：按同名文件配对",
-    "overview": "递归寻找包含 images/ 和 annotations/ 的目录，以同名 PNG/JPG 与 JSON 组成样本。生成固定划分和普通 Dataset 都依赖这个入口。",
+    "overview": "这个文件负责发现可用的图像—标注文件对。它递归遍历数据根目录，只处理同时含 images 和 annotations 子目录的位置，用相同文件主名配对图像与 JSON，再检查是否具有两种目标标签。它不加载图像像素，也不做训练划分；固定清单生成器和不使用清单的数据集都会调用它。",
     "segments": [
       {
         "start": 1,
         "end": 22,
         "title": "排除目录配置与 collect_pairs",
         "principle": [
-          "图像与标注靠去掉扩展名后的同名关系配对：images/a.jpg 对应 annotations/a.json。只返回标注存在且目标标签检查通过的项。",
-          "EXCLUDE_DIRS 是按竖线分隔的目录名集合，在模块导入时读取。它服务于下一段递归扫描。"
+          "按同一个主名配对比按目录中文件位置一一对齐可靠；否则缺少一个标注文件可能使之后所有配对错位。"
         ],
         "syntax": [
-          "str.lower().endswith(...) 允许大写扩展名；os.path.splitext(f)[0] 去掉最后一个后缀；append((img_path,ann_path)) 加入二元 tuple。",
-          "sorted(os.listdir(img_dir)) 让单目录内顺序稳定；空目录或缺失目录返回空列表。"
+          "集合推导式去重排除名称；split(\"|\") 允许一次指定多个目录。",
+          "f.lower().endswith 接受扩展名大小写差异，但 .jpeg 不在支持列表中。",
+          "os.path.splitext(f)[0] 去掉最后一个扩展名；os.path.join 负责平台路径拼接。"
         ],
         "shapes": "list[tuple[图像路径,标注路径]]",
-        "pitfall": "只匹配 .png 和 .jpg，没有 .jpeg；损坏 JSON 的异常不在这里捕获。注释声称脚本配置排除目录，但当前 train减脂.sh 未设置该环境变量。",
-        "exercise": "为什么不能根据 os.listdir 的两个列表位置直接 zip 配对？",
-        "answer": "图像和标注缺失情况、排序可能不同；必须以 basename 建立明确对应。",
-        "diagram": "data"
+        "pitfall": "parse_annotation_valid 只检查标签名，且读取异常会中断扫描。未在这一步核验图像可读取或 JSON 点内容有效。",
+        "summary": "读取排除规则，并在一个目录对中找到具有目标标签的图像。",
+        "parameters": [
+          {
+            "name": "img_dir",
+            "type": "str",
+            "default": "collect_pairs 必填",
+            "meaning": "当前 images 目录路径。"
+          },
+          {
+            "name": "ann_dir",
+            "type": "str",
+            "default": "collect_pairs 必填",
+            "meaning": "与之配套的 annotations 目录路径。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "EXCLUDE_DIRS",
+            "type": "set[str]",
+            "meaning": "环境变量按竖线分隔、去空格、去空项后形成的排除目录名集合。"
+          },
+          {
+            "name": "pairs",
+            "type": "list[tuple[str,str]]",
+            "meaning": "收集当前目录的合法图像—标注路径对。"
+          },
+          {
+            "name": "f / base",
+            "type": "str",
+            "meaning": "图像文件名及去扩展名的主名。"
+          },
+          {
+            "name": "img_path / ann_path",
+            "type": "str",
+            "meaning": "原图路径及同主名 .json 路径。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "读取全局排除集合",
+            "detail": "L8：解析 LINEDET_EXCLUDE_DIRS。"
+          },
+          {
+            "title": "确认目录存在",
+            "detail": "L11–14：任一目录不存在直接返回空列表。"
+          },
+          {
+            "title": "枚举图像并配对",
+            "detail": "L16–20：按文件名排序，仅 .png/.jpg；JSON 使用同一主名。"
+          },
+          {
+            "title": "筛选标签",
+            "detail": "L20–22：JSON 存在且目标标签检查通过才加入结果。"
+          }
+        ],
+        "returns": [
+          "当前目录下的路径对列表。"
+        ]
       },
       {
         "start": 25,
         "end": 35,
         "title": "find_image_annotation_pairs：剪枝式递归",
         "principle": [
-          "os.walk 逐层给出当前目录及子目录；发现同时包含 images 与 annotations 的父目录，就收集它们的配对。修改 dirs[:] 能阻止遍历被排除的子树。"
+          "os.walk 默认从上向下遍历，修改 dirs 本身能让它不进入指定子树；只给变量重新赋一个新列表不会改变遍历器使用的原列表。"
         ],
         "syntax": [
-          "dirs[:] = ... 是原地改动 walk 持有的列表；若写 dirs = ... 只改局部绑定，不能保证阻止递归。pairs.extend 把多个 pair 展平加入结果。"
+          "dirs[:] = ... 是列表原地替换；过滤条件是目录名不在 EXCLUDE_DIRS 中，不是任意路径子串匹配。",
+          "extend 加入列表中的每个路径对；若用 append 会形成嵌套列表，破坏下游接口。"
         ],
         "shapes": "数据根目录 → 全部合格路径对",
-        "pitfall": "os.walk 的目录顺序未显式排序；无 manifest 的“尾部验证集”可能随目录遍历顺序而变化。",
-        "exercise": "解释 append(collect_pairs(...)) 为何不正确。",
-        "answer": "那会产生嵌套 list；extend 才得到统一的一层样本列表。",
-        "diagram": "data"
+        "pitfall": "目录排除按名字精确匹配。相同名字出现在不同层级都会被排除；“名字里含某字符串”并不会自动命中。",
+        "summary": "递归发现目录结构，同时阻止进入排除子树。",
+        "parameters": [
+          {
+            "name": "data_root",
+            "type": "str",
+            "default": "必填",
+            "meaning": "开始递归扫描的根目录。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "root",
+            "type": "str",
+            "meaning": "os.walk 当前访问的目录。"
+          },
+          {
+            "name": "dirs",
+            "type": "list[str]",
+            "meaning": "当前目录的直接子目录名，原地修改可控制后续遍历。"
+          },
+          {
+            "name": "_",
+            "type": "list[str]",
+            "meaning": "当前文件名列表，此处未使用。"
+          },
+          {
+            "name": "img_dir / ann_dir",
+            "type": "str",
+            "meaning": "在找到目录对时拼出的两个子目录路径。"
+          },
+          {
+            "name": "pairs",
+            "type": "list[tuple[str,str]]",
+            "meaning": "所有目录对收集结果的合并列表。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "递归与剪枝",
+            "detail": "L28–29：在深入子目录之前移除排除目录名。"
+          },
+          {
+            "title": "识别配对目录",
+            "detail": "L30–33：仅在 images 与 annotations 同时存在时调用 collect_pairs。"
+          },
+          {
+            "title": "汇总结果",
+            "detail": "L33–35：extend 将子结果展开加入总列表。"
+          }
+        ],
+        "returns": [
+          "所有发现的有效图像—标注路径对。"
+        ]
       }
-    ]
+    ],
+    "role": "主路径与清单生成共用：样本文件发现",
+    "inputs": [
+      "数据根目录；可选 LINEDET_EXCLUDE_DIRS 排除目录名。"
+    ],
+    "outputs": [
+      "list[(图像路径,标注路径)]，供数据集或分组清单生成器继续处理。"
+    ],
+    "readingGuide": [
+      "collect_pairs 处理一对平级 images/annotations 目录；find_image_annotation_pairs 负责外层递归与剪枝。",
+      "文件名排序只发生在每个 images 目录内；os.walk 的目录访问顺序未在本函数统一排序。"
+    ],
+    "components": [
+      {
+        "name": "collect_pairs",
+        "kind": "函数",
+        "summary": "同名图像与 JSON 配对，筛掉不支持格式或缺标签的记录。",
+        "segmentStart": 1
+      },
+      {
+        "name": "find_image_annotation_pairs",
+        "kind": "函数",
+        "summary": "递归寻找目录对，并跳过指定目录子树。",
+        "segmentStart": 25
+      }
+    ],
+    "pipeline": {
+      "title": "文件发现过程",
+      "nodes": [
+        {
+          "id": "0",
+          "title": "数据根目录",
+          "detail": "os.walk 递归访问",
+          "kind": "input"
+        },
+        {
+          "id": "1",
+          "title": "剪去排除目录",
+          "detail": "按目录名精确匹配",
+          "kind": "process"
+        },
+        {
+          "id": "2",
+          "title": "识别 images/annotations",
+          "detail": "两个子目录必须同时存在",
+          "kind": "process"
+        },
+        {
+          "id": "3",
+          "title": "同名配对并筛标签",
+          "detail": "png/jpg 与对应 json",
+          "kind": "process"
+        },
+        {
+          "id": "4",
+          "title": "返回路径对",
+          "detail": "尚未读取像素或划分数据",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "0",
+          "to": "1",
+          "label": ""
+        },
+        {
+          "from": "1",
+          "to": "2",
+          "label": ""
+        },
+        {
+          "from": "2",
+          "to": "3",
+          "label": ""
+        },
+        {
+          "from": "3",
+          "to": "4",
+          "label": ""
+        }
+      ],
+      "caption": "目录遍历只决定候选样本，后续完整点解析仍可能发现坏标注。"
+    }
   },
   {
     "path": "LineDet/dataset/split_manifest.py",
     "title": "固定划分加载：把实验边界写成可审计名单",
-    "overview": "train.jsonl 与 val.jsonl 记载确切样本，meta.json 记录来源。加载器会检查清单完整、数据根匹配、组与文件对不重叠，并在选中样本上检查文件存在。",
+    "overview": "这个文件读取已经固定好的训练/验证清单，并在数据集创建前检查明显的划分错误。它要求 meta.json、train.jsonl、val.jsonl 三个文件齐全，检查数据根目录、训练验证目录组是否重叠、图像与标注路径对是否重叠，最后把相对路径变成可读取的绝对路径。它只消费划分，不随机生成划分。",
     "segments": [
       {
         "start": 1,
         "end": 23,
         "title": "_read_jsonl：一行一个样本记录",
         "principle": [
-          "JSONL 适合逐条写入与读取，不需把所有记录包在一个巨大 JSON 数组里。每一条至少包含 image、annotation、group 三个非空字符串。"
+          "JSONL 不是一个大 JSON 数组，而是每行独立一个 JSON 对象。逐行读取便于定位哪条样本记录有问题。"
         ],
         "syntax": [
-          "enumerate(handle,1) 从 1 编号，报错能指出具体行；strip 后跳过空行；json.loads 解析单行对象。",
-          "isinstance(...,str) 做类型检查；类型注解 List[Dict[str,str]] 不会自动在运行时验证，真正检查来自 if。"
+          "from __future__ import annotations 延后处理类型注解；类型注解帮助阅读，并不自动校验运行值。",
+          "enumerate(handle,1) 同时得到 1 起始行号和文本行。isinstance(...,str) 与 not record[key] 分别检查类型、非空。",
+          "raise ValueError 中的 f-string 插入路径、行号和缺失字段名。"
         ],
         "shapes": "JSONL → list[dict[str,str]]",
-        "pitfall": "记录中的 split 字段没有在这里核对；读取 train.jsonl 就按训练清单解释。",
-        "exercise": "写一个最小 JSONL 记录。",
-        "answer": "{\"image\":\"g/images/a.png\",\"annotation\":\"g/annotations/a.json\",\"group\":\"g\"}",
-        "diagram": "split"
+        "pitfall": "代码假设 json.loads 得到字典；若某行是 JSON 数组或数字，record.get 会直接报属性错误。它也不检查 split 字段是否与文件名一致。",
+        "summary": "按行读取 JSONL，并确保每条样本记录具备基本字段。",
+        "parameters": [
+          {
+            "name": "path",
+            "type": "pathlib.Path",
+            "default": "必填",
+            "meaning": "train.jsonl 或 val.jsonl 文件路径。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "records",
+            "type": "list[dict[str,str]]",
+            "meaning": "校验通过的记录列表。"
+          },
+          {
+            "name": "handle",
+            "type": "文本文件对象",
+            "meaning": "with 管理生命周期，退出后关闭。"
+          },
+          {
+            "name": "line_number",
+            "type": "int",
+            "meaning": "从 1 开始的物理行号，帮助定位错误。"
+          },
+          {
+            "name": "raw_line / line",
+            "type": "str",
+            "meaning": "原始文本行与 strip 后的内容。"
+          },
+          {
+            "name": "record",
+            "type": "dict",
+            "meaning": "json.loads 得到的当前记录。"
+          },
+          {
+            "name": "key",
+            "type": "str",
+            "meaning": "依次检查 image、annotation、group。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "逐行读取",
+            "detail": "L12–17：枚举行号、去空白，空行直接跳过。"
+          },
+          {
+            "title": "解析记录",
+            "detail": "L18：每个非空行单独 json.loads。"
+          },
+          {
+            "title": "校验字段",
+            "detail": "L19–21：三个字段都必须是非空字符串，否则抛出带文件和行号的错误。"
+          },
+          {
+            "title": "追加并返回",
+            "detail": "L22–23：不额外删除其他字段，保留完整记录。"
+          }
+        ],
+        "returns": [
+          "list[dict]：按原文件行顺序排列的有效记录。"
+        ]
       },
       {
         "start": 26,
         "end": 35,
         "title": "_absolute_path：相对路径解析与边界检查",
         "principle": [
-          "清单要求路径相对数据根，便于理解每个样本的来源。组合路径后检查是否还处于根目录的字面路径范围，并确认目标文件存在。"
+          "相对路径让同一套数据整体移动后更容易复用清单；同时应避免 ../ 指向数据集以外的内容。"
         ],
         "syntax": [
-          "Path.resolve(strict=False) 规范化路径并允许先不要求文件存在；is_file 随后验证。commonpath 求公共目录路径，不是公共字符串前缀。"
+          "Path / string 是路径拼接，不是数值除法。resolve(strict=False) 可以先解析规范路径，再由 is_file 检查文件是否存在。",
+          "os.path.commonpath 返回共同目录部分；它不同于按字符计算共同前缀，不会把 data2 误当成 data 的子目录。"
         ],
         "shapes": "相对路径 str → 规范化绝对路径 str",
-        "pitfall": "边界检查用的是 lexical 字面路径，未对 resolve 后的符号链接目标再做根目录约束，因此不能视为完整的符号链接隔离。",
-        "exercise": "为什么 ../outside/a.png 应被拒绝？",
-        "answer": "规范化后位于数据根之外，commonpath 不等于根目录。",
-        "diagram": "split"
+        "pitfall": "当前边界检查使用 lexical 而不是 resolve 后的 path，因此数据根目录里的符号链接仍可能指向外部；不要把这段理解成完整的符号链接隔离检查。",
+        "summary": "将清单里的相对路径转成现有文件的绝对路径。",
+        "parameters": [
+          {
+            "name": "data_root",
+            "type": "pathlib.Path",
+            "default": "必填",
+            "meaning": "已经 resolve 的数据根目录。"
+          },
+          {
+            "name": "relative_path",
+            "type": "str",
+            "default": "必填",
+            "meaning": "记录中的 image 或 annotation 路径，必须不是绝对路径。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "path",
+            "type": "Path",
+            "meaning": "根目录与相对路径拼接后 resolve 的路径，检查是否为真实文件。"
+          },
+          {
+            "name": "lexical",
+            "type": "str",
+            "meaning": "通过 abspath 消去 . 和 .. 的词法绝对路径，不负责解析符号链接。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "拒绝绝对路径",
+            "detail": "L27–28：清单必须可相对于数据根目录解释。"
+          },
+          {
+            "title": "构造两种路径",
+            "detail": "L29–30：path 用于存在性，lexical 用于路径范围检查。"
+          },
+          {
+            "title": "检查范围和存在",
+            "detail": "L31–34：越出根目录或不是文件就报错。"
+          },
+          {
+            "title": "返回字符串",
+            "detail": "L35：转换为后续 PIL/open 能使用的路径。"
+          }
+        ],
+        "returns": [
+          "文件绝对路径字符串。"
+        ]
       },
       {
         "start": 38,
         "end": 64,
         "title": "加载清单元数据与组交集检查",
         "principle": [
-          "要求 meta/train/val 三文件齐全，避免实验只读到半份清单。meta 的 data_root_real 必须与当前根匹配；随后把每侧 group 收集为集合并检查交集。",
-          "同组样本全部留在一侧，可以降低相邻帧或同采集批次泄漏，但目录组是否等价于患者仍要由数据组织保证。"
+          "把同一目录组整体放进一个集合，减少同一次采集中的近似图像同时进入训练和验证的风险。这里只能保证所定义的目录组隔离，不能证明患者身份不重叠。"
         ],
         "syntax": [
-          "set comprehension 自动去重；train_groups & val_groups 求集合交集；非空集合在 if 中为真。",
-          "Path(data_root).resolve() 与 os.path.realpath 都规范化路径；raise ValueError 中止加载。"
+          "集合推导式自动合并重复 group；集合 & 运算产生交集。",
+          "os.path.realpath 规范化实际路径，以免简单的相对/绝对写法差异造成误判。",
+          "如果 expected_root 缺失或为空，根目录相等检查被跳过，并不会因此拒绝清单。"
         ],
         "shapes": "train_groups,val_groups: set[str]",
-        "pitfall": "迁移数据到另一台机器后即使相对文件完全一致，也会因绝对根不同被拒绝；需要生成或审慎更新清单元数据。",
-        "exercise": "两组清单图像名不同但 group 相同，会怎样？",
-        "answer": "仍然报错；检查的是整个组必须互斥。",
-        "diagram": "split"
+        "pitfall": "读取器不重算 meta 中的 manifest_sha256，也不核对记录数量与 meta 统计值；元数据存在不等于所有元数据内容都已验证。",
+        "summary": "核对固定划分的文件和根目录，并禁止训练验证共享目录组。",
+        "parameters": [
+          {
+            "name": "data_root",
+            "type": "str",
+            "default": "必填",
+            "meaning": "本次实际使用的数据根目录。"
+          },
+          {
+            "name": "manifest_dir",
+            "type": "str",
+            "default": "必填",
+            "meaning": "存放 meta.json/train.jsonl/val.jsonl 的目录。"
+          },
+          {
+            "name": "mode",
+            "type": "str",
+            "default": "必填",
+            "meaning": "train、val 或 all，后半段据此选择记录。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "root / manifest",
+            "type": "Path",
+            "meaning": "规范化后的数据与清单目录。"
+          },
+          {
+            "name": "meta_path / train_path / val_path",
+            "type": "Path",
+            "meaning": "必须存在的三份文件。"
+          },
+          {
+            "name": "required",
+            "type": "Path",
+            "meaning": "依次检查的必需文件。"
+          },
+          {
+            "name": "meta",
+            "type": "dict",
+            "meaning": "划分元数据，含生成时记录的数据根目录等。"
+          },
+          {
+            "name": "expected_root",
+            "type": "str 或 None",
+            "meaning": "meta['data_root_real']；存在时才检查根目录匹配。"
+          },
+          {
+            "name": "train_records / val_records",
+            "type": "list[dict]",
+            "meaning": "两份清单的完整记录。"
+          },
+          {
+            "name": "train_groups / val_groups",
+            "type": "set[str]",
+            "meaning": "两份清单各自出现的目录组名。"
+          },
+          {
+            "name": "group_overlap / example",
+            "type": "set[str] / str",
+            "meaning": "交集及报错使用的一个样例组名。"
+          },
+          {
+            "name": "handle",
+            "type": "文本文件对象",
+            "meaning": "with 打开的 meta.json；交给 json.load 读取根目录与划分元数据，退出后自动关闭。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "定位必需文件",
+            "detail": "L40–47：任一缺失立即抛 FileNotFoundError。"
+          },
+          {
+            "title": "核对根目录",
+            "detail": "L49–55：读取元数据并比较 realpath，避免将清单用于错误数据源。"
+          },
+          {
+            "title": "读取记录",
+            "detail": "L57–58：调用 _read_jsonl 做逐行格式校验。"
+          },
+          {
+            "title": "检查组隔离",
+            "detail": "L59–64：组名集合求交，非空即终止。"
+          }
+        ],
+        "returns": [
+          "本段通过后，得到互不重叠的组集合和待做路径对检查的记录。"
+        ]
       },
       {
         "start": 66,
         "end": 95,
         "title": "文件身份与模式选择",
         "principle": [
-          "identity 将图像和标注都规范化，形成文件对身份；两侧文件对交集非空就拒绝。随后按 mode 选择 train、val 或合并 all，并将路径逐条解析为绝对路径。"
+          "组名检查与路径检查互补：即使清单把同一文件写成不同组名，真实路径对检查仍能发现完全相同的记录。"
         ],
         "syntax": [
-          "内部函数 identity 捕获外层 root；tuple[str,str] 可哈希，所以能作为 set 元素；+ 拼接两个列表。",
-          "列表推导式中的 _absolute_path 对选中清单逐条验证；不支持的 mode 显式抛异常。"
+          "内部函数能够使用外层 root，这叫闭包；无需每次把 root 作为形参传入。",
+          "tuple[str,str] 可作为集合元素，list 不能直接作为集合元素。",
+          "next(iter(pair_overlap)) 只取一个重叠样例用于错误信息，不表示只检查了一条。",
+          "列表推导式对每条 selected 同时验证图像和标注路径。"
         ],
         "shapes": "records → list[(absolute_image,absolute_annotation)]",
-        "pitfall": "这里检查“图像路径+标注路径”二元组重叠，不是分别检查图片集合；同一图片搭不同标注路径可能漏检。元数据的 sha256 没有在加载时重算验证，也不检查图片内容重复。",
-        "exercise": "若要更严格排除源图泄漏，应补什么？",
-        "answer": "分别求规范化 image 路径交集；必要时对图像内容哈希，并按真实患者/采集标识分组。",
-        "diagram": "split"
+        "pitfall": "这里比较的是“图像路径+标注路径”的完整二元组，不是分别禁止任一图像路径或任一标注路径重复。训练验证若同图配不同标注，单靠这一项可能漏检。",
+        "summary": "检查真实路径对的交集，再按模式返回可读取的文件对。",
+        "parameters": [
+          {
+            "name": "record",
+            "type": "dict[str,str]",
+            "default": "identity 必填",
+            "meaning": "一条清单记录，含 image 与 annotation 相对路径。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "identity",
+            "type": "内部函数",
+            "meaning": "闭包使用外层 root，把两个路径分别 realpath 后组成 tuple。"
+          },
+          {
+            "name": "train_ids / val_ids",
+            "type": "set[tuple[str,str]]",
+            "meaning": "训练、验证记录的真实图像—标注路径对集合。"
+          },
+          {
+            "name": "pair_overlap",
+            "type": "set[tuple[str,str]]",
+            "meaning": "两集合的交集。"
+          },
+          {
+            "name": "selected",
+            "type": "list[dict]",
+            "meaning": "mode 选中的记录集合。"
+          },
+          {
+            "name": "pairs",
+            "type": "list[tuple[str,str]]",
+            "meaning": "逐条通过 _absolute_path 后的最终结果。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "建立样本身份",
+            "detail": "L66–71：定义内部函数，将路径对规范为可哈希的二元组。"
+          },
+          {
+            "title": "检查文件对重叠",
+            "detail": "L73–77：若两个集合包含同一真实路径对则报错。"
+          },
+          {
+            "title": "选择模式",
+            "detail": "L79–86：train 取训练、val 取验证、all 合并；其他值拒绝。"
+          },
+          {
+            "title": "验证并返回",
+            "detail": "L88–95：只对所选集合检查文件存在和相对路径范围，输出统计和 pairs。"
+          }
+        ],
+        "returns": [
+          "当前模式的路径对列表。"
+        ]
       }
-    ]
+    ],
+    "role": "提供 split_manifest 时的主训练路径：加载和校验固定数据划分",
+    "inputs": [
+      "data_root 数据根目录、manifest_dir 清单目录、mode=train/val/all。",
+      "每行一条记录的 train.jsonl 与 val.jsonl；每条含 image、annotation、group。"
+    ],
+    "outputs": [
+      "当前模式的 list[(绝对图像路径,绝对标注路径)]；结构或隔离检查失败时抛异常。"
+    ],
+    "readingGuide": [
+      "generate_group_split.py 负责创建这些文件，本文件负责读取。LineDataset.__init__ 传入清单时调用 load_manifest_pairs。",
+      "组隔离按目录名 group 判断，不自动等于患者身份隔离；这里没有读取病人 ID。",
+      "文件中定义的 identity 是 load_manifest_pairs 的内部函数，只用于生成可比较的真实路径对。"
+    ],
+    "components": [
+      {
+        "name": "_read_jsonl",
+        "kind": "函数",
+        "summary": "逐行解析清单并校验三个必需字符串字段。",
+        "segmentStart": 1
+      },
+      {
+        "name": "_absolute_path",
+        "kind": "函数",
+        "summary": "要求相对路径位于数据根目录的词法范围，并检查文件存在。",
+        "segmentStart": 26
+      },
+      {
+        "name": "load_manifest_pairs",
+        "kind": "函数",
+        "summary": "核验文件、根目录、组和路径对隔离，再选择 train/val/all。",
+        "segmentStart": 38
+      },
+      {
+        "name": "identity",
+        "kind": "内部函数",
+        "summary": "将单条记录转为经过 realpath 的图像—标注二元组。",
+        "segmentStart": 66
+      }
+    ],
+    "pipeline": {
+      "title": "固定清单的验证顺序",
+      "nodes": [
+        {
+          "id": "files",
+          "title": "定位三个清单文件",
+          "detail": "meta、train、val 必须全部存在",
+          "kind": "input"
+        },
+        {
+          "id": "root",
+          "title": "核对数据根目录",
+          "detail": "元数据提供根目录时必须匹配",
+          "kind": "process"
+        },
+        {
+          "id": "rows",
+          "title": "读取两份 JSONL",
+          "detail": "每条检查 image/annotation/group",
+          "kind": "process"
+        },
+        {
+          "id": "groups",
+          "title": "训练验证组有交集吗",
+          "detail": "group 集合求交",
+          "kind": "decision"
+        },
+        {
+          "id": "pairs",
+          "title": "路径对有交集吗",
+          "detail": "realpath 后的二元组求交",
+          "kind": "decision"
+        },
+        {
+          "id": "error",
+          "title": "终止并报错",
+          "detail": "禁止带错误划分继续训练",
+          "kind": "output"
+        },
+        {
+          "id": "select",
+          "title": "按 mode 取记录",
+          "detail": "train、val 或两者合并",
+          "kind": "process"
+        },
+        {
+          "id": "paths",
+          "title": "校验所选文件路径",
+          "detail": "相对路径、根目录范围、文件存在",
+          "kind": "process"
+        },
+        {
+          "id": "out",
+          "title": "返回当前集合",
+          "detail": "可交给数据集建立索引",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "files",
+          "to": "root",
+          "label": "文件齐全"
+        },
+        {
+          "from": "root",
+          "to": "rows",
+          "label": "根目录相符"
+        },
+        {
+          "from": "rows",
+          "to": "groups",
+          "label": ""
+        },
+        {
+          "from": "groups",
+          "to": "error",
+          "label": "有"
+        },
+        {
+          "from": "groups",
+          "to": "pairs",
+          "label": "无"
+        },
+        {
+          "from": "pairs",
+          "to": "error",
+          "label": "有"
+        },
+        {
+          "from": "pairs",
+          "to": "select",
+          "label": "无"
+        },
+        {
+          "from": "select",
+          "to": "paths",
+          "label": ""
+        },
+        {
+          "from": "paths",
+          "to": "out",
+          "label": "全部通过"
+        }
+      ],
+      "caption": "任何格式错误、缺文件或不支持的模式也会抛异常。流程图展开显示的是主要隔离检查链路。"
+    }
   },
   {
     "path": "generate_group_split.py",
     "title": "分组划分生成：接近 10%，保持组完整",
-    "overview": "把每个包含 images/annotations 的父目录当作一个组，用子集和动态规划找出样本总数最接近目标的验证组，输出固定 JSONL 与带摘要的元数据。",
+    "overview": "这是在训练之前运行的固定划分生成脚本。它扫描所有合法图像—标注对，把同一个 images/annotations 父目录中的样本归为一组，然后选择若干完整目录组作为验证集，使验证样本数量尽量接近指定比例。脚本保存两份逐条清单和一份元数据，并立即调用读取器验证生成结果。之后训练重复读取同一清单，不必每次重新随机拆分。",
     "segments": [
       {
         "start": 1,
         "end": 48,
         "title": "choose_validation_groups：子集和动态规划",
         "principle": [
-          "目标是选若干完整目录组，使验证样本数接近 target。parents 的键是当前可达到的样本总数，值记录“之前的总数与新加入的组”，因此最后能反向还原选择。",
-          "先排序再用局部随机数生成器打乱组顺序，同一 seed 下选择可重复。每组只遍历更新前的状态快照，避免同一个组被重复使用。"
+          "这是子集和动态规划：如果已有若干组能凑出 8 张，而新组有 3 张，那么能新增一个“11 张可达”的状态。每个组只用一次，状态中保留前驱，才能从总数反推出组列表。",
+          "例如组大小为 4、7、9，目标为 10，可达候选包括 9 和 11，二者距离都为 1。这里 tie-break 优先不低于目标，所以选择 11 对应的 4+7。",
+          "cap=min(总数-1,target+最大组数) 使验证不能拿走全部样本，也限制搜索规模；状态数与可达样本数量有关，数据很大时仍可能耗时。"
         ],
         "syntax": [
-          "parents={0:None} 是初始空集合；list(parents) 拷贝键；sorted(...,reverse=True) 倒序遍历；new_sum not in parents 保留首条到达路径。",
-          "min 的 key=(绝对偏差,value<target,value) 按元组字典序比较：同样偏差时优先达到或略高于目标的数值。cursor,key=parent 沿父指针回溯。"
+          "random.Random(seed) 创建局部发生器，不改变 Python 全局 random 状态。",
+          "list(parents) 先快照已有键，避免边迭代边新增字典；reverse=True 按大到小尝试。",
+          "min(...,key=lambda value:(abs(value-target),value<target,value)) 按三项元组从左到右比较：先最小偏差，再优先达到/超过目标，最后优先较小总数。",
+          "cursor,key=parent 是二元组解包；while cursor 在回到 0 时结束。"
         ],
         "shapes": "dict[str,int] → set[str]",
-        "pitfall": "这是按样本数量近似 90/10，不是按组数严格 90/10，也不是标签分层抽样。空 group_sizes 在 max() 会先报错；主程序已检查总样本非空。",
-        "exercise": "组大小 4、5、9，target=6，可能选哪个最接近？",
-        "answer": "选 5，偏差 1；不能把大小 9 的目录切成 6 和 3。",
-        "diagram": "split"
+        "pitfall": "单一非空目录组无法同时满足训练验证均非空，会报错。相同种子、组大小与组名才保证同一结果；目录组并不等价于患者组。",
+        "summary": "在不拆目录组的前提下，找出样本总数最接近目标的验证组组合。",
+        "parameters": [
+          {
+            "name": "group_sizes",
+            "type": "dict[str,int]",
+            "default": "必填",
+            "meaning": "组名到该组样本数的映射，组必须非空。"
+          },
+          {
+            "name": "target",
+            "type": "int",
+            "default": "必填",
+            "meaning": "希望分配给验证集的样本数量。"
+          },
+          {
+            "name": "seed",
+            "type": "int",
+            "default": "必填",
+            "meaning": "局部随机发生器的种子，固定组遍历顺序。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "Pair",
+            "type": "类型别名 Tuple[str,str]",
+            "meaning": "图像与标注路径对的阅读提示，不创建实际样本。"
+          },
+          {
+            "name": "keys",
+            "type": "list[str]",
+            "meaning": "先排序，再由局部 Random(seed) 打乱的组名。"
+          },
+          {
+            "name": "max_group / cap",
+            "type": "int",
+            "meaning": "最大组大小及可达样本总数的搜索上界。"
+          },
+          {
+            "name": "parents",
+            "type": "dict[int,tuple[int,str] 或 None]",
+            "meaning": "键是已能凑出的样本总数，值记录前一个总数和新增组；0:None 是起点。"
+          },
+          {
+            "name": "key / size",
+            "type": "str / int",
+            "meaning": "当前尝试的组与样本数。"
+          },
+          {
+            "name": "current / new_sum",
+            "type": "int",
+            "meaning": "已有可达数量与加入当前组后的数量。"
+          },
+          {
+            "name": "candidates / best",
+            "type": "list[int] / int",
+            "meaning": "排除空集与全数据后的可达数量，以及最接近 target 的一个。"
+          },
+          {
+            "name": "selected",
+            "type": "set[str]",
+            "meaning": "最终验证组集合。"
+          },
+          {
+            "name": "cursor / parent",
+            "type": "int / tuple 或 None",
+            "meaning": "从 best 回溯到 0，恢复选了哪些组。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "准备组顺序与上界",
+            "detail": "L24–28：稳定排序后按种子打乱，cap 同时避免选走全部样本。"
+          },
+          {
+            "title": "构建可达总数",
+            "detail": "L29–35：逐组更新 parents，只记录每个总数第一次到达的路径。"
+          },
+          {
+            "title": "选择最接近目标的总数",
+            "detail": "L36–39：候选必须大于 0 且小于总样本数；按偏差和规则排序。"
+          },
+          {
+            "title": "回溯组组合",
+            "detail": "L40–48：沿 parents 链恢复每次加入的组。"
+          }
+        ],
+        "returns": [
+          "set[str]：应整体分配给验证集的组名。"
+        ],
+        "flow": {
+          "title": "目录组选择的动态规划",
+          "nodes": [
+            {
+              "id": "input",
+              "title": "组大小与目标样本数",
+              "detail": "先固定组的遍历顺序",
+              "kind": "input"
+            },
+            {
+              "id": "init",
+              "title": "初始化 parents={0:None}",
+              "detail": "0 表示不选任何组",
+              "kind": "process"
+            },
+            {
+              "id": "group",
+              "title": "还有未处理的组吗",
+              "detail": "每组只能选择一次",
+              "kind": "decision"
+            },
+            {
+              "id": "expand",
+              "title": "从已有状态加当前组大小",
+              "detail": "不超 cap 且新总数未出现则记录前驱",
+              "kind": "process"
+            },
+            {
+              "id": "best",
+              "title": "挑选最接近 target 的总数",
+              "detail": "排除 0 和全部样本",
+              "kind": "process"
+            },
+            {
+              "id": "back",
+              "title": "沿前驱回溯",
+              "detail": "恢复组成 best 的组名",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回验证组集合",
+              "detail": "其余组全部进入训练",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "input",
+              "to": "init",
+              "label": ""
+            },
+            {
+              "from": "init",
+              "to": "group",
+              "label": ""
+            },
+            {
+              "from": "group",
+              "to": "expand",
+              "label": "有"
+            },
+            {
+              "from": "expand",
+              "to": "group",
+              "label": "下一个组"
+            },
+            {
+              "from": "group",
+              "to": "best",
+              "label": "无"
+            },
+            {
+              "from": "best",
+              "to": "back",
+              "label": ""
+            },
+            {
+              "from": "back",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "parents 的键是样本总数，不是组号；记录前驱才能恢复实际选择。"
+        }
       },
       {
         "start": 51,
         "end": 62,
         "title": "write_jsonl 与 manifest_digest：可读清单和稳定摘要",
         "principle": [
-          "逐条输出 JSONL，避免汉字转成大量转义序列。digest 对排序后的 split/group/image/annotation 字段计算 SHA-256，用于标识这份划分清单的内容。"
+          "哈希不用于训练计算，而是帮助确认两次使用的划分内容是否相同。先规范顺序能避免仅因列表顺序变化就得到不同摘要。"
         ],
         "syntax": [
-          "ensure_ascii=False 保留中文；sort_keys=True 让每条记录键顺序稳定；\"\n\" 连接记录，\"\t\" 分隔字段；encode(\"utf-8\") 把文本变成哈希函数要求的 bytes。"
+          "ensure_ascii=False 保留可读中文；sort_keys=True 使 JSON 字段顺序稳定。",
+          "\"\n\" 是换行字符，\"\t\" 是制表符；join 在元素之间插入分隔符。",
+          "hashlib.sha256 接收 bytes，因此需 encode(\"utf-8\")；hexdigest 返回文本表示。"
         ],
         "shapes": "records → JSONL 文件；digest → 64 个十六进制字符",
-        "pitfall": "摘要只覆盖路径、组和 split，不覆盖图像像素或标注文件内容；换了同一路径内的图片，清单摘要可以不变。",
-        "exercise": "为什么先排序再计算摘要？",
-        "answer": "相同记录仅顺序改变时，摘要仍然一致；能聚焦划分内容差异。",
-        "diagram": "split"
+        "pitfall": "读取清单的 split_manifest.py 当前没有自动核对这个摘要；meta 中记录 SHA256 不等于运行时已经做完整性验证。",
+        "summary": "将清单写成可读的 JSONL，并为同一组记录计算稳定摘要。",
+        "parameters": [
+          {
+            "name": "path",
+            "type": "Path",
+            "default": "write_jsonl 必填",
+            "meaning": "输出文件路径。"
+          },
+          {
+            "name": "records",
+            "type": "Iterable[dict]",
+            "default": "write_jsonl 必填",
+            "meaning": "逐条待写入记录，可为列表或其他可迭代对象。"
+          },
+          {
+            "name": "records",
+            "type": "Sequence[dict]",
+            "default": "manifest_digest 必填",
+            "meaning": "包含 split、group、image、annotation 的记录序列。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "handle",
+            "type": "文本文件对象",
+            "meaning": "UTF-8 写入，w 模式会覆盖该目标文件。"
+          },
+          {
+            "name": "record / item",
+            "type": "dict",
+            "meaning": "当前写入或排序的记录。"
+          },
+          {
+            "name": "payload",
+            "type": "str",
+            "meaning": "按 split、image 排序后，四个字段用制表符连接，记录用换行连接的稳定文本。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "写 JSONL",
+            "detail": "L51–54：逐条 json.dumps 后补真实换行。"
+          },
+          {
+            "title": "规范记录顺序",
+            "detail": "L57–61：按集合名与图像路径排序，再构造摘要文本。"
+          },
+          {
+            "title": "求摘要",
+            "detail": "L62：UTF-8 编码后计算 SHA256，返回十六进制字符串。"
+          }
+        ],
+        "returns": [
+          "write_jsonl 返回 None，副作用是写入文件；manifest_digest 返回 64 字符的 SHA256 字符串。"
+        ]
       },
       {
         "start": 65,
         "end": 98,
         "title": "main 前半：参数校验、扫描、定义组",
         "principle": [
-          "要求验证比例在 0 与 1 之间，默认 0.1。已有非空输出目录默认拒绝覆盖，防止一次新扫描悄悄改变后续实验的固定验证集。",
-          "image.parent.parent 将 images 目录再向上一级，作为采集目录组。目标验证数量 round(N×ratio)，然后交给动态规划选完整组。"
+          "组定义直接决定“独立验证”的范围。这里同目录的相邻帧不会被拆开，但同一患者如果出现在不同目录，代码仍可能将其分到不同集合。",
+          "--force 只是允许覆盖输出目录里的三个同名文件，不会清空整个目录。"
         ],
         "syntax": [
-          "argparse 的 required=True 要求用户提供；action=\"store_true\" 使 --force 成为布尔开关。defaultdict(list) 访问新 group 时自动建空列表。",
-          "Path.resolve() 得规范路径；os.path.relpath 记录相对根的组名；{group:len(items) ...} 构建组大小字典。"
+          "argparse 的 required=True 要求命令行提供值；action=\"store_true\" 表示出现 --force 时为 True。",
+          "defaultdict(list) 在首次访问新组时自动创建空列表。",
+          "Path.parent.parent 向上取两级：图片文件→images 目录→组目录。",
+          "if __name__==\"__main__\" 在文件尾部保证只有直接运行脚本时调用 main，导入时不自动生成清单。"
         ],
         "shapes": "全部配对 → dict[组名,list[Pair]]",
-        "pitfall": "按目录独立并不自动证明按患者独立；同一患者若分散在不同组仍可能泄漏。--force 会覆盖旧固定清单，应把旧清单随实验保存。",
-        "exercise": "本项目 group 是患者 ID 吗？",
-        "answer": "代码只定义为包含 images/annotations 的父目录；只有数据组织保证一人一组时才能这样解释。",
-        "diagram": "split"
+        "pitfall": "样本发现阶段只做标签名检查，坏坐标可能在训练解析时才暴露。完整组约束意味着最终 val 数量不一定恰好等于 target。",
+        "summary": "读取命令行配置，扫描样本并按采集目录建立分组。",
+        "parameters": [
+          {
+            "name": "--data-root",
+            "type": "str",
+            "default": "必填",
+            "meaning": "含 images/annotations 子目录的数据根目录。"
+          },
+          {
+            "name": "--output-dir",
+            "type": "str",
+            "default": "必填",
+            "meaning": "输出三份清单文件的目录。"
+          },
+          {
+            "name": "--name",
+            "type": "str",
+            "default": "必填",
+            "meaning": "写入元数据的划分名称，便于实验追踪。"
+          },
+          {
+            "name": "--val-ratio",
+            "type": "float",
+            "default": "0.1",
+            "meaning": "希望留给验证的样本比例，必须严格位于 0 和 1 之间。"
+          },
+          {
+            "name": "--seed",
+            "type": "int",
+            "default": "20260925",
+            "meaning": "用于验证组选择的局部随机种子。"
+          },
+          {
+            "name": "--force",
+            "type": "bool 开关",
+            "default": "False",
+            "meaning": "允许输出目录非空时继续写入；会覆盖同名清单文件。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "parser / args",
+            "type": "ArgumentParser / Namespace",
+            "meaning": "声明命令行规则并保存解析后的值。"
+          },
+          {
+            "name": "root / output",
+            "type": "Path",
+            "meaning": "规范化后的数据根目录与输出目录。"
+          },
+          {
+            "name": "pairs",
+            "type": "list[Pair]",
+            "meaning": "按图像路径排序的全部候选样本。"
+          },
+          {
+            "name": "grouped",
+            "type": "defaultdict[str,list[Pair]]",
+            "meaning": "每个目录组包含哪些路径对。"
+          },
+          {
+            "name": "image / annotation",
+            "type": "Path",
+            "meaning": "当前图像与标注的真实路径。"
+          },
+          {
+            "name": "group_path / group",
+            "type": "Path / str",
+            "meaning": "image.parent.parent 得到 images 的父目录，再转为相对组名。"
+          },
+          {
+            "name": "target",
+            "type": "int",
+            "meaning": "max(1,round(样本数×验证比例))，至少要求一个验证样本。"
+          },
+          {
+            "name": "val_groups",
+            "type": "set[str]",
+            "meaning": "动态规划选出的验证组。"
+          },
+          {
+            "name": "image_path / annotation_path",
+            "type": "str",
+            "meaning": "从扫描所得 pairs 中解包的图像、标注路径，随后转 Path 并归入同一目录组。"
+          },
+          {
+            "name": "items",
+            "type": "list[Pair]",
+            "meaning": "生成 {组名:样本数} 字典时，grouped.items() 当前组内的路径对列表；len(items) 是该组大小。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "解析并校验参数",
+            "detail": "L66–76：定义六个参数并检查验证比例。"
+          },
+          {
+            "title": "保护输出目录",
+            "detail": "L78–82：非空目录且无 force 时拒绝覆盖，必要时创建父目录。"
+          },
+          {
+            "title": "扫描有效样本",
+            "detail": "L84–86：调用发现函数并排序，空数据集直接报错。"
+          },
+          {
+            "title": "按目录分组",
+            "detail": "L88–94：以包含 images/annotations 的父目录为组。"
+          },
+          {
+            "title": "确定验证目标",
+            "detail": "L96–98：计算目标样本数，把每组大小交给动态规划函数。"
+          }
+        ],
+        "returns": [
+          "grouped、val_groups、root、output 与 args，供后半段写清单。"
+        ]
       },
       {
         "start": 100,
         "end": 144,
         "title": "main 后半：分配、落盘、回读验证",
         "principle": [
-          "每个组整体选 train 或 val，保存相对图像路径、相对标注路径和 group。meta 记录实际数量、实际比例、随机种子、根目录与摘要，为实验追溯提供依据。",
-          "写完后立即用正式加载器回读 train 和 val，复用组重叠、文件身份和存在性检查；验证通过才打印成功信息。"
+          "同组全部使用同一 split，确保后续任何新增视野都从同一源集合生成。实际比例按 val_records 数量除以总样本数计算，不能用验证组数比例替代。",
+          "生成后立即用训练实际使用的读取器验证，能在训练启动前发现路径错误或组重叠。"
         ],
         "syntax": [
-          "destination 是 train_records 或 val_records 的列表引用，append 会修改原列表；with path.open(...,encoding=\"utf-8\") 确保文件正确关闭。",
-          "datetime.now(timezone.utc).isoformat() 写 UTC 时间；__name__==\"__main__\" 保证脚本直接执行才运行 main，import 时不启动。"
+          "destination 是 train_records 或 val_records 的引用，append 会修改对应原列表。",
+          "datetime.now(timezone.utc).isoformat() 保存带时区的生成时间；与本机显示时区无关。",
+          "json.dump(...,indent=2,sort_keys=True) 输出可读、字段顺序稳定的元数据。"
         ],
         "shapes": "train.jsonl + val.jsonl + meta.json",
-        "pitfall": "回读检查不等于检查患者独立或图像内容去重。当前 grouped_v2 清单有 13643 对，训练 12279、验证 1364，组数 50/6。",
-        "exercise": "为什么要记录 actual_val_ratio？",
-        "answer": "组不能拆开，实际比例可能偏离要求；报告应使用真正的样本数量与比例。",
-        "diagram": "split"
+        "pitfall": "回读检查不核对图像内容重复或患者身份；overlap=0 指当前检查定义下的组和路径对交集为零。",
+        "summary": "按组选出的集合生成记录，写入元数据，并回读校验。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "train_records / val_records",
+            "type": "list[dict]",
+            "meaning": "分别保存训练、验证记录，每条含 split/group/image/annotation。"
+          },
+          {
+            "name": "split / destination",
+            "type": "str / list[dict]",
+            "meaning": "当前组所属集合与应追加到的列表。"
+          },
+          {
+            "name": "all_records",
+            "type": "list[dict]",
+            "meaning": "合并清单，用于计算整体摘要。"
+          },
+          {
+            "name": "meta",
+            "type": "dict",
+            "meaning": "记录名字、UTC 时间、根目录、种子、目标/实际比例、样本数、组数、组定义、SHA256。"
+          },
+          {
+            "name": "loaded_train / loaded_val",
+            "type": "list[Pair]",
+            "meaning": "回读验证后得到的两组文件对。"
+          },
+          {
+            "name": "image_path / annotation_path",
+            "type": "str",
+            "meaning": "当前组内按路径排序后的一对源文件名，写记录前转换为相对于 root 的路径。"
+          },
+          {
+            "name": "handle",
+            "type": "文本文件对象",
+            "meaning": "以 UTF-8 写入 meta.json 的文件句柄，由 json.dump 输出格式化元数据。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "生成逐条记录",
+            "detail": "L100–111：组按名称排序，组内样本按路径排序，保持整体可复现。"
+          },
+          {
+            "title": "写入两份 JSONL",
+            "detail": "L113–115：图像和标注路径都相对 root 保存。"
+          },
+          {
+            "title": "记录划分证据",
+            "detail": "L116–136：写 meta，包括 requested_val_ratio 与 actual_val_ratio 的区别。"
+          },
+          {
+            "title": "回读检查",
+            "detail": "L138–141：调用正式读取器两次，核验生成的清单可正常使用。"
+          },
+          {
+            "title": "直接运行入口",
+            "detail": "L144：当作为脚本运行时执行 main。"
+          }
+        ],
+        "returns": [
+          "磁盘上的 train.jsonl、val.jsonl、meta.json；终端打印元数据与校验后的样本数。"
+        ]
       }
-    ]
+    ],
+    "role": "训练前的辅助工具：生成可复现、按目录组隔离的清单",
+    "inputs": [
+      "命令行数据根目录、输出目录、划分名字、验证比例、随机种子与覆盖开关。"
+    ],
+    "outputs": [
+      "train.jsonl、val.jsonl、meta.json；打印实际比例、组数与校验结果。"
+    ],
+    "readingGuide": [
+      "先看 main 如何定义 group，再看 choose_validation_groups 的子集和选择；“90/10”是目标比例，完整组不可拆，实际比例可以略有偏差。",
+      "划分发生在 LineDataset 的 unify 视野扩充之前，因此同源原图版和裁剪版会留在同一个集合。",
+      "随机种子只用于固定组的尝试顺序；选择目标是样本数接近比例，而不是简单抽取 10% 的组数。"
+    ],
+    "components": [
+      {
+        "name": "choose_validation_groups",
+        "kind": "函数",
+        "summary": "用可达样本总数的动态规划选择完整验证组。",
+        "segmentStart": 1
+      },
+      {
+        "name": "write_jsonl",
+        "kind": "函数",
+        "summary": "按一行一条 JSON 的形式写入记录。",
+        "segmentStart": 51
+      },
+      {
+        "name": "manifest_digest",
+        "kind": "函数",
+        "summary": "按稳定顺序串联记录并计算 SHA256。",
+        "segmentStart": 51
+      },
+      {
+        "name": "main",
+        "kind": "入口函数",
+        "summary": "解析参数、扫描分组、选择验证组、写文件并回读验证。",
+        "segmentStart": 65
+      }
+    ],
+    "pipeline": {
+      "title": "固定划分生成流程",
+      "nodes": [
+        {
+          "id": "0",
+          "title": "命令行与根目录",
+          "detail": "检查比例和输出目录",
+          "kind": "input"
+        },
+        {
+          "id": "1",
+          "title": "扫描合法样本",
+          "detail": "同名图像/JSON 且目标标签齐全",
+          "kind": "process"
+        },
+        {
+          "id": "2",
+          "title": "按父目录分组",
+          "detail": "一个组不得拆到两个集合",
+          "kind": "process"
+        },
+        {
+          "id": "3",
+          "title": "选验证组",
+          "detail": "样本数尽量接近总数×比例",
+          "kind": "process"
+        },
+        {
+          "id": "4",
+          "title": "生成三份文件",
+          "detail": "训练清单、验证清单、元数据",
+          "kind": "process"
+        },
+        {
+          "id": "5",
+          "title": "回读验证",
+          "detail": "检查组和路径对交集",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "0",
+          "to": "1",
+          "label": ""
+        },
+        {
+          "from": "1",
+          "to": "2",
+          "label": ""
+        },
+        {
+          "from": "2",
+          "to": "3",
+          "label": ""
+        },
+        {
+          "from": "3",
+          "to": "4",
+          "label": ""
+        },
+        {
+          "from": "4",
+          "to": "5",
+          "label": ""
+        }
+      ],
+      "caption": "动态规划选择的是若干组的样本数量之和；完整目录组是最小划分单位。"
+    }
   },
   {
     "path": "LineDet/dataset/dataset_utils.py",
     "title": "联合增强与数据侧高斯热图",
-    "overview": "几何增强必须一起改变图像、边界坐标和有效掩码；热图则把一个确定的边界高度变成周围逐渐衰减的连续监督信号。这里也有若干变量名与实际行为不一致的实现细节。",
+    "overview": "这个文件承担两个不同职责。JointAugment 在图像已经变为张量后做翻转、侧边遮挡和纵向移动，并尝试同步修改边界坐标；generate_heatmap_targets 则把每列的边界高度展开为沿高度方向的高斯响应。它输出的数据集热图未逐列归一化，与 loss.py 内部重新生成的训练目标并非同一份数值。",
     "segments": [
       {
         "start": 1,
         "end": 20,
         "title": "JointAugment 的参数与水平翻转",
         "principle": [
-          "翻转改变的是横向列顺序，纵向 y 数值本身不应取反。图像、y、valid 同时反转各自的宽度轴，保持每列对应。",
-          "p_flip=0.5 表示每次调用独立抛一次概率事件。out_size、p_resize_crop、p_vertical_distort 虽保存在对象里，但当前 __call__ 没有使用它们。"
+          "水平翻转改变列的排列，不改变同一位置的纵坐标值。因此图像列反转时，坐标数组和 valid 也只反转列；无需做 H-1-y。"
         ],
         "syntax": [
-          "__call__ 让实例能像函数调用：augment(img,y,valid)。torch.flip(...,dims=[2]) 翻图像的 W 维，[1] 翻标签的 W 维。",
-          "random.random() 返回 [0,1) 浮点数；与概率比较决定执行分支。"
+          "实现 __call__ 后实例可像函数一样写 augment(img,y,valid)。",
+          "torch.flip(img,dims=[2]) 反转 [C,H,W] 的宽度轴；[L,W] 的宽度轴是 1，因此另外两个 flip 的 dim 不同。"
         ],
         "shapes": "img [1,H,W]；y/valid [L,W]，翻转后尺寸不变",
-        "pitfall": "不要对 y 做 H−1−y；那是纵向翻转的坐标变换，当前只左右翻。",
-        "exercise": "y=[10,12,15] 左右翻转后是多少？",
-        "answer": "[15,12,10]；valid 同样反序。",
-        "diagram": "geometry"
+        "pitfall": "保存一个参数不等于它生效；阅读可配置项时要继续检查 self.xxx 有没有出现在执行分支中。",
+        "summary": "保存联合增强配置，并在水平翻转时同步翻转图像与标签列。",
+        "parameters": [
+          {
+            "name": "self",
+            "type": "JointAugment 实例",
+            "default": "自动传入",
+            "meaning": "保存随机增强配置。"
+          },
+          {
+            "name": "out_size",
+            "type": "tuple[int,int]",
+            "default": "(256,256)",
+            "meaning": "保存但未在 __call__ 中使用，不会自动调整输出大小。"
+          },
+          {
+            "name": "p_flip",
+            "type": "float",
+            "default": "0.5",
+            "meaning": "水平翻转的触发概率。"
+          },
+          {
+            "name": "p_erase",
+            "type": "float",
+            "default": "0.2",
+            "meaning": "左右侧遮挡的触发概率。"
+          },
+          {
+            "name": "p_resize_crop",
+            "type": "float",
+            "default": "0.1",
+            "meaning": "保存但未使用。"
+          },
+          {
+            "name": "p_vertical_distort",
+            "type": "float",
+            "default": "0.15",
+            "meaning": "保存但未使用，纵移使用代码中硬编码的 0.2。"
+          },
+          {
+            "name": "img",
+            "type": "Tensor [C,H,W]",
+            "default": "__call__ 必填",
+            "meaning": "已转换并标准化的图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [L,W]",
+            "default": "__call__ 必填",
+            "meaning": "对应边界纵坐标。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [L,W]",
+            "default": "__call__ 必填",
+            "meaning": "对应有效列。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "self.p_flip / self.p_erase",
+            "type": "float",
+            "meaning": "后面真正参与随机判断的两个属性。"
+          },
+          {
+            "name": "self.out_size / self.p_resize_crop / self.p_vertical_distort",
+            "type": "配置值",
+            "meaning": "未参与实际计算。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "保存配置",
+            "detail": "L8–14：所有形参写为实例属性。"
+          },
+          {
+            "title": "掷一次翻转随机数",
+            "detail": "L16–17：小于 p_flip 才执行。"
+          },
+          {
+            "title": "同步反转列",
+            "detail": "L18–20：图像沿 dim=2，坐标和掩码沿 dim=1 翻转。"
+          }
+        ],
+        "returns": [
+          "进入后续分支的 img、y_px、valid；完整 __call__ 最后返回三者。"
+        ]
       },
       {
         "start": 22,
         "end": 31,
         "title": "随机边缘遮挡：不仅图变，标签也改了",
         "principle": [
-          "以 p_erase=0.2 随机选一侧，遮住最多四分之一宽度。遮住部分的 y 直接延伸为邻接边界列的值，相当于强迫隐藏区为水平线；它并没有保持原曲线作为遮挡监督。"
+          "被遮挡区域不再有清晰图像证据，代码选择把标签延续成一条水平线。它没有把这些列设为无效，因此这些合成标签仍可能参与监督。",
+          "输入已经做 z-score，填数值 0 表示原标准化均值位置，不一定是视觉上的纯黑。"
         ],
         "syntax": [
-          "random.randint(0,w//4) 两端都可取；[:,None] 把 [L] 扩为 [L,1]，广播到被遮挡的多列；切片赋值是原地修改。",
-          "图像已做 z-score，此时置 0 表示标准化后的均值强度，不是原始灰度意义上的黑色。"
+          "img[:,:, :erase_width] 选择全部通道、全部行、左侧列。",
+          "y_px[:,erase_width][:,None] 将 [L] 变成 [L,1]，赋值时广播到多列。",
+          "负切片从数组尾部定位；-erase_width-1 表示遮挡区左侧的一列。"
         ],
         "shapes": "遮挡片段 image[:, :, x段]；y[:,x段]",
-        "pitfall": "严重边界情况：右侧 erase_width=0 时，-0 等于 0，img[:,:,-0:] 实际选中整幅图，y[:,-0:] 也变成全宽常量。valid 从未随遮挡或替换标签修改。",
-        "exercise": "手写最小修复，避免 0 宽度右侧切片。",
-        "answer": "在左右分支前加 if erase_width > 0:；是否改写 y 与 valid 还需先明确遮挡增强的监督设计。",
-        "diagram": "geometry"
+        "pitfall": "erase_width 可能为 0。左侧 :0 是空切片，但右侧 -0: 等于 0:，会选中整张图，导致整图置零且整条标签被最后一列填平。",
+        "summary": "遮挡图像左侧或右侧，并把被遮挡区域的标签改为邻近列的高度。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "h / w",
+            "type": "int",
+            "meaning": "图像高度与宽度，只用 w 决定遮挡宽度。"
+          },
+          {
+            "name": "erase_width",
+            "type": "int",
+            "meaning": "从 0 到 w//4 随机选择，randint 包含两端。"
+          },
+          {
+            "name": "side",
+            "type": "str",
+            "meaning": "left 或 right。"
+          },
+          {
+            "name": "y_px[:,erase_width] / y_px[:,-erase_width-1]",
+            "type": "Tensor [L]",
+            "meaning": "用作遮挡区域高度的邻接列。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "触发遮挡",
+            "detail": "L22–25：随机决定是否执行、宽度与左右侧。"
+          },
+          {
+            "title": "左侧分支",
+            "detail": "L26–28：图像左侧置零，标签用遮挡右邻列高度填平。"
+          },
+          {
+            "title": "右侧分支",
+            "detail": "L29–31：图像右侧置零，标签用左邻列高度填平。"
+          }
+        ],
+        "returns": [
+          "局部被修改的 img 与 y_px；valid 保持原样。"
+        ]
       },
       {
         "start": 33,
         "end": 61,
         "title": "纵向平移：追踪 roll 的方向与填充位置",
         "principle": [
-          "第一分支向上平移 shift：roll 的负位移把内容上移，同时底部被卷回来的内容清零，标签减去 shift。上移幅度由最浅标签限制，预留 3 像素。",
-          "else 内根据 max_shift_down 计算的分支名字像向下，但实际仍使用 shifts=-shift、y−shift，却清空顶部。它会留下底部环绕内容并清掉正常顶部内容。"
+          "torch.roll 是循环移动：上面移出去的行会从底部绕回来，所以正常上移后应清空底部回卷区域。第一个分支这样处理。",
+          "第二分支虽然变量叫 max_shift_down，却仍向上移动，且清空顶部而不是底部，图像回卷内容与标签可能不一致。应该按实际语句理解，不能把变量名当成正确几何说明。"
         ],
         "syntax": [
-          "torch.roll 会循环移动，不会自动补零；必须清除正确的边缘。img.shape[1] 是 H；clamp(min=0) 把负坐标截到零。",
-          "第二分支发生概率是前一次不满足 0.2 再满足 0.2，即 0.8×0.2=0.16，且还受 shift_max 条件限制。"
+          "min(dim=1).values 取得每条线最小值；.item() 把单元素张量取为 Python 数。",
+          "roll(img,shifts=-shift,dims=1) 沿高度向较小行号移动；clamp(min=0) 防止标签变成负数。",
+          "else 属于第一个随机条件，即使进入第一分支却因 max_shift<1 没移动，也不会执行第二分支。"
         ],
         "shapes": "图像与标签尺寸不变",
-        "pitfall": "min/max 计算未使用 valid；无效列的占位 y 可能阻止位移或干扰限幅。若意图下移，应 roll(+shift)、顶端清零、y+shift，并同步有效性。",
-        "exercise": "上移 5 像素时应清图像哪一边？",
-        "answer": "清最后 5 行，因为 roll 把原顶部内容环绕到了底部。",
-        "diagram": "geometry"
+        "pitfall": "两支均未使用 valid 过滤最小/最大值；无效占位 0 可能使上移被禁用。第二支有移动方向与补零区域不匹配问题，valid 也没有同步更新。",
+        "summary": "随机在高度方向移动内容，并检查两个分支真实的移动方向。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "min_per_line / min_all",
+            "type": "Tensor [L] / float",
+            "meaning": "各条线和全部线的最小高度，用于第一个分支限制上移量。"
+          },
+          {
+            "name": "max_shift_allowed / max_shift",
+            "type": "int",
+            "meaning": "最小高度减 3 后与 0 取大，保留顶部余量。"
+          },
+          {
+            "name": "shift",
+            "type": "int",
+            "meaning": "随机纵向位移像素数。"
+          },
+          {
+            "name": "H / max_y",
+            "type": "int / float",
+            "meaning": "图像高与所有标签最大高度。"
+          },
+          {
+            "name": "max_shift_down",
+            "type": "int",
+            "meaning": "H-max_y-1，按“下方剩余空间”算出的限制。"
+          },
+          {
+            "name": "shift_min / shift_max",
+            "type": "int",
+            "meaning": "第二分支名义位移范围 5..min(30,剩余空间)。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "第一分支概率",
+            "detail": "L33–37：以 0.2 概率进入，按最小标签高度计算可上移量。"
+          },
+          {
+            "title": "执行上移",
+            "detail": "L39–44：roll 的 shifts=-shift，底部补零，坐标减 shift 并夹到非负。"
+          },
+          {
+            "title": "第二分支概率",
+            "detail": "L45–53：只有第一分支没进入时，再以 0.2 概率尝试，故入口概率约 0.16。"
+          },
+          {
+            "title": "核对实际方向",
+            "detail": "L55–59：仍用负 shift 和 y-shift，但补零位置变成顶部。"
+          },
+          {
+            "title": "返回",
+            "detail": "L61：返回图像、坐标、原 valid。"
+          }
+        ],
+        "returns": [
+          "img、y_px、valid 三元组。"
+        ],
+        "flow": {
+          "title": "纵移分支的真实执行",
+          "nodes": [
+            {
+              "id": "coin",
+              "title": "随机数 <0.2？",
+              "detail": "第一分支入口",
+              "kind": "decision"
+            },
+            {
+              "id": "up",
+              "title": "按最小高度算上移量",
+              "detail": "至少要允许移动 1 行",
+              "kind": "process"
+            },
+            {
+              "id": "updo",
+              "title": "向上 roll，底部补零",
+              "detail": "坐标减 shift",
+              "kind": "process"
+            },
+            {
+              "id": "coin2",
+              "title": "另一次随机数 <0.2？",
+              "detail": "仅第一入口失败才尝试",
+              "kind": "decision"
+            },
+            {
+              "id": "limit",
+              "title": "按底部空间计算范围",
+              "detail": "5 到 min(30,剩余空间)",
+              "kind": "process"
+            },
+            {
+              "id": "bug",
+              "title": "仍向上 roll，顶部补零",
+              "detail": "方向与变量命名不一致",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回增强结果",
+              "detail": "valid 未改变",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "coin",
+              "to": "up",
+              "label": "是"
+            },
+            {
+              "from": "up",
+              "to": "updo",
+              "label": "允许移动"
+            },
+            {
+              "from": "up",
+              "to": "out",
+              "label": "空间不足"
+            },
+            {
+              "from": "updo",
+              "to": "out",
+              "label": ""
+            },
+            {
+              "from": "coin",
+              "to": "coin2",
+              "label": "否"
+            },
+            {
+              "from": "coin2",
+              "to": "limit",
+              "label": "是"
+            },
+            {
+              "from": "coin2",
+              "to": "out",
+              "label": "否"
+            },
+            {
+              "from": "limit",
+              "to": "bug",
+              "label": "范围有效"
+            },
+            {
+              "from": "limit",
+              "to": "out",
+              "label": "空间不足"
+            },
+            {
+              "from": "bug",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "该图描述当前实现，不将注释中的“向下”当作已实现行为。"
+        }
       },
       {
         "start": 64,
         "end": 91,
         "title": "generate_heatmap_targets：逐列高斯监督",
         "principle": [
-          "对有效列，在真实 y 中心构造 G(h,x)=exp(−(h−y(x))²/(2σ²))。离边界越远值越小；sigma 决定纵向容忍带宽。这不是二维点高斯，因为每列都有自己的中心。",
-          "无效线/无效列保持全零。高斯峰值接近 1，但没有沿高度归一化为总和 1，因此它是强度目标，不是完整概率分布。"
+          "坐标只回答“边界中心在哪一行”，热图目标进一步给附近行较高值、远处较低值。标签可为小数，因此称软目标；高斯决定它怎样随距离衰减。",
+          "例如 center_y=43.5，43 和 44 行距离都是 0.5，因此得到相同数值；不需要先把标签取整。",
+          "这份函数没有除以每列总和。loss.py 调用 model.py 的 generate_gaussian_heatmap 时会逐列归一化，所以不能把这两个函数的数值混同。"
         ],
         "syntax": [
-          "torch.zeros(L,H,W) 初始化；arange(H).float().unsqueeze(1) 得 [H,1] 高度坐标。valid.dim()==1 支持整条线有效性；dim()==2 支持逐列有效性。",
-          "y_px.dim()==1 时每条线只有一个固定 y；常规路径是 [L,W]。item() 把单元素 Tensor 取成 Python 数值；x_coords 被创建但没有使用。"
+          "torch.arange(H).float().unsqueeze(1) 将行号变成浮点 [H,1]；y_coords[:,0] 再取回 [H] 参与计算。",
+          "torch.exp 是逐元素指数；sigma 出现在分母 2*sigma² 中，越大分布越宽，不是“超过 sigma 距离就全部为零”。",
+          "heatmaps[line_idx,:,x]=gaussian 将一维高斯写入指定线、指定列的所有高度。",
+          "当前代码有 Python 两层循环，复杂度约 L×W×H；批量广播版本在模型文件中。"
         ],
         "shapes": "y [L,W] + valid [L,W] → heatmaps [L,H,W]",
-        "pitfall": "双层 Python 循环每个列生成一次高斯，效率低于广播；当前训练损失不直接使用这份目标。sigma 应为正，函数未显式检查。",
-        "exercise": "中心 y=10，sigma=2，高度 h=12 的目标值是多少？",
-        "answer": "exp(−4/8)=exp(−0.5)≈0.607。",
-        "diagram": "heatmap"
+        "pitfall": "默认在 CPU 创建张量，适合当前数据集阶段；若直接传入 CUDA 坐标，.item() 会触发设备同步。sigma 未校验正值。此函数的热图目前没有直接参与默认训练复合损失。",
+        "summary": "将每列边界高度变为沿高度分布的高斯软标签，但不做归一化。",
+        "parameters": [
+          {
+            "name": "y_px",
+            "type": "Tensor [L,W]，兼容 [L]",
+            "default": "必填",
+            "meaning": "每列边界中心高度；一维时每条线在所有列使用同一个高度。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [L,W]，兼容 [L]",
+            "default": "必填",
+            "meaning": "二维时逐列有效，一维时整条线有效或无效。"
+          },
+          {
+            "name": "image_height",
+            "type": "int",
+            "default": "必填",
+            "meaning": "热图行数 H。"
+          },
+          {
+            "name": "image_width",
+            "type": "int",
+            "default": "必填",
+            "meaning": "热图列数 W。"
+          },
+          {
+            "name": "sigma",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "高斯宽度，单位是像素行；应为正数。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "num_lines",
+            "type": "int",
+            "meaning": "len(y_px)，即边界数量 L。"
+          },
+          {
+            "name": "heatmaps",
+            "type": "Tensor [L,H,W]",
+            "meaning": "初始化为 0，默认创建在 CPU 上。"
+          },
+          {
+            "name": "y_coords",
+            "type": "float Tensor [H,1]",
+            "meaning": "从 0 到 H-1 的整数行号。"
+          },
+          {
+            "name": "x_coords",
+            "type": "float Tensor [1,W]",
+            "meaning": "构造后没有使用。"
+          },
+          {
+            "name": "line_idx / x",
+            "type": "int",
+            "meaning": "当前边界索引与列号。"
+          },
+          {
+            "name": "center_y",
+            "type": "float",
+            "meaning": "当前有效列的浮点中心高度。"
+          },
+          {
+            "name": "gaussian",
+            "type": "Tensor [H]",
+            "meaning": "exp(-(行号-center_y)^2/(2*sigma^2))。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "创建空热图与行号",
+            "detail": "L65–69：所有无效位置默认保持 0。"
+          },
+          {
+            "title": "跳过无效整条线",
+            "detail": "L71–77：一维掩码直接判断线，二维掩码先检查是否存在有效列。"
+          },
+          {
+            "title": "逐列判断",
+            "detail": "L79–81：二维掩码为 False 的列不生成标签。"
+          },
+          {
+            "title": "取中心并生成高斯",
+            "detail": "L83–89：不取整 center_y，给每一整数行计算一个连续数值。"
+          },
+          {
+            "title": "返回",
+            "detail": "L91：得到数据集附带的热图。"
+          }
+        ],
+        "returns": [
+          "Tensor [L,H,W]；有效列包含高斯值，无效列全零。"
+        ]
       }
-    ]
+    ],
+    "role": "主训练使用：常规联合增强；同时生成数据集附带热图",
+    "inputs": [
+      "img=[1,H,W] 浮点张量、y_px=[L,W] 浮点坐标、valid=[L,W] 布尔掩码。",
+      "增强概率与生成热图的高宽、sigma。"
+    ],
+    "outputs": [
+      "JointAugment 返回更新后的图像、坐标、掩码；generate_heatmap_targets 返回 [L,H,W] 热图。"
+    ],
+    "readingGuide": [
+      "翻转的图像和标签列是同步的；遮挡和纵移分支没有更新 valid，且第二个纵移分支的注释意图与代码方向不一致。",
+      "out_size、p_resize_crop、p_vertical_distort 只是存成属性，没有对应执行逻辑。",
+      "函数名同样包含 heatmap 不代表数值协议相同：这里高斯峰值可为 1，模型文件中的训练目标还会按列归一化。"
+    ],
+    "components": [
+      {
+        "name": "JointAugment.__init__",
+        "kind": "构造方法",
+        "summary": "保存概率参数，但实际只有 p_flip、p_erase 被后续使用。",
+        "segmentStart": 1
+      },
+      {
+        "name": "JointAugment.__call__",
+        "kind": "可调用方法",
+        "summary": "依次尝试水平翻转、侧边遮挡和纵向移动。",
+        "segmentStart": 1
+      },
+      {
+        "name": "generate_heatmap_targets",
+        "kind": "函数",
+        "summary": "对有效列按浮点边界中心生成未归一化高斯响应。",
+        "segmentStart": 64
+      }
+    ],
+    "pipeline": {
+      "title": "联合增强与热图生成",
+      "nodes": [
+        {
+          "id": "in",
+          "title": "标准化图像和坐标",
+          "detail": "还包含逐列有效掩码",
+          "kind": "input"
+        },
+        {
+          "id": "flip",
+          "title": "随机水平翻转",
+          "detail": "图像、坐标、掩码同时反转列",
+          "kind": "process"
+        },
+        {
+          "id": "erase",
+          "title": "随机侧边遮挡",
+          "detail": "置零图像并用邻列高度填标签",
+          "kind": "process"
+        },
+        {
+          "id": "move",
+          "title": "随机纵向移动",
+          "detail": "roll 图像、补零、平移高度",
+          "kind": "process"
+        },
+        {
+          "id": "out",
+          "title": "返回三元组",
+          "detail": "部分分支未同步更新 valid",
+          "kind": "output"
+        },
+        {
+          "id": "heat",
+          "title": "逐有效列生成高斯",
+          "detail": "输出 [L,H,W]，不按列归一化",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "in",
+          "to": "flip",
+          "label": ""
+        },
+        {
+          "from": "flip",
+          "to": "erase",
+          "label": ""
+        },
+        {
+          "from": "erase",
+          "to": "move",
+          "label": ""
+        },
+        {
+          "from": "move",
+          "to": "out",
+          "label": ""
+        },
+        {
+          "from": "out",
+          "to": "heat",
+          "label": "数据集随后调用"
+        }
+      ],
+      "caption": "增强按多个独立条件尝试，可能一次样本同时触发多种操作。"
+    }
   },
   {
     "path": "LineDet/dataset/special_dataset_utils.py",
     "title": "外观增强：暗区、对比度、遮挡和局部亮度跃变",
-    "overview": "这些操作在 uint8 灰度图阶段运行，只改变像素强度，不改变边界坐标。它们是人为扰动，用于增加外观多样性；不能仅凭函数名认定它们精确模拟了真实超声成像。",
+    "overview": "这个文件提供图像仍为 NumPy/uint8 时的特殊外观扰动：局部变暗、全图对比度变化、矩形或圆形遮挡、局部对比度突变。它们只改变像素强度，没有主动移动几何位置，因此接口只接收和返回图像。special_enhancement 从四种候选中等概率选一种，数据集在训练时以 20% 概率调用这个入口。",
     "segments": [
       {
         "start": 1,
         "end": 25,
         "title": "local_transparent_blackening：半透明局部变暗",
         "principle": [
-          "按图像面积选若干矩形，与全黑矩形混合：I新=(1−α)I旧+α·0。调用方 alpha=0.7 时，选中区强度约变为 0.3 倍。",
-          "black_ratio=0.15 是每块的目标面积占比，num_regions 是块数；重叠区域可能被反复变暗，因此总遮盖比例不等于两者简单乘积。"
+          "这里不是直接把区域置零，而是保留结构但降低亮度，模拟局部信号衰减。alpha=0.7 时，黑色为零，因此输出约为原像素的 0.3 倍。"
         ],
         "syntax": [
-          "np.sqrt 面积估算边长；block_h=面积/block_w 调整另一边。img.copy() 避免修改调用者原始数组；cv2.addWeighted 执行加权相加。"
+          "cv2.addWeighted(src1,a,src2,b,gamma) 计算 a*src1+b*src2+gamma；这里 gamma=0。",
+          "np.zeros_like(...,dtype=np.uint8) 产生同形黑色数组。",
+          "random.randint(a,b) 含上下界；图像切片 y1:y2,x1:x2 超出边界时会自然截短。"
         ],
         "shapes": "uint8[H,W] → uint8[H,W]",
-        "pitfall": "随机矩形可因边界切片而变小；很小图像上 block_w 可能为 0，引发除零，当前 256×256 路径通常不会触发。",
-        "exercise": "原像素 100，alpha=0.7，与黑图混合后约多少？",
-        "answer": "30。",
-        "diagram": "data"
+        "pitfall": "black_ratio 是每块比例，多个块可以重叠，所以不能直接用 num_regions×black_ratio 当作实际被遮挡比例。极小输入或非法比例可能造成宽度为 0 等错误。",
+        "summary": "在若干随机矩形内按比例压低图像强度。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "ndarray [H,W] 或 [H,W,C]",
+            "default": "必填",
+            "meaning": "原始数值范围通常为 0–255 的图像。"
+          },
+          {
+            "name": "black_ratio",
+            "type": "float",
+            "default": "0.15",
+            "meaning": "每个块的名义面积占全图比例，不是所有块合计比例。"
+          },
+          {
+            "name": "num_regions",
+            "type": "int",
+            "default": "3",
+            "meaning": "生成局部块的数量；入口实际传 2。"
+          },
+          {
+            "name": "alpha",
+            "type": "float",
+            "default": "0.6",
+            "meaning": "黑色混合权重；入口实际传 0.7，块内约保留 30% 强度。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "h / w / total_area",
+            "type": "int",
+            "meaning": "图像高宽与总像素数。"
+          },
+          {
+            "name": "img_copy",
+            "type": "ndarray",
+            "meaning": "独立副本，局部结果写入这里。"
+          },
+          {
+            "name": "single_block_area",
+            "type": "int",
+            "meaning": "int(h*w*black_ratio)，每块目标面积。"
+          },
+          {
+            "name": "block_w / block_h",
+            "type": "int",
+            "meaning": "随机宽度及由面积/宽度求得的高度。"
+          },
+          {
+            "name": "x1 / y1 / x2 / y2",
+            "type": "int",
+            "meaning": "随机矩形的左上、右下坐标。"
+          },
+          {
+            "name": "img_block / black_block",
+            "type": "ndarray",
+            "meaning": "截取的当前区域与同形全零数组。"
+          },
+          {
+            "name": "transparent_block",
+            "type": "ndarray",
+            "meaning": "原区域×(1-alpha)+黑色×alpha。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "估算单块尺寸",
+            "detail": "L6–13：用面积平方根附近的随机宽度生成不同长宽比。"
+          },
+          {
+            "title": "随机放置区域",
+            "detail": "L14–17：选左上角，计算右下角。"
+          },
+          {
+            "title": "与黑色混合",
+            "detail": "L19–23：复制当前块，创建黑块，调用加权求和。"
+          },
+          {
+            "title": "返回副本",
+            "detail": "L25：多块可重叠，重叠区域可能被反复压暗。"
+          }
+        ],
+        "returns": [
+          "与输入形状相同的图像数组。"
+        ]
       },
       {
         "start": 27,
         "end": 34,
         "title": "enhance_contrast：全图线性强度变换",
         "principle": [
-          "随机以一半概率放大灰度、一半概率缩小灰度。公式近似为 I新=saturate_uint8(|αI+β|)，不是围绕均值的标准对比度变换。"
+          "乘数大于 1 会扩大像素强度差，但亮像素可能饱和到 255；小于 1 则压缩强度范围。此函数没有先减均值，因此也会改变整体亮度。"
         ],
         "syntax": [
-          "random.uniform(*enhance_range) 的 * 把二元 tuple 展开为两个位置参数；cv2.convertScaleAbs 含绝对值和 uint8 饱和截断。"
+          "random.uniform(*range) 中 * 将 (min,max) 展开为两个实参。",
+          "cv2.convertScaleAbs 的 Abs 表示还会取绝对值，并输出 8 位值；不能把它当作任意浮点张量的纯线性变换。"
         ],
         "shapes": "uint8 灰度图 → 同尺寸 uint8 图",
-        "pitfall": "高亮值乘大系数会饱和到 255，信息不可逆丢失。beta 默认 0 且输入非负，所以当前绝对值通常不改变结果。",
-        "exercise": "像素 200 乘 2 会输出 400 吗？",
-        "answer": "不会；uint8 饱和后是 255。",
-        "diagram": "data"
+        "pitfall": "输出会发生取绝对值、量化和饱和截断，因此不是严格可逆的对比度缩放。",
+        "summary": "随机选择增强或减弱强度尺度，改变整张图的对比表现。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "ndarray",
+            "default": "必填",
+            "meaning": "待处理图像，当前主路径为 uint8 灰度。"
+          },
+          {
+            "name": "enhance_range",
+            "type": "tuple[float,float]",
+            "default": "(1.5,2.5)",
+            "meaning": "选择增强分支时的乘法系数范围。"
+          },
+          {
+            "name": "reduce_range",
+            "type": "tuple[float,float]",
+            "default": "(0.4,0.8)",
+            "meaning": "选择减弱分支时的乘法系数范围。"
+          },
+          {
+            "name": "beta",
+            "type": "float",
+            "default": "0",
+            "meaning": "乘法之后的加法亮度偏移。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "img_copy",
+            "type": "ndarray",
+            "meaning": "输入副本。"
+          },
+          {
+            "name": "alpha",
+            "type": "float",
+            "meaning": "随机选出的强度乘数。"
+          },
+          {
+            "name": "img_contrast",
+            "type": "uint8 ndarray",
+            "meaning": "OpenCV 完成缩放、取绝对值和 8 位饱和转换后的结果。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "选分支",
+            "detail": "L29–32：random.random()>0.5 时增强，否则减弱。"
+          },
+          {
+            "title": "变换全图",
+            "detail": "L33：计算并转换 abs(alpha*pixel+beta)。"
+          },
+          {
+            "title": "返回",
+            "detail": "L34：输出强度变化、形状不变的图像。"
+          }
+        ],
+        "returns": [
+          "uint8 图像数组。"
+        ]
       },
       {
         "start": 36,
         "end": 60,
         "title": "partial_occlusion：用矩形或圆遮住局部区域",
         "principle": [
-          "以总面积的一定比例生成填充形状，模拟局部证据缺失。边界标签保持不变，要求模型借助邻域信息推断被遮挡的组织位置。",
-          "当前 special_enhancement 调用显式固定 shape=\"rect\"；圆形分支只是函数支持的另一条路径。"
+          "遮挡让训练图中局部边界证据缺失，要求网络利用周围结构推断位置；它没有修改几何坐标，因此标签继续指向原组织边界。"
         ],
         "syntax": [
-          "shape=\"random\" 时 random.choice 在两个字符串中选一个；cv2.rectangle/circle 最后参数 -1 代表填充而非描边。",
-          "圆半径由 sqrt(area/π) 求得；矩形宽高由面积和随机比例决定。"
+          "cv2.rectangle(image,(x1,y1),(x2,y2),color,-1) 和 circle(...,-1) 的 thickness=-1 表示填满内部。",
+          "NumPy 图像索引是 [y,x]，OpenCV 点坐标参数却写 (x,y)，这两个顺序要区分。"
         ],
         "shapes": "输入/输出 [H,W]",
-        "pitfall": "函数构造了三元素颜色，但当前图像是单通道，不能把它理解为真正的 RGB 彩色遮挡；圆半径过大也会让随机中心范围非法。",
-        "exercise": "这种增强为什么不用移动 y？",
-        "answer": "只改像素外观，目标解剖边界的几何位置未改变。",
-        "diagram": "data"
+        "pitfall": "输入通常是单通道灰度图，三个颜色分量不会变成 RGB 彩色块。非法 shape 会跳过两个分支、返回未改变副本；极小图像也可能使圆心随机范围无效。",
+        "summary": "用填充的矩形或圆形遮住部分图像纹理。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "ndarray",
+            "default": "必填",
+            "meaning": "输入图像。"
+          },
+          {
+            "name": "occlusion_ratio",
+            "type": "float",
+            "default": "0.1",
+            "meaning": "遮挡形状的名义面积占比。"
+          },
+          {
+            "name": "shape",
+            "type": "str",
+            "default": "random",
+            "meaning": "random 时随机选 rect/circle；主入口固定 rect。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "h / w / total_area / occlusion_area",
+            "type": "int",
+            "meaning": "尺寸与名义遮挡面积。"
+          },
+          {
+            "name": "img_copy",
+            "type": "ndarray",
+            "meaning": "写入遮挡形状的副本。"
+          },
+          {
+            "name": "rect_w / rect_h",
+            "type": "int",
+            "meaning": "矩形随机宽度与按面积推算的高度。"
+          },
+          {
+            "name": "x1 / y1 / x2 / y2",
+            "type": "int",
+            "meaning": "矩形位置。"
+          },
+          {
+            "name": "radius",
+            "type": "int",
+            "meaning": "根据 sqrt(area/pi) 推算的圆半径。"
+          },
+          {
+            "name": "center_x / center_y",
+            "type": "int",
+            "meaning": "保证圆大致落在图像内的随机圆心。"
+          },
+          {
+            "name": "occlusion_color",
+            "type": "tuple[int,int,int]",
+            "meaning": "每项从 30–80 取值的颜色；当前灰度输入只有一个通道。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "决定形状",
+            "detail": "L37–43：计算面积，必要时随机选择矩形或圆。"
+          },
+          {
+            "title": "矩形分支",
+            "detail": "L45–53：随机长宽比和位置，调用 rectangle 填充。"
+          },
+          {
+            "title": "圆形分支",
+            "detail": "L54–59：计算半径、随机圆心，调用 circle 填充。"
+          },
+          {
+            "title": "返回副本",
+            "detail": "L60：标签未参与函数调用。"
+          }
+        ],
+        "returns": [
+          "同尺寸图像数组。"
+        ]
       },
       {
         "start": 62,
         "end": 80,
         "title": "local_contrast_jump：局部强度突变",
         "principle": [
-          "随机选 num_regions 个矩形区域，各自乘独立随机系数。这会制造不同区域增益不一致，促使模型降低对单一亮度阈值的依赖。",
-          "每个区域目标面积固定为图像面积的 0.1；默认倍率在 1 到 3，只增强不衰减，且可能发生饱和。"
+          "不同区域使用不同乘数，模拟局部增益变化而不移动组织位置。默认范围下系数都不小于 1，因此只放大，不主动降低强度。"
         ],
         "syntax": [
-          "切片取 region 后 copy；cv2.convertScaleAbs 处理局部；写回原位置。for _ 表示循环变量的值不用于计算。"
+          "cv2.convertScaleAbs(region,alpha=jump_ratio,beta=0) 对局部区域做绝对值和 8 位转换。",
+          "region.copy() 避免临时局部数组继续引用待写回的存储。"
         ],
         "shapes": "uint8[H,W] → 同尺寸",
-        "pitfall": "局部边缘会出现人为不连续，不能默认这些伪影与真实设备增益变化完全一致。",
-        "exercise": "局部乘 3 后标签为何不乘 3？",
-        "answer": "强度单位改变不代表坐标单位改变；标签 y 是像素位置。",
-        "diagram": "data"
+        "pitfall": "块之间可重叠，后处理块会基于前一个结果继续增强；饱和后纹理可能丢失。",
+        "summary": "在若干局部矩形内突然改变强度缩放比例。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "ndarray",
+            "default": "必填",
+            "meaning": "输入图像。"
+          },
+          {
+            "name": "jump_ratio_range",
+            "type": "tuple[float,float]",
+            "default": "(1.0,3.0)",
+            "meaning": "每个局部区域独立抽取的乘法系数范围。"
+          },
+          {
+            "name": "num_regions",
+            "type": "int",
+            "default": "2",
+            "meaning": "局部区域数量。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "img_copy",
+            "type": "ndarray",
+            "meaning": "用于累积各块变换的副本。"
+          },
+          {
+            "name": "region_area_ratio / single_region_area",
+            "type": "float / int",
+            "meaning": "固定每块名义占图像面积 10%。"
+          },
+          {
+            "name": "region_w / region_h",
+            "type": "int",
+            "meaning": "根据面积生成的随机块尺寸。"
+          },
+          {
+            "name": "x1 / y1 / x2 / y2",
+            "type": "int",
+            "meaning": "块的位置。"
+          },
+          {
+            "name": "region / region_jump",
+            "type": "ndarray",
+            "meaning": "变换前后的局部数组。"
+          },
+          {
+            "name": "jump_ratio",
+            "type": "float",
+            "meaning": "当前块独立的强度乘数。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "准备固定比例区域",
+            "detail": "L63–67：复制图像，计算每块面积。"
+          },
+          {
+            "title": "逐块选尺寸和位置",
+            "detail": "L69–74：随机生成矩形。"
+          },
+          {
+            "title": "局部增强并写回",
+            "detail": "L76–79：取当前区域、抽系数、调用 convertScaleAbs，再覆盖原块。"
+          },
+          {
+            "title": "返回",
+            "detail": "L80：可能包含多个强度突变区域。"
+          }
+        ],
+        "returns": [
+          "同尺寸 uint8 图像。"
+        ]
       },
       {
         "start": 83,
         "end": 92,
         "title": "special_enhancement：随机选择一种外观扰动",
         "principle": [
-          "列表里存的是函数对象，先随机选一个再调用；每次触发只执行一种，不会按顺序全部执行。Dataset 以 0.2 概率调用这里，因此每种选择的无条件概率约为 0.05。"
+          "数据集外层以 0.2 概率进入这里，因此某一种具体操作对全部训练取样的名义触发概率约为 0.2×0.25=0.05；随机抽样不会保证每批恰好这个比例。"
         ],
         "syntax": [
-          "lambda x: ... 将带定制参数的函数包装成只接收一个图像的接口。random.choice(funcs) 返回函数对象，func(img) 才真正执行。"
+          "lambda x: ... 是一个匿名可调用对象，接收图像 x 并把固定参数传给真正函数。",
+          "函数名直接放入列表表示保存函数对象，并不会在列表创建时执行。",
+          "入口给变暗函数覆盖 alpha=0.7、num_regions=2，给遮挡函数覆盖 shape=\"rect\"；其余参数使用默认值。"
         ],
         "shapes": "图像 → 四种增强中的一种 → 图像",
-        "pitfall": "funcs 中只有函数/匿名函数，不应写成 local_contrast_jump(img)；那会在建列表时提前执行。",
-        "exercise": "lambda 在第一项里固定了哪些参数？",
-        "answer": "alpha=0.7、num_regions=2，其余如 black_ratio 使用被调用函数默认值。",
-        "diagram": "data"
+        "pitfall": "这四个候选是互斥选择；与 batchgenerators 的 Compose 按顺序尝试多个增强不同。",
+        "summary": "从四种特殊外观变换中只抽取一种执行。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "ndarray",
+            "default": "必填",
+            "meaning": "由数据集缩放后的 uint8 图像。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "funcs",
+            "type": "list[callable]",
+            "meaning": "四个候选：变暗、全局对比度、矩形遮挡、局部对比度。"
+          },
+          {
+            "name": "func",
+            "type": "callable",
+            "meaning": "random.choice 等概率选出的一个函数或 lambda。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "构造候选",
+            "detail": "L84–89：用 lambda 为部分函数预先指定参数。"
+          },
+          {
+            "title": "随机选择",
+            "detail": "L90：四选一，每个被选概率 1/4。"
+          },
+          {
+            "title": "调用并返回",
+            "detail": "L91–92：将同一图像交给选中函数处理。"
+          }
+        ],
+        "returns": [
+          "单次特殊外观增强后的图像。"
+        ]
       }
-    ]
+    ],
+    "role": "主训练的可选外观增强：在张量标准化之前使用",
+    "inputs": [
+      "灰度 uint8 图像 [H,W]；多数 OpenCV 操作也能接收多通道图像。"
+    ],
+    "outputs": [
+      "尺寸不变的图像副本，边界坐标由调用方保持原样。"
+    ],
+    "readingGuide": [
+      "四个具体函数均先 img.copy，避免直接改原始数组；入口只选择一个操作，不会连续执行四种。",
+      "这是外观噪声模拟，不能把遮挡块的边缘当作新的组织边界标签。",
+      "操作发生在除 255 和 z-score 之前；不要把这些 uint8/OpenCV 函数直接用于标准化后的负数张量。"
+    ],
+    "components": [
+      {
+        "name": "local_transparent_blackening",
+        "kind": "函数",
+        "summary": "将几个局部矩形与黑色按比例混合，模拟衰减。",
+        "segmentStart": 1
+      },
+      {
+        "name": "enhance_contrast",
+        "kind": "函数",
+        "summary": "随机放大或压低全图强度尺度。",
+        "segmentStart": 27
+      },
+      {
+        "name": "partial_occlusion",
+        "kind": "函数",
+        "summary": "填充矩形或圆形遮挡局部结构。",
+        "segmentStart": 36
+      },
+      {
+        "name": "local_contrast_jump",
+        "kind": "函数",
+        "summary": "对若干局部块使用独立对比度系数。",
+        "segmentStart": 62
+      },
+      {
+        "name": "special_enhancement",
+        "kind": "入口函数",
+        "summary": "等概率选择一种外观扰动并返回图像。",
+        "segmentStart": 83
+      }
+    ],
+    "pipeline": {
+      "title": "特殊外观增强的一次选择",
+      "nodes": [
+        {
+          "id": "in",
+          "title": "uint8 灰度图",
+          "detail": "训练样本以 20% 概率进入",
+          "kind": "input"
+        },
+        {
+          "id": "pick",
+          "title": "随机选择一个函数",
+          "detail": "四个候选等概率",
+          "kind": "decision"
+        },
+        {
+          "id": "dark",
+          "title": "局部变暗",
+          "detail": "与黑色混合",
+          "kind": "process"
+        },
+        {
+          "id": "contrast",
+          "title": "全图强度变化",
+          "detail": "随机增强或减弱",
+          "kind": "process"
+        },
+        {
+          "id": "occ",
+          "title": "矩形遮挡",
+          "detail": "入口固定 shape=rect",
+          "kind": "process"
+        },
+        {
+          "id": "jump",
+          "title": "局部对比度突变",
+          "detail": "独立区域乘不同系数",
+          "kind": "process"
+        },
+        {
+          "id": "out",
+          "title": "返回同尺寸图像",
+          "detail": "标签位置维持不变",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "in",
+          "to": "pick",
+          "label": ""
+        },
+        {
+          "from": "pick",
+          "to": "dark",
+          "label": "1/4"
+        },
+        {
+          "from": "pick",
+          "to": "contrast",
+          "label": "1/4"
+        },
+        {
+          "from": "pick",
+          "to": "occ",
+          "label": "1/4"
+        },
+        {
+          "from": "pick",
+          "to": "jump",
+          "label": "1/4"
+        },
+        {
+          "from": "dark",
+          "to": "out",
+          "label": ""
+        },
+        {
+          "from": "contrast",
+          "to": "out",
+          "label": ""
+        },
+        {
+          "from": "occ",
+          "to": "out",
+          "label": ""
+        },
+        {
+          "from": "jump",
+          "to": "out",
+          "label": ""
+        }
+      ],
+      "caption": "四种操作只改变外观；入口并不会执行圆形遮挡，圆形分支仅在直接调用时可用。"
+    }
   },
   {
     "path": "LineDet/dataset/special_dataset_utils2.py",
     "title": "几何与条纹增强：坐标映射比函数名字更重要",
-    "overview": "图像已标准化为 Tensor。前三种操作沿高度裁剪或缩放，条纹操作只加强度，组织变形通过 grid_sample 做像素重采样。理解这些函数要分别写出图像的反向采样映射与标签的前向坐标映射，并检查二者一致。",
+    "overview": "这个文件在图像已经标准化为张量后，制造更复杂的外观与形变样本。前三个函数改变整图纵向视野并同步变换边界高度；衍射条函数添加浅层亮带；两个平滑噪声函数为组织形变提供连续随机场；tissue_nonuniform_deform 则按边界间区域构造反向采样网格，重采样图像后再变换坐标。最末尾的 special_augmentation2 根据边界数量选择可用操作，并随机执行其中一个。",
     "segments": [
       {
         "start": 1,
         "end": 58,
         "title": "crop_upper_and_stretch：实际裁掉底部再拉伸",
         "principle": [
-          "虽然函数名带 upper，真正切片是 img[:,:H−x,:]，保留顶部、裁掉底部 x 行。剩余高度 H−x 再拉伸回 H，所以标签按 y新=y旧·H/(H−x) 增大。",
-          "若原标签在被裁掉的底部，代码仍把它缩放并 clamp 到 H−1，没有把监督设为无效。学习时要按照切片判断真实行为。"
+          "函数名含 upper，但 img[:,:H-x,:] 实际保留上方、裁掉底部。顶部原点没有平移，所以坐标仅乘比例，不需要减 x。",
+          "例如 H=256、x=32，保留高度 224，原 y=56 会变成 56×256/224=64。原边界若位于被裁掉底部，当前代码并没有删除其监督，而是最终夹到 255。"
         ],
         "syntax": [
-          "assert 检查图像 3 维、标签 2 维且宽度一致；unsqueeze(0) 为 F.interpolate 补 batch 维，squeeze(0) 在结束时移除。",
-          "size=(H,W) 是目标空间尺寸；mode=\"bilinear\" 用邻域双线性插值；align_corners=False 使用像素中心的采样约定。"
+          "unsqueeze(0) 为 F.interpolate 补批次轴；二维图像插值接口使用 [B,C,H,W]。squeeze(0) 只删除 batch 轴，不删除通道轴。",
+          "F.interpolate(size=(H,W),mode=\"bilinear\",align_corners=False) 对图像做双线性重采样。标签使用简单比例，与像素中心对齐公式并不完全相同。",
+          "torch.clamp(new_y,0,H-1) 只限制数值范围，不会自动修改有效掩码。"
         ],
         "shapes": "[C,H,W] → [1,C,H−x,W] → [C,H,W]；y [L,W]",
-        "pitfall": "标签只做简单比例，未严格包含 align_corners=False 的半像素偏移。函数不接收 valid，裁掉的真值可能被误留在边界。",
-        "exercise": "H=100、x=20、原 y=40，新 y 是多少？",
-        "answer": "40×100/80=50；这是代码使用的坐标公式。",
-        "diagram": "geometry"
+        "pitfall": "函数没有 valid，因此裁掉真实边界后仍可能产生边缘假标签。显式 x 允许比随机范围更大，只需落在 0<x<H。",
+        "summary": "裁去图像底部 x 行，再把剩余上部拉回原高度并缩放标签。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [1,H,W]",
+            "default": "必填",
+            "meaning": "标准化浮点图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "每条边界每列的高度。"
+          },
+          {
+            "name": "x",
+            "type": "int 或 None",
+            "default": "None",
+            "meaning": "裁去底部的行数；未指定时随机选择。"
+          },
+          {
+            "name": "rand_ratio",
+            "type": "float",
+            "default": "0.125",
+            "meaning": "随机裁剪最大量相对原高度的比例。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "H / W / N / W2",
+            "type": "int",
+            "meaning": "图像高宽、线数、标签列数；要求 W==W2。"
+          },
+          {
+            "name": "max_x",
+            "type": "int",
+            "meaning": "max(6,int(H*rand_ratio))，作为随机范围上界。"
+          },
+          {
+            "name": "cropped",
+            "type": "Tensor [1,1,H-x,W]",
+            "meaning": "保留 img[:,:H-x,:]，再补 batch 维。"
+          },
+          {
+            "name": "stretched / new_img",
+            "type": "Tensor [1,1,H,W] / [1,H,W]",
+            "meaning": "插值后的批次张量及去掉 batch 维后的图像。"
+          },
+          {
+            "name": "scale",
+            "type": "float",
+            "meaning": "H/(H-x)，大于 1 的纵向放大比例。"
+          },
+          {
+            "name": "new_y",
+            "type": "Tensor [N,W]",
+            "meaning": "y_px*scale 后夹到 [0,H-1]。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "校验维度",
+            "detail": "L16–21：要求图像三维、标签二维且同宽。"
+          },
+          {
+            "title": "决定裁剪量",
+            "detail": "L26–31：随机取 5..max_x；非法 x 则原样返回。"
+          },
+          {
+            "title": "裁底并拉伸",
+            "detail": "L36–47：保留顶部 H-x 行，双线性插值回 H×W。"
+          },
+          {
+            "title": "变换标签",
+            "detail": "L49–56：纵坐标乘 H/(H-x)，超界值夹到边缘。"
+          },
+          {
+            "title": "返回",
+            "detail": "L58：图像和标签均保持原形状。"
+          }
+        ],
+        "returns": [
+          "new_img=[1,H,W]、new_y=[N,W]；非法 x 时返回原对象。"
+        ]
       },
       {
         "start": 61,
         "end": 123,
         "title": "compress_height_with_pad：压缩内容、顶部补零",
         "principle": [
-          "将整幅内容从 H 压缩到 H−x，再放到画布底部。每个标签先按比例变矮，再整体下移 x：y新=y旧·(H−x)/H+x。",
-          "这样上方多了一条空白带，但图像输出尺寸与其他样本保持一致。"
+          "这次没有裁掉任何原图内容，而是把全部内容压矮。因为内容下移到从第 x 行开始的位置，坐标需要加 x。",
+          "例如 H=256、x=64，scale=0.75，原 y=100 变成 100×0.75+64=139。"
         ],
         "syntax": [
-          "torch.zeros_like(img) 创建形状、dtype、device 相同的零画布；padded[:,x:H,:]=resized 把压缩图贴到底部。",
-          "max(6,int(H×rand_ratio)) 设随机上界；random.randint(5,max_x) 包含端点；非法 x 直接返回原对象。"
+          "torch.zeros_like(img) 保持输入的设备、数据类型和形状。padded[:,x:H,:]=resized 要求目标高度正好为 H-x。",
+          "与裁底拉伸相反，这里的比例为新高/原高，坐标幅度缩小。"
         ],
         "shapes": "[C,H,W] → [C,H−x,W] → [C,H,W]",
-        "pitfall": "这里的“黑条”实际是标准化后值 0 的均值强度带；不是原始像素 0 对应的标准化值。",
-        "exercise": "H=100、x=20、y=50，新坐标是多少？",
-        "answer": "50×0.8+20=60。",
-        "diagram": "geometry"
+        "pitfall": "输入已经 z-score，填 0 对应标准化均值，不一定是原图的纯黑。当前标签变换仍未处理像素中心的半像素对齐差异。",
+        "summary": "压缩整张图的高度并贴到底部，在顶部补零，同时缩放和平移坐标。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [C,H,W]",
+            "default": "必填",
+            "meaning": "待压缩的标准化图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "逐列边界坐标。"
+          },
+          {
+            "name": "x",
+            "type": "int 或 None",
+            "default": "None",
+            "meaning": "顶部补零高度，也是图像被压缩掉的行数。"
+          },
+          {
+            "name": "rand_ratio",
+            "type": "float",
+            "default": "0.25",
+            "meaning": "随机 x 上界相对高度的比例。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "C / H / W / N / W2",
+            "type": "int",
+            "meaning": "维度信息，标签宽度必须与图像一致。"
+          },
+          {
+            "name": "max_x / x",
+            "type": "int",
+            "meaning": "随机上界与具体顶部补零行数。"
+          },
+          {
+            "name": "new_h",
+            "type": "int",
+            "meaning": "H-x，缩放后的图像内容高度。"
+          },
+          {
+            "name": "img_4d / resized",
+            "type": "Tensor",
+            "meaning": "加入 batch 维后插值，得到 [C,new_h,W]。"
+          },
+          {
+            "name": "padded",
+            "type": "Tensor [C,H,W]",
+            "meaning": "与输入同形全零画布，将 resized 放在 x:H。"
+          },
+          {
+            "name": "scale",
+            "type": "float",
+            "meaning": "(H-x)/H，小于 1。"
+          },
+          {
+            "name": "new_y",
+            "type": "Tensor [N,W]",
+            "meaning": "先 y*scale，再加顶部偏移 x。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "检查并选择补零量",
+            "detail": "L74–89：维度同宽校验；非法 x 原样返回。"
+          },
+          {
+            "title": "压缩全图",
+            "detail": "L94–105：将完整图像插值到 (H-x,W)。"
+          },
+          {
+            "title": "贴到底部",
+            "detail": "L110–113：创建零画布，把压缩内容放入 [x,H)。"
+          },
+          {
+            "title": "同步坐标",
+            "detail": "L118–121：乘缩放比例后加 x，再夹范围。"
+          },
+          {
+            "title": "返回",
+            "detail": "L123：输出 padded 和 new_y。"
+          }
+        ],
+        "returns": [
+          "padded=[C,H,W]、new_y=[N,W]。"
+        ]
       },
       {
         "start": 125,
         "end": 194,
         "title": "crop_lower_and_stretch：实际裁掉顶部再拉伸",
         "principle": [
-          "真正切片 img[:,x:H,:] 丢弃顶部 x 行，剩余区域拉伸回原高度。标签先减裁剪偏移再乘尺度：y新=(y旧−x)·H/(H−x)。",
-          "为避免裁掉最上层边界，先求 y_px[0] 的最小值，将 x 限制在它以内。只检查最上面一条线，依赖通道顺序正确。"
+          "裁顶部改变了坐标原点，原图第 x 行变成裁剪图第 0 行，所以必须先 y-x，再放大。函数名含 lower，但实际切掉的是上方。",
+          "所谓安全只依据 y_px[0] 的最小值。它假设通道顺序正确、上边界确实高于所有其他目标线，而且忽略了 valid 的区别。"
         ],
         "syntax": [
-          "torch.min(...).item() 转为 Python 标量供 random 使用；x=min(x,max_safe_x) 也约束显式传入值；if 条件不满足时提前 return。"
+          "torch.min(y_px[0]).item() 得到第 0 条线的全列最小值。",
+          "x=min(x,max_safe_x) 将显式传入值也限制在上界内；不会自动补齐负值，而是后面原样返回。",
+          "F.interpolate 仍使用 align_corners=False，坐标则按简单比例计算。"
         ],
         "shapes": "图像和标签输出尺寸不变",
-        "pitfall": "min 没有过滤 valid=False 列，无效占位或外推值会影响裁剪上限；函数名 lower 容易误导，实际裁顶部。",
-        "exercise": "H=100、x=10、y=55，新 y 是多少？",
-        "answer": "(55−10)×100/90=50。",
-        "diagram": "geometry"
+        "pitfall": "无效占位 0 可能导致 max_safe_x=0，从而完全禁用此增强。函数没有更新掩码；边界顺序异常时，所谓安全限制也不能保证其他线不被裁掉。",
+        "summary": "先依据上边界限制裁剪量，再裁掉顶部并放大剩余内容。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [C,H,W]",
+            "default": "必填",
+            "meaning": "输入图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "边界坐标，默认第 0 条是最上方目标线。"
+          },
+          {
+            "name": "x",
+            "type": "int 或 None",
+            "default": "None",
+            "meaning": "计划裁去的顶部行数；会被安全上限截小。"
+          },
+          {
+            "name": "rand_ratio",
+            "type": "float",
+            "default": "0.25",
+            "meaning": "随机裁剪量相对 H 的最大比例。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "C / H / W / N / W2",
+            "type": "int",
+            "meaning": "图像与坐标维度。"
+          },
+          {
+            "name": "top_line_min",
+            "type": "float",
+            "meaning": "第 0 条线所有列的最小高度，包含无效占位。"
+          },
+          {
+            "name": "max_safe_x",
+            "type": "int",
+            "meaning": "int(top_line_min)，希望裁剪不越过上边界。"
+          },
+          {
+            "name": "max_rand",
+            "type": "int",
+            "meaning": "min(int(H*rand_ratio),max_safe_x)，随机上界。"
+          },
+          {
+            "name": "cropped / stretched / new_img",
+            "type": "Tensor",
+            "meaning": "裁掉顶部后的内容、放大结果及去掉 batch 维后的图像。"
+          },
+          {
+            "name": "scale",
+            "type": "float",
+            "meaning": "H/(H-x)，剩余高度拉回 H 的倍率。"
+          },
+          {
+            "name": "new_y",
+            "type": "Tensor [N,W]",
+            "meaning": "(y_px-x)*scale 后限制到图像高度范围。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "计算安全范围",
+            "detail": "L138–151：取上边界最小高度；余量太小直接返回。"
+          },
+          {
+            "title": "决定裁剪量",
+            "detail": "L156–166：随机选 x 或限制外部传入值，禁止非法范围。"
+          },
+          {
+            "title": "裁顶并拉伸",
+            "detail": "L171–184：保留 img[:,x:H,:]，再双线性放大到原尺寸。"
+          },
+          {
+            "title": "变换坐标",
+            "detail": "L189–192：先减去裁剪起点 x，再乘放大比例。"
+          },
+          {
+            "title": "返回",
+            "detail": "L194：图像与坐标形状保持不变。"
+          }
+        ],
+        "returns": [
+          "new_img=[C,H,W]、new_y=[N,W]。"
+        ],
+        "flow": {
+          "title": "裁顶部的安全分支",
+          "nodes": [
+            {
+              "id": "input",
+              "title": "图像和坐标",
+              "detail": "以第 0 条线作为上边界",
+              "kind": "input"
+            },
+            {
+              "id": "min",
+              "title": "求上边界最低行号",
+              "detail": "top_line_min=min(y_px[0])",
+              "kind": "process"
+            },
+            {
+              "id": "safe",
+              "title": "是否有安全裁剪空间",
+              "detail": "max_safe_x>1",
+              "kind": "decision"
+            },
+            {
+              "id": "same",
+              "title": "原样返回",
+              "detail": "不执行增强",
+              "kind": "output"
+            },
+            {
+              "id": "x",
+              "title": "选择并限制 x",
+              "detail": "随机范围与安全范围取交",
+              "kind": "process"
+            },
+            {
+              "id": "crop",
+              "title": "裁顶并拉伸",
+              "detail": "图像 x:H 插值回 H",
+              "kind": "process"
+            },
+            {
+              "id": "label",
+              "title": "标签先减 x 再乘比例",
+              "detail": "(y-x)*H/(H-x)",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "input",
+              "to": "min",
+              "label": ""
+            },
+            {
+              "from": "min",
+              "to": "safe",
+              "label": ""
+            },
+            {
+              "from": "safe",
+              "to": "same",
+              "label": "否"
+            },
+            {
+              "from": "safe",
+              "to": "x",
+              "label": "是"
+            },
+            {
+              "from": "x",
+              "to": "same",
+              "label": "x 非法"
+            },
+            {
+              "from": "x",
+              "to": "crop",
+              "label": "x 合法"
+            },
+            {
+              "from": "crop",
+              "to": "label",
+              "label": ""
+            }
+          ],
+          "caption": "安全范围计算没有使用 valid；无效零占位也会影响是否能执行。"
+        }
       },
       {
         "start": 196,
         "end": 255,
         "title": "add_diffraction_strips：在浅部添加亮带",
         "principle": [
-          "在上方约六分之一范围随机选亮带中心，按离中心的距离生成平方衰减强度，中心约 3 像素保持最大值，再沿全宽叠加。",
-          "强度参数使用 z-score 数值单位；主调用 y_noise=0，所以标签不变。它是手工添加条纹的增强，不是超声衍射物理过程的数值模拟。"
+          "这不是几何移动，而是在指定行叠加亮度伪影。亮条中心位于图像上方约 1/6 区域，但半径扩散可延伸到该区域之外。",
+          "sigma_factor 这个名字容易与高斯 sigma 混淆：这里它只是亮度增量范围，代码没有再乘 img.std()，也没有生成高斯形状。衰减使用的是 (1-distance/radius)²。"
         ],
         "syntax": [
-          "torch.arange(y_min,y_max) 生成纵向采样；view(-1,1) 变列向量，expand(-1,W) 沿宽度广播，再 unsqueeze(0) 补通道。",
-          "random.randint(*num_range) 随机条数；radius 在条循环外只采一次。torch.rand_like(new_y) 生成同形随机数供可选坐标扰动。"
+          "clone 创建独立张量；view(-1,1) 将纵向权重变成列向量，expand(-1,W) 逻辑扩展到全宽，unsqueeze(0) 补通道轴。",
+          "torch.arange(...,device=img.device,dtype=torch.float32) 确保距离计算与图像同设备。",
+          "torch.rand_like(new_y) 生成 [0,1) 均匀随机数；减 0.5、乘 2*y_noise 后变成对称范围。"
         ],
         "shapes": "条纹 [1,H条,W] 加到图像对应切片；y [L,W]",
-        "pitfall": "添加后不重新标准化；小高度下 random.uniform(10,limit_y−1) 的区间不符合原设计，默认 256 高度才有合理浅部范围。",
-        "exercise": "若 y_noise=0，为什么仍计算 mask 和 noise？",
-        "answer": "当前实现保留了通用分支，但 noise 全零，对标签没有实际影响。",
-        "diagram": "data"
+        "pitfall": "当前默认不扰动标签，图像亮条叠加后可能超过原有标准化数值范围，这里没有截断。若手动设置 y_noise>0，函数没有再次 clamp 坐标，也不更新 valid。",
+        "summary": "向图像浅层叠加水平亮条，模拟成像伪影，并可选地扰动被覆盖标签。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [C,H,W]",
+            "default": "必填",
+            "meaning": "z-score 后的浮点图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "对应边界坐标。"
+          },
+          {
+            "name": "radius_range",
+            "type": "tuple[int,int]",
+            "default": "(5,20)",
+            "meaning": "每次调用随机选一个亮条纵向扩散半径。"
+          },
+          {
+            "name": "num_range",
+            "type": "tuple[int,int]",
+            "default": "(2,4)",
+            "meaning": "随机亮条数量范围，包含两端。"
+          },
+          {
+            "name": "sigma_factor",
+            "type": "tuple[float,float]",
+            "default": "(1.6,1.8)",
+            "meaning": "亮条强度范围，单位为标准化数值；入口覆盖为 (1.4,2.0)。"
+          },
+          {
+            "name": "y_noise",
+            "type": "float",
+            "default": "0.00",
+            "meaning": "覆盖区域标签额外噪声的最大绝对幅度；默认和主入口都为零。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "C / H / W / N / W2",
+            "type": "int",
+            "meaning": "维度与宽度校验信息。"
+          },
+          {
+            "name": "aug_img / new_y",
+            "type": "Tensor",
+            "meaning": "图像和坐标的独立克隆。"
+          },
+          {
+            "name": "limit_y",
+            "type": "int",
+            "meaning": "H//6，随机亮条中心限制在浅层范围。"
+          },
+          {
+            "name": "num_strips / radius",
+            "type": "int",
+            "meaning": "本次亮条数和所有条共同使用的半径。"
+          },
+          {
+            "name": "cy / y_min / y_max",
+            "type": "float / int / int",
+            "meaning": "条中心及截断到图像内的纵向范围。"
+          },
+          {
+            "name": "y_indices / dist",
+            "type": "Tensor [条高]",
+            "meaning": "覆盖行号及到中心的绝对距离。"
+          },
+          {
+            "name": "intensity",
+            "type": "Tensor [条高]",
+            "meaning": "平方衰减权重；中心距离<=1.5 的行强制为 1。"
+          },
+          {
+            "name": "sigma_val / strip_pattern",
+            "type": "float / Tensor [1,条高,W]",
+            "meaning": "当前条随机强度及广播到整行的亮度增量。"
+          },
+          {
+            "name": "mask / noise",
+            "type": "bool Tensor [N,W] / Tensor [N,W]",
+            "meaning": "落入条覆盖范围的标签位置及可选随机坐标噪声。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "校验并复制",
+            "detail": "L208–216：图像三维、标签二维且同宽，克隆输入。"
+          },
+          {
+            "title": "决定亮条范围",
+            "detail": "L218–228：抽条数、半径和浅层中心，限制可写入行区间。"
+          },
+          {
+            "title": "构造纵向强度",
+            "detail": "L231–237：按距离平方衰减，中间约 3 行达到满强度。"
+          },
+          {
+            "title": "广播并叠加",
+            "detail": "L240–245：乘随机幅度，扩展到全宽，累加到图像。"
+          },
+          {
+            "title": "可选标签扰动",
+            "detail": "L251–253：只对条覆盖的高度施加 [-y_noise,y_noise] 噪声。"
+          },
+          {
+            "title": "返回",
+            "detail": "L255：输出图像副本和坐标副本。"
+          }
+        ],
+        "returns": [
+          "aug_img=[C,H,W]、new_y=[N,W]；默认 y_noise=0 时坐标不变。"
+        ]
       },
       {
         "start": 258,
         "end": 284,
         "title": "平滑噪声：正弦叠加与可分离外积",
         "principle": [
-          "一维噪声由多组正弦相加，每层振幅 1/k，高频贡献减小；除以最大绝对值后幅度不超过 1。它能产生连续缓变形状，而非逐像素独立白噪声。",
-          "二维场通过 y 噪声与 x 噪声外积得到，空间结构可分离。注释提到 Perlin，但代码没有实现经典梯度 Perlin 噪声算法。"
+          "直接为每列抽独立随机值会产生锯齿跳变。正弦曲线随位置连续变化，多频叠加能产生缓慢起伏，用于让相邻列的形变幅度相近。",
+          "二维函数不是任意二维随机场，而是两个一维曲线的外积，空间结构具有可分离性。注释称“模拟 Perlin”，但实际不是标准 Perlin 噪声算法。"
         ],
         "syntax": [
-          "torch.linspace(0,1,W) 建位置轴；randint(1,4) 右端不包含，所以抽到 1、2、3；phase 为 [0,2π) 随机相位。",
-          "unsqueeze(1) 把 [H] 变 [H,1]，unsqueeze(0) 把 [W] 变 [1,W]，相乘广播得 [H,W]。clamp(min=1e-6) 避免归一化除零。"
+          "torch.randint(1,4,(1,)) 的上界 4 不包含，因此取 1、2、3；加 1 后频率乘数为 2、3、4。",
+          "noise.abs().max().clamp(min=1e-6) 先找最大绝对幅度，再保证分母至少为小正数。",
+          "noise_y.unsqueeze(1) 是 [H,1]，noise_x.unsqueeze(0) 是 [1,W]，广播乘法得到 [H,W]。"
         ],
         "shapes": "noise_1d [W]；noise_2d [H,W]",
-        "pitfall": "一维函数文档说未严格归一化，但实际第270行已经归一化；应以实现为准。随机频率/相位使用 PyTorch RNG，不是 Python random。",
-        "exercise": "为什么不能直接把 [H] 与 [W] 相乘得到二维？",
-        "answer": "它们没有独立轴；补 [H,1] 和 [1,W] 后广播才得到外积。",
-        "diagram": "geometry"
+        "pitfall": "原注释写“未严格归一化”，但当前函数体实际已经除以最大绝对值。随机频率和相位默认在 CPU 抽取标量；输出数组仍在传入 device 上。",
+        "summary": "生成缓慢变化的一维随机曲线，再以外积构造二维噪声场。",
+        "parameters": [
+          {
+            "name": "W",
+            "type": "int",
+            "default": "smooth_noise_1d 必填；smooth_noise_2d 必填",
+            "meaning": "输出宽度；一维函数生成 W 个采样值。"
+          },
+          {
+            "name": "H",
+            "type": "int",
+            "default": "smooth_noise_2d 必填",
+            "meaning": "二维场高度。"
+          },
+          {
+            "name": "num_freqs",
+            "type": "int",
+            "default": "4",
+            "meaning": "叠加的正弦分量数量。"
+          },
+          {
+            "name": "device",
+            "type": "str 或 torch.device",
+            "default": "cpu",
+            "meaning": "结果所在设备。"
+          },
+          {
+            "name": "dtype",
+            "type": "torch.dtype",
+            "default": "torch.float32",
+            "meaning": "计算和输出的数据类型。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "noise",
+            "type": "Tensor [W]",
+            "meaning": "一维正弦叠加结果。"
+          },
+          {
+            "name": "xs",
+            "type": "Tensor [W]",
+            "meaning": "0 到 1 的均匀采样位置。"
+          },
+          {
+            "name": "k / amp / freq / phase",
+            "type": "int / float / 数值 / float",
+            "meaning": "第 k 个分量，幅度 1/k，随机频率 k×(2/3/4)，随机相位。"
+          },
+          {
+            "name": "noise_x / noise_y",
+            "type": "Tensor [W] / [H]",
+            "meaning": "二维函数分别生成的两个一维随机序列。"
+          },
+          {
+            "name": "noise_2d",
+            "type": "Tensor [H,W]",
+            "meaning": "noise_y 的列向量乘 noise_x 的行向量，得到外积。"
+          },
+          {
+            "name": "1e-6",
+            "type": "float",
+            "meaning": "避免全零噪声归一化时除以零。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "一维初始化",
+            "detail": "L263–264：建立全零曲线和 [0,1] 采样坐标。"
+          },
+          {
+            "title": "叠加不同频率",
+            "detail": "L265–269：高频分量幅度较小，每个分量有随机相位和频率。"
+          },
+          {
+            "title": "一维幅度归一化",
+            "detail": "L270–271：除以最大绝对值，将幅度控制到 [-1,1] 内。"
+          },
+          {
+            "title": "二维外积",
+            "detail": "L279–282：分别生成横纵序列，广播相乘。"
+          },
+          {
+            "title": "二维归一化与返回",
+            "detail": "L283–284：再次限制最大绝对幅度。"
+          }
+        ],
+        "returns": [
+          "smooth_noise_1d 返回 [W]；smooth_noise_2d 返回 [H,W]。"
+        ]
       },
       {
         "start": 287,
         "end": 351,
         "title": "tissue_nonuniform_deform：逐列改变两条边界间厚度",
         "principle": [
-          "选定上界 y_top 与下界 y_bot，旧厚度 h_old=y_bot−y_top。每列比例 s(x)=scale+noise(x)·scale_noise_amp·(scale−1)，新下界为 y_top+s(x)·h_old。",
-          "上界固定，区域内部被拉伸/压缩，下方整体平移 delta_bot。scale 是人工增强因子，不代表模型估计的真实组织弹性。"
+          "这里的 index_top/index_btn 选的是“第几条边界”。每列的上界高度可能不同，因此区域不是固定水平矩形，而是两条曲线之间的带状区域。",
+          "上边界位置保持不变；把每列原厚度乘 scale_col 后得到新下边界。下方内容必须随下边界同量平移，否则在接缝处会断开。",
+          "例如某列上界 40、下界 100，厚度 60，若 scale_col=1.5，则新下界 130，下方内容需整体下移 30。"
         ],
         "syntax": [
-          "index_top/index_btn 是 y_px 的行索引；clone().float() 保留原值并转浮点。clamp(min=1e-6) 防止厚度为零；scale_col 最小 0.1 防止非正尺度。",
-          "seed 非空时 torch.manual_seed(seed) 修改全局 PyTorch RNG；默认 scale_noise_amp=0.15，lateral_amp=0.5，fat_ratio=0.3，fat_softness=2。"
+          "y_px[index_top].clone().float() 提取一条线、复制并转 float32；clamp(min=1e-6) 避免厚度分母为零，但并不修复本来颠倒的边界。",
+          "torch.manual_seed(seed) 影响 PyTorch 随机数，不会设置 Python random 的状态；入口选择操作与 scale 的 random.uniform 仍由另一个发生器控制。",
+          "scale_col 是 [W]，所以一张图不同列可以具有不同厚度倍率。"
         ],
         "shapes": "y_top/y_bot/h_old/scale_col: [W]",
-        "pitfall": "若两条线已交叉，clamp 只是防止数值故障，不会恢复正确解剖关系。函数未读取 valid，所有列均参与形变。",
-        "exercise": "上界40、下界80、scale=1.5且无噪声，新下界是多少？",
-        "answer": "40+(80−40)×1.5=100；下方位移 delta=20。",
-        "diagram": "geometry"
+        "pitfall": "缺少 valid 过滤，无效填充值也会参与区域定义。输入边界颠倒时用极小厚度代替，不会主动报告错误。即使 scale=1，若 lateral_amp>0，横向扰动仍然存在。",
+        "summary": "选出两条边界围成的组织区域，并为每列准备不同的纵向拉伸比例。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "torch.Tensor [C,H,W]",
+            "default": "必填",
+            "meaning": "标准化图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "torch.Tensor [N,W]",
+            "default": "必填",
+            "meaning": "全部边界逐列高度。"
+          },
+          {
+            "name": "index_top",
+            "type": "int",
+            "default": "必填",
+            "meaning": "上侧边界在 y_px 第 0 维的通道索引，不是像素行号。"
+          },
+          {
+            "name": "index_btn",
+            "type": "int",
+            "default": "必填",
+            "meaning": "下侧边界的通道索引，btn 表示 bottom。"
+          },
+          {
+            "name": "scale",
+            "type": "float",
+            "default": "必填",
+            "meaning": "基础厚度倍率，1 不改厚度，>1 拉厚，<1 压薄。"
+          },
+          {
+            "name": "scale_noise_amp",
+            "type": "float",
+            "default": "0.15",
+            "meaning": "每列倍率变化的相对幅度，实际幅度还乘 (scale-1)。"
+          },
+          {
+            "name": "lateral_amp",
+            "type": "float",
+            "default": "0.5",
+            "meaning": "横向采样位移的像素幅度，0 可关闭横向扰动。"
+          },
+          {
+            "name": "fat_ratio",
+            "type": "float",
+            "default": "0.3",
+            "meaning": "区域内部归一化深度小于此值时使用额外倍率。"
+          },
+          {
+            "name": "fat_softness",
+            "type": "float",
+            "default": "2.0",
+            "meaning": "浅层区相对变形权重，不是额外的边界类别。"
+          },
+          {
+            "name": "num_freqs",
+            "type": "int",
+            "default": "4",
+            "meaning": "生成平滑噪声时使用的正弦分量数。"
+          },
+          {
+            "name": "seed",
+            "type": "int 或 None",
+            "default": "None",
+            "meaning": "若提供，调用 torch.manual_seed 改变 PyTorch 全局随机状态。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "C / H / W / N / W2",
+            "type": "int",
+            "meaning": "图像维度、边界数量和标签宽度。"
+          },
+          {
+            "name": "device / dtype",
+            "type": "torch.device / torch.dtype",
+            "meaning": "图像设备与固定 float32 计算精度。"
+          },
+          {
+            "name": "y_top / y_bot",
+            "type": "float Tensor [W]",
+            "meaning": "按 index_top/index_btn 选出的两条边界副本。"
+          },
+          {
+            "name": "h_old",
+            "type": "Tensor [W]",
+            "meaning": "原区域厚度 y_bot-y_top，至少为 1e-6。"
+          },
+          {
+            "name": "noise_col",
+            "type": "Tensor [W]",
+            "meaning": "归一化平滑噪声，每列在 [-1,1] 内。"
+          },
+          {
+            "name": "delta_scale",
+            "type": "float",
+            "meaning": "scale_noise_amp*(scale-1)，使纯 scale=1 时列间倍率噪声消失。"
+          },
+          {
+            "name": "scale_col",
+            "type": "Tensor [W]",
+            "meaning": "scale+noise_col*delta_scale，最小夹到 0.1。"
+          },
+          {
+            "name": "h_new / y_bot_new / delta_bot",
+            "type": "Tensor [W]",
+            "meaning": "每列新厚度、新下边界高度和下方内容的平移量。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "校验与随机种子",
+            "detail": "L321–330：要求同宽，必要时设置 PyTorch 随机状态，计算统一使用 float32。"
+          },
+          {
+            "title": "提取区域边界",
+            "detail": "L335–337：从两条指定线得到逐列上下限与原厚度。"
+          },
+          {
+            "title": "产生列间倍率",
+            "detail": "L344–347：生成平滑噪声，围绕基础 scale 做小幅变化并避免负倍率。"
+          },
+          {
+            "title": "计算新的区域范围",
+            "detail": "L349–351：厚度乘倍率，下边界移动量用于下方整体平移。"
+          }
+        ],
+        "returns": [
+          "本段产生逐列区域参数，供后续构造图像反向采样网格和标签前向变换。"
+        ],
+        "flow": {
+          "title": "非均匀形变的完整链路",
+          "nodes": [
+            {
+              "id": "in",
+              "title": "图像与两条区域边界",
+              "detail": "每列都有上下限",
+              "kind": "input"
+            },
+            {
+              "id": "scale",
+              "title": "逐列生成倍率",
+              "detail": "基础 scale 加平滑随机波动",
+              "kind": "process"
+            },
+            {
+              "id": "bounds",
+              "title": "计算新下界与平移量",
+              "detail": "上界固定；下方整体跟随",
+              "kind": "process"
+            },
+            {
+              "id": "depth",
+              "title": "按深度给变形权重",
+              "detail": "浅层区使用 fat_softness",
+              "kind": "process"
+            },
+            {
+              "id": "inverse",
+              "title": "构造图像反向映射",
+              "detail": "上方不变、中间缩放、下方平移",
+              "kind": "process"
+            },
+            {
+              "id": "lateral",
+              "title": "加横向采样扰动",
+              "detail": "平滑二维噪声与区域权重相乘",
+              "kind": "process"
+            },
+            {
+              "id": "sample",
+              "title": "grid_sample 重采样图像",
+              "detail": "每个输出像素去原图取值",
+              "kind": "process"
+            },
+            {
+              "id": "labels",
+              "title": "标签做前向变换",
+              "detail": "旧高度得到新高度，仍保留原列号",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "返回图像与坐标",
+              "detail": "夹到图像边界，不修改 valid",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "in",
+              "to": "scale",
+              "label": ""
+            },
+            {
+              "from": "scale",
+              "to": "bounds",
+              "label": ""
+            },
+            {
+              "from": "bounds",
+              "to": "depth",
+              "label": ""
+            },
+            {
+              "from": "depth",
+              "to": "inverse",
+              "label": ""
+            },
+            {
+              "from": "inverse",
+              "to": "lateral",
+              "label": ""
+            },
+            {
+              "from": "lateral",
+              "to": "sample",
+              "label": ""
+            },
+            {
+              "from": "sample",
+              "to": "labels",
+              "label": ""
+            },
+            {
+              "from": "labels",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "图像反向映射和标签前向映射不是自动互为逆；当前实现还存在横向标签未同步等限制。"
+        }
       },
       {
         "start": 353,
         "end": 424,
         "title": "深度权重与反向采样：每个输出像素去哪里取值",
         "principle": [
-          "depth_weight 在浅部 t<fat_ratio 返回 fat_softness，否则返回 1；有效比例为 1+(scale_col−1)·weight。图像采用反向映射：遍历新图位置，计算来源位置，避免前向搬运像素留下孔洞。",
-          "上方来源不变；中间 src_y=y_top+(dst_y−y_top)/scale_eff；下方 src_y=dst_y−delta_bot。横向再加平滑噪声位移，中部用 sin 窗在边界衰减，下方强度直接置 1。"
+          "生成新图时，不是把每个旧像素直接扔到新位置，而是遍历每个输出位置，问“应到原图哪里取值”。这样每个输出像素都有来源，避免正向投放留下空洞。",
+          "中间区域的反向纵坐标为 y_top+(输出行-y_top)/scale_eff；下方区域用输出行-delta_bot。二者都是将新图位置反查回旧图。",
+          "depth_weight 是一个分段常数函数：浅层权重大，其他位置为 1。fat_ratio 只是区域内部比例设置，代码并未在这里另外识别真实脂肪像素。",
+          "横向正弦窗在区域上下边缘趋近 0，中央较大；但代码对区域下方设为 1，并不是仅在两条边界之间侧移。"
         ],
         "syntax": [
-          "view(1,W).expand(H,W) 把每列参数广播到整幅网格。mask_top/mid/bot 是布尔图，通过布尔索引分别赋值。",
-          "depth_weight 是嵌套函数，捕获 fat_ratio 与 fat_softness；torch.ones_like(t) 初始化，条件索引写入浅部权重。"
+          "view(H,1).expand(H,W) 将行号广播到每一列，view(1,W).expand(H,W) 将每列参数广播到每一行。expand 通常不复制完整数据。",
+          "src_y[mask_mid]=... 是布尔索引赋值，右侧也用相同 mask 提取对应位置。",
+          "depth_weight 通过闭包读取 fat_ratio 和 fat_softness；w=torch.ones_like(t) 与 t 同形同设备。",
+          "torch.sin(t_clamped*3.14159).clamp(0,1) 限制正弦窗的数值范围；src_x 的计算没有直接乘 dw，需按实际式子理解。"
         ],
         "shapes": "ys/xs/src_y/src_x: [H,W]",
-        "pitfall": "深度权重在阈值处突变；这里按目标深度算反向权重、按原始深度算标签前向权重，两者一般不是严格互逆。横向扰动没有同步重采样标签的 x。",
-        "exercise": "为什么 grid_sample 要给“来源坐标”，而不是“去向坐标”？",
-        "answer": "它对每个输出网格点读取输入；反向查询能为每个输出位置都定义采样值。",
-        "diagram": "geometry"
+        "pitfall": "深度权重在 fat_ratio 处突变，不是平滑组织模型。反向映射按新区域深度取权重，标签前向映射按旧区域深度取权重，分段跨越时不保证精确互逆。",
+        "summary": "按组织深度设置形变权重，并为每个输出像素计算原图采样位置。",
+        "parameters": [
+          {
+            "name": "t",
+            "type": "Tensor，任意形状",
+            "default": "depth_weight 必填",
+            "meaning": "相对区域上界的归一化深度；内部函数读取外层 fat_ratio 和 fat_softness。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "w",
+            "type": "Tensor，与 t 同形",
+            "meaning": "先全 1，t<fat_ratio 的位置改为 fat_softness。"
+          },
+          {
+            "name": "noise_lat",
+            "type": "Tensor [H,W]",
+            "meaning": "平滑二维横向噪声场。"
+          },
+          {
+            "name": "ys / xs",
+            "type": "Tensor [H,W]",
+            "meaning": "每个输出像素的整数行号与列号。"
+          },
+          {
+            "name": "y_top_b / y_bot_new_b / y_bot_b",
+            "type": "Tensor [H,W]",
+            "meaning": "将逐列边界沿高度广播；y_bot_b 构造后未参与后续计算。"
+          },
+          {
+            "name": "scale_col_b / delta_bot_b",
+            "type": "Tensor [H,W]",
+            "meaning": "逐列倍率与下方位移的二维广播版本。"
+          },
+          {
+            "name": "region_h_new_b",
+            "type": "Tensor [H,W]",
+            "meaning": "新区域厚度，最小 1e-6。"
+          },
+          {
+            "name": "t_map / dw",
+            "type": "Tensor [H,W]",
+            "meaning": "输出位置在新区域内的相对深度，以及据此求出的局部权重。"
+          },
+          {
+            "name": "scale_eff",
+            "type": "Tensor [H,W]",
+            "meaning": "1+(scale_col_b-1)*dw，夹到至少 0.1。"
+          },
+          {
+            "name": "src_y",
+            "type": "Tensor [H,W]",
+            "meaning": "每个输出位置应从原图哪一行采样。"
+          },
+          {
+            "name": "mask_top / mask_mid / mask_bot",
+            "type": "bool Tensor [H,W]",
+            "meaning": "输出位置分别位于上界之上、上下新界之间、下界之下。"
+          },
+          {
+            "name": "lateral_mask_strength",
+            "type": "Tensor [H,W]",
+            "meaning": "横向位移强度，上方 0，中间正弦窗，下方 1。"
+          },
+          {
+            "name": "t_clamped / sin_window",
+            "type": "Tensor [H,W]",
+            "meaning": "深度夹到 [0,1] 后计算 sin(pi*t) 的窗。"
+          },
+          {
+            "name": "src_x",
+            "type": "Tensor [H,W]",
+            "meaning": "xs+lateral_amp*noise_lat*lateral_mask_strength。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "定义深度权重",
+            "detail": "L360–364：内部函数把浅层 t<fat_ratio 的倍率权重改大。"
+          },
+          {
+            "title": "生成像素网格与广播参数",
+            "detail": "L369–386：建立每个输出像素位置及对应列的区域信息。"
+          },
+          {
+            "title": "计算局部倍率",
+            "detail": "L389–394：用新区域的相对深度 t_map 选择权重，再得到 scale_eff。"
+          },
+          {
+            "title": "分区反查纵坐标",
+            "detail": "L397–412：上方 src_y=ys；中间反除倍率；下方减去区域扩展量。"
+          },
+          {
+            "title": "添加横向位移",
+            "detail": "L416–424：区域内用正弦窗渐入渐出，下方保持完整横向扰动强度。"
+          }
+        ],
+        "returns": [
+          "src_x、src_y 两个 [H,W] 反向采样坐标场，等待转为 grid_sample 的归一化坐标。"
+        ],
+        "flow": {
+          "title": "每个输出像素的反向纵向映射",
+          "nodes": [
+            {
+              "id": "pixel",
+              "title": "输出像素 (x,y)",
+              "detail": "已经知道该列的新上下界",
+              "kind": "input"
+            },
+            {
+              "id": "where",
+              "title": "像素在哪个区域",
+              "detail": "比较 y 与 y_top、y_bot_new",
+              "kind": "decision"
+            },
+            {
+              "id": "top",
+              "title": "上方",
+              "detail": "src_y=y",
+              "kind": "process"
+            },
+            {
+              "id": "mid",
+              "title": "中间",
+              "detail": "src_y=y_top+(y-y_top)/scale_eff",
+              "kind": "process"
+            },
+            {
+              "id": "bottom",
+              "title": "下方",
+              "detail": "src_y=y-delta_bot",
+              "kind": "process"
+            },
+            {
+              "id": "x",
+              "title": "确定横向来源",
+              "detail": "src_x=x+带权平滑扰动",
+              "kind": "process"
+            },
+            {
+              "id": "out",
+              "title": "得到原图采样位置",
+              "detail": "(src_x,src_y) 可为小数",
+              "kind": "output"
+            }
+          ],
+          "edges": [
+            {
+              "from": "pixel",
+              "to": "where",
+              "label": ""
+            },
+            {
+              "from": "where",
+              "to": "top",
+              "label": "y<上界"
+            },
+            {
+              "from": "where",
+              "to": "mid",
+              "label": "区域内"
+            },
+            {
+              "from": "where",
+              "to": "bottom",
+              "label": "y>新下界"
+            },
+            {
+              "from": "top",
+              "to": "x",
+              "label": ""
+            },
+            {
+              "from": "mid",
+              "to": "x",
+              "label": ""
+            },
+            {
+              "from": "bottom",
+              "to": "x",
+              "label": ""
+            },
+            {
+              "from": "x",
+              "to": "out",
+              "label": ""
+            }
+          ],
+          "caption": "scale_eff 在中间区域随深度变化；下方的位移来自整列区域厚度变化。"
+        }
       },
       {
         "start": 426,
         "end": 436,
         "title": "grid_sample：归一化坐标与插值",
         "principle": [
-          "grid_sample 要求采样位置用 [−1,1] 坐标表示。align_corners=True 时，原图 x=0 对应 −1，x=W−1 对应 1，y 同理；与前面的归一化公式配套。",
-          "bilinear 根据四邻域加权读值；padding_mode=\"border\" 在采样点越界时重复边缘值。"
+          "src_x/src_y 可以是小数。双线性插值根据周围四个原图像素与采样位置的距离，计算一个加权像素值。这里是图像内容插值，不是前面把稀疏标签连成折线的那次插值。",
+          "grid_sample 的网格表示“输出到输入的查询”，不是每个输入像素的位移结果。网格的最后一维顺序是 (x,y)，与张量空间轴 [H,W] 的顺序不同。"
         ],
         "syntax": [
-          "torch.stack((grid_x,grid_y),dim=2) 把 x/y 放最后一维，顺序必须先 x 后 y；unsqueeze(0) 补 batch。",
-          "输入 img.unsqueeze(0) 为 [1,C,H,W]；grid [1,H,W,2] 指定每个输出像素的输入来源。"
+          "align_corners=True 与这里的除 W-1/H-1 配套：原图最左/最上像素中心对应 -1，最右/最下对应 +1。",
+          "padding_mode=\"border\" 使越界查询使用最近边缘值，不会填零或报错。mode=\"bilinear\" 在二维图像上使用双线性采样。",
+          "torch.stack((grid_x,grid_y),dim=2) 从两个 [H,W] 产生 [H,W,2]，unsqueeze(0) 成 [1,H,W,2]。"
         ],
         "shapes": "[1,C,H,W] + [1,H,W,2] → [1,C,H,W]",
-        "pitfall": "W 或 H 等于 1 会导致除以零；当前正常图像尺寸远大于1。border 不代表出界标签仍有效，标签有效性需另行处理。",
-        "exercise": "W=101 时像素 x=50 的归一化坐标是多少？",
-        "answer": "2×50/(101−1)−1=0。",
-        "diagram": "geometry"
+        "pitfall": "若 W 或 H 为 1，这里的 W-1/H-1 会为零。采样网格允许越界，不代表越界标签因此有效；此函数没有维护有效掩码。",
+        "summary": "把像素坐标转为规范网格，双线性采样得到形变后的图像。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "grid_x / grid_y",
+            "type": "Tensor [H,W]",
+            "meaning": "原图采样横纵坐标映射到 [-1,1] 尺度。"
+          },
+          {
+            "name": "grid",
+            "type": "Tensor [1,H,W,2]",
+            "meaning": "每个输出像素最后一维存 (x,y)，前面补 batch 维。"
+          },
+          {
+            "name": "new_img",
+            "type": "Tensor [C,H,W]",
+            "meaning": "grid_sample 结果去掉 batch 维。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "归一化采样坐标",
+            "detail": "L429–430：x/(W-1)*2-1、y/(H-1)*2-1。"
+          },
+          {
+            "title": "合成网格",
+            "detail": "L431：stack 最后一维按横坐标、纵坐标排列，再增加 batch 维。"
+          },
+          {
+            "title": "采样",
+            "detail": "L433–436：输入增加 batch 维；双线性取值，越界使用边缘像素。"
+          }
+        ],
+        "returns": [
+          "new_img=[C,H,W]，空间尺寸不变但内容已形变。"
+        ]
       },
       {
         "start": 438,
         "end": 464,
         "title": "标签前向变换：坐标与图像是否一致",
         "principle": [
-          "标签使用前向变换：上方保持，中间按深度权重拉伸，下方加 delta_bot。最后 clamp 到 [0,H−1]，避免数值出界。",
-          "边界两端在纯纵向模型下较容易对齐，但复杂深度权重与横向扰动会带来不一致；这是一段应通过合成网格图与曲线叠加验证的增强实现。"
+          "标签前向变换回答的是“原来这一点移动到哪里”，所以中间区域乘倍率，而图像反向采样是除倍率。把两者混用会造成图像与标签方向相反。",
+          "当前只修改 y_px 的高度，没有改变其列号。图像却使用 src_x 做横向重采样，因此如果边界随 x 起伏，保持原列号的标签不能严格跟随横向位移。",
+          "clamp 让数值合法，但原本跑出视野的边界会被压到顶部或底部；它不会自动变为 invalid。"
         ],
         "syntax": [
-          "循环 i 遍历所有标签行；mask_mid_i.any() 避免在空选择上继续计算。new_y=y_px.clone().float() 保持输入不被直接覆盖。",
-          "代码仅写 new_y[i,同一列]，没有改变横向索引；最终返回 (new_img,new_y)，没有 valid。"
+          "mask_mid_i.any() 避免对空集合继续计算。",
+          "布尔索引取出 K 个有效区域列，t_i=(y_i-y_top)/h_old 得到旧区域的相对深度。",
+          "两侧闭区间 <= 与 >= 让恰好位于上、下界的标签进入中间分支；上界相对距离为 0，所以保持不变。"
         ],
         "shapes": "new_y [L,W]",
-        "pitfall": "超出视野的点被夹在边界而没有失效；横向源点变了，标签却保留原列对应。即使 scale=1，lateral_amp>0 时横向扰动仍存在。",
-        "exercise": "怎样验证这类增强是否同步？",
-        "answer": "用一幅在标签位置画亮线的合成图，变换后叠加 new_y；检查每列亮线与标签是否重合，并测试 scale=1、纯纵向、越界等情况。",
-        "diagram": "geometry"
+        "pitfall": "横向标签未同步、分段深度变换不保证互逆、valid 未更新，是本实现的实际限制。不能把“函数同时返回图像和坐标”直接等同于已经严格几何对齐。",
+        "summary": "按原标签所在区域做前向坐标变换，再把高度限制到图像范围。",
+        "parameters": [],
+        "variables": [
+          {
+            "name": "new_y",
+            "type": "float Tensor [N,W]",
+            "meaning": "标签副本，逐线写入新的高度。"
+          },
+          {
+            "name": "i / y_i",
+            "type": "int / Tensor [W]",
+            "meaning": "当前边界编号与原始该线高度。"
+          },
+          {
+            "name": "mask_top_i / mask_mid_i / mask_bot_i",
+            "type": "bool Tensor [W]",
+            "meaning": "按旧上下界判断当前标签位于哪个区域。"
+          },
+          {
+            "name": "t_i / dw_i",
+            "type": "Tensor [K]",
+            "meaning": "仅对落在中间区域的 K 列计算旧相对深度和权重。"
+          },
+          {
+            "name": "sc_i",
+            "type": "Tensor [K]",
+            "meaning": "这些列的有效倍率 1+(scale_col-1)*dw_i，最小 0.1。"
+          },
+          {
+            "name": "delta_bot",
+            "type": "Tensor [W]",
+            "meaning": "下方标签随区域新下界一起平移的量。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "逐线判断位置",
+            "detail": "L441–447：依据原上界、原下界划分，而非新图边界。"
+          },
+          {
+            "title": "保留上方坐标",
+            "detail": "L450：上界之上的标签不移动。"
+          },
+          {
+            "title": "拉伸区域内坐标",
+            "detail": "L453–458：计算旧相对深度，选倍率，再做 y_top+(y-y_top)*sc_i。"
+          },
+          {
+            "title": "平移下方坐标",
+            "detail": "L461：位于旧下界之下的标签加 delta_bot。"
+          },
+          {
+            "title": "钳制并返回",
+            "detail": "L463–464：所有高度夹到 [0,H-1]，返回图像与标签。"
+          }
+        ],
+        "returns": [
+          "new_img=[C,H,W]、new_y=[N,W]。"
+        ]
       },
       {
         "start": 466,
         "end": 494,
         "title": "special_augmentation2：按线数构建候选增强",
         "principle": [
-          "固定四种候选：裁底拉伸、高度压缩补顶、裁顶拉伸、浅部亮条。若至少两条线，追加最后两线之间的组织变形；至少三条时再加两个区域组合。",
-          "当前项目两条线，候选总数为五；Dataset 以 0.3 概率进入这里，再等概率选一种，因此每种约 6% 的取样机会，实际函数也可能因安全条件直接返回。"
+          "默认只有两条目标边界，因此 N=2、候选共五个，组织形变区域为第 0 条和第 1 条之间。N≥3 的两个分支是通用预留，当前双边界任务不会进入。",
+          "入口的 lambda 直到选中并调用时才执行 random.uniform，因此不会为未选中的候选提前生成形变倍率。",
+          "外层数据集以 0.3 概率调用入口；默认五选一时，每个候选对全部训练取样的名义概率约为 0.06。"
         ],
         "syntax": [
-          "lambda i,y 统一所有函数为相同二参数接口；N−2/N−1 取最后两条线。random.uniform(0.5,2.0) 在被选 lambda 执行时才采样尺度。",
-          "random.choice(funcs) 选择单个可调用对象；new_img,new_y=func(img,y_px) 解包二元返回值。"
+          "funcs.append 增加函数对象；lambda i,y 中 i 是图像参数，不是整数索引。",
+          "index_top=N-2、index_btn=N-1 是从最后两条边界构造区域。",
+          "亮条入口覆盖 sigma_factor=(1.4,2.0)、y_noise=0.00；几何函数的 rand_ratio 也在这里明确指定。"
         ],
         "shapes": "img [1,H,W]、y [2,W] → 同形结果",
-        "pitfall": "候选函数共享接口却不共享 valid；不能把这条链视为完整的图像/标签/掩码联合几何增强。",
-        "exercise": "当前两线模型里 tissue_nonuniform_deform 作用于哪两条线？",
-        "answer": "index_top=0 真皮层下界，index_btn=1 脂肪层下界。",
-        "diagram": "geometry"
+        "pitfall": "整个文件接口没有有效掩码，所以不能在入口自动恢复被遮挡、裁出或变形错位的标签有效性。操作执行后也没有统一的几何一致性校验。",
+        "summary": "根据边界数量建立可用增强列表，随机选择其中一个。",
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [C,H,W]",
+            "default": "必填",
+            "meaning": "标准化后、已经过 JointAugment 的图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "对应边界坐标；没有 valid 参数。"
+          }
+        ],
+        "variables": [
+          {
+            "name": "N",
+            "type": "int",
+            "meaning": "y_px.shape[0]，用于判断能构造哪些两边界区域。"
+          },
+          {
+            "name": "funcs",
+            "type": "list[callable]",
+            "meaning": "四个基础操作，加上符合 N 条件的组织形变候选。"
+          },
+          {
+            "name": "func",
+            "type": "callable",
+            "meaning": "random.choice 等概率抽取的操作。"
+          },
+          {
+            "name": "new_img / new_y",
+            "type": "Tensor",
+            "meaning": "选中操作返回的图像与坐标。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "建立四个基础候选",
+            "detail": "L470–480：裁底、压矮补顶、裁顶、亮条。"
+          },
+          {
+            "title": "N≥2 时追加区域",
+            "detail": "L482–484：选择最后两条边界，scale 在 0.5–2.0 之间随机取值。"
+          },
+          {
+            "title": "N≥3 时再追加",
+            "detail": "L485–489：添加倒数第三到第二、倒数第三到最后的两个区域。"
+          },
+          {
+            "title": "选择并执行",
+            "detail": "L492–494：只选一种，调用后原样返回二元组。"
+          }
+        ],
+        "returns": [
+          "增强后的图像与坐标；外层数据集仍使用原 valid。"
+        ]
       }
-    ]
+    ],
+    "role": "主训练的可选张量增强：在 z-score 和 JointAugment 之后调用",
+    "inputs": [
+      "img：标准化后的浮点张量 [C,H,W]，当前通常 C=1。",
+      "y_px：逐列边界高度 [N,W]；接口不接收 valid。",
+      "裁剪范围、噪声频率、形变比例、条纹强度等参数。"
+    ],
+    "outputs": [
+      "同尺寸图像与浮点坐标二元组；有效掩码由调用方保留原值。"
+    ],
+    "readingGuide": [
+      "先看最后的选择入口，了解哪些函数真的进入训练；再按简单纵向变换、条纹、非均匀形变的顺序读。",
+      "crop_upper_and_stretch 实际裁底部，crop_lower_and_stretch 实际裁顶部。以切片表达式为准，不根据函数名猜方向。",
+      "复杂形变中，图像用“新位置去旧图取值”的反向映射，标签用“旧位置移动到新位置”的前向映射；二者必须相符，但本实现存在深度分段和横向标签同步限制。",
+      "所有函数都缺少 valid 入参；无效坐标占位可能参与安全范围计算，被裁出视野的坐标被夹到边缘后仍可能保留有效标记。"
+    ],
+    "components": [
+      {
+        "name": "crop_upper_and_stretch",
+        "kind": "函数",
+        "summary": "裁去底部后纵向拉伸回原高，坐标按比例放大。",
+        "segmentStart": 1
+      },
+      {
+        "name": "compress_height_with_pad",
+        "kind": "函数",
+        "summary": "把整图压矮并贴到底部，顶部补零；坐标先缩放后平移。",
+        "segmentStart": 61
+      },
+      {
+        "name": "crop_lower_and_stretch",
+        "kind": "函数",
+        "summary": "在不越过最上方标签的限制下裁顶部，再拉伸回原高。",
+        "segmentStart": 125
+      },
+      {
+        "name": "add_diffraction_strips",
+        "kind": "函数",
+        "summary": "在浅层增加连续水平亮带，可选微扰标签。",
+        "segmentStart": 196
+      },
+      {
+        "name": "smooth_noise_1d / smooth_noise_2d",
+        "kind": "函数",
+        "summary": "通过低频正弦叠加与外积生成平滑随机场。",
+        "segmentStart": 258
+      },
+      {
+        "name": "tissue_nonuniform_deform",
+        "kind": "函数",
+        "summary": "在两条指定边界间逐列非均匀变形，并重采样图像。",
+        "segmentStart": 287
+      },
+      {
+        "name": "depth_weight",
+        "kind": "内部函数",
+        "summary": "按归一化深度决定局部变形倍率。",
+        "segmentStart": 353
+      },
+      {
+        "name": "special_augmentation2",
+        "kind": "入口函数",
+        "summary": "按边界数量构造候选增强，随机选一个执行。",
+        "segmentStart": 466
+      }
+    ],
+    "pipeline": {
+      "title": "特殊张量增强的调用关系",
+      "nodes": [
+        {
+          "id": "in",
+          "title": "图像和逐列坐标",
+          "detail": "训练以 30% 概率进入",
+          "kind": "input"
+        },
+        {
+          "id": "number",
+          "title": "有多少条边界 N",
+          "detail": "决定可选组织形变区域",
+          "kind": "decision"
+        },
+        {
+          "id": "base",
+          "title": "四个基础候选",
+          "detail": "裁底、压缩、裁顶、衍射条",
+          "kind": "process"
+        },
+        {
+          "id": "extra",
+          "title": "添加组织形变候选",
+          "detail": "N≥2 加一项；N≥3 再加两项",
+          "kind": "process"
+        },
+        {
+          "id": "choose",
+          "title": "随机选择一个候选",
+          "detail": "不会连续执行全部函数",
+          "kind": "decision"
+        },
+        {
+          "id": "simple",
+          "title": "简单纵向变换",
+          "detail": "图像插值 + 坐标缩放/平移",
+          "kind": "process"
+        },
+        {
+          "id": "stripe",
+          "title": "衍射亮条",
+          "detail": "改变强度，默认标签不加噪声",
+          "kind": "process"
+        },
+        {
+          "id": "tissue",
+          "title": "非均匀组织形变",
+          "detail": "噪声场 → 反向采样 → 标签前向变换",
+          "kind": "process"
+        },
+        {
+          "id": "out",
+          "title": "返回同尺寸图和坐标",
+          "detail": "没有返回或更新 valid",
+          "kind": "output"
+        }
+      ],
+      "edges": [
+        {
+          "from": "in",
+          "to": "number",
+          "label": ""
+        },
+        {
+          "from": "number",
+          "to": "base",
+          "label": "所有 N"
+        },
+        {
+          "from": "base",
+          "to": "extra",
+          "label": "检查 N"
+        },
+        {
+          "from": "extra",
+          "to": "choose",
+          "label": ""
+        },
+        {
+          "from": "choose",
+          "to": "simple",
+          "label": "前三种"
+        },
+        {
+          "from": "choose",
+          "to": "stripe",
+          "label": "第四种"
+        },
+        {
+          "from": "choose",
+          "to": "tissue",
+          "label": "附加候选"
+        },
+        {
+          "from": "simple",
+          "to": "out",
+          "label": ""
+        },
+        {
+          "from": "stripe",
+          "to": "out",
+          "label": ""
+        },
+        {
+          "from": "tissue",
+          "to": "out",
+          "label": ""
+        }
+      ],
+      "caption": "默认两条边界时共有五个候选，组织形变发生在通道 0 与通道 1 之间。"
+    }
   }
 ]

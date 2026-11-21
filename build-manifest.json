@@ -2,7 +2,7 @@
   "files": 19,
   "segments": 114,
   "source_lines": 2572,
-  "html_bytes": 1173521,
+  "html_bytes": 1477945,
   "hashes": {
     "LineDet/dataset/__init__.py": "bae4c91e4ec7411341a0714ce1530c11c6f03a490490e0f43d82944554a35425",
     "LineDet/dataset/dataset.py": "e8f4ecfc579411b3dd38ef7ce57663de1479a57d3f42c1d86b1edcff190920a5",
@@ -23,5 +23,9 @@
     "run_dual_split.sh": "7996e7e751ed86c8de164e9bbafc9ea547c2f87f1407da2a5a648b535bcc27ba",
     "train减脂.sh": "8ea3f48f2e20a739b5ed0f54bfbbae73b9343fae9fad146c335aee6f73a223fa",
     "summarize_comparison.py": "464799b1bcdb0baa55f03912d7e4605d381ed56791beed39d5165927a7751dce"
-  }
+  },
+  "definitions": 93,
+  "parameter_entries": 349,
+  "variable_entries": 595,
+  "flowcharts": 53
 }
