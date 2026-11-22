@@ -59,7 +59,7 @@ function graphSVG(graph){
 }
 function flowFigure(graph){
   if(!graph||!graph.nodes?.length)return '';
-  return '<figure class="reader-flow"><div class="reader-flow-head"><strong>'+esc(graph.title)+'</strong><button type="button" data-flow-zoom>放大流程图</button></div><div class="reader-flow-canvas" tabindex="0" role="region" aria-label="'+esc(graph.title)+'，可滚动查看">'+graphSVG(graph)+'</div><figcaption>'+esc(graph.caption||'按箭头阅读数据与控制的流向。')+'<span>长图可滚动查看，也可放大阅读。</span></figcaption></figure>';
+  return '<figure class="reader-flow"><div class="reader-flow-head"><strong>'+esc(graph.title)+'</strong><button type="button" data-flow-zoom>放大流程图</button></div><div class="reader-flow-canvas" tabindex="0" role="region" aria-label="'+esc(graph.title)+'，可放大查看">'+graphSVG(graph)+'</div><figcaption>'+esc(graph.caption||'按箭头阅读数据与控制的流向。')+'<span>流程图随栏宽缩放，可放大阅读。</span></figcaption></figure>';
 }
 function parameterTable(rows){
   if(!rows?.length)return '<p class="reader-muted">本片段没有新增函数入参；使用到的值见下方变量说明。</p>';

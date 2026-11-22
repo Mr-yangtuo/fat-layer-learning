@@ -150,7 +150,7 @@ for visual in visuals:
         file = next(f for f in files if f["path"] == link["path"])
         segment = next(s for s in file["segments"] if s["start"] == link["start"])
         segment.setdefault("visuals", []).append(visual["id"])
-manifest = {"created":"2026-11-14","updated":"2026-11-22","reader_version":6,"files":files,"visuals":visuals}
+manifest = {"created":"2026-11-14","updated":"2026-11-22","reader_version":7,"files":files,"visuals":visuals}
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {

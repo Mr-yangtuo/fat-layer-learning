@@ -58,3 +58,61 @@ body.reader-wide[data-mode="code"] .sidebar{transform:translateX(-100%)}
 @media(max-width:700px){body[data-mode="code"] main{padding:18px 12px}.project-reading-guide h1{font-size:31px}.guide-lead{font-size:16px}.guide-opening{padding:20px}.guide-opening h2{font-size:21px}.guide-reading-rule{padding:19px}.guide-section-head h2{font-size:24px}.reading-stations>li{padding:18px;gap:12px}.file-map-grid article{padding:20px}.reader-breadcrumb{font-size:13px;gap:7px}.reader-breadcrumb code{font-size:12px}.file-heading{display:block}.file-heading h1{font-size:23px}.source-actions{margin-top:15px}.file-purpose p{font-size:15px}.file-guide{padding:19px 17px}.file-details>summary{font-size:14px}.workbench-toolbar{padding:8px 10px;min-height:47px}.workbench-toolbar>div{display:block}.workbench-toolbar strong{font-size:14px}.workbench-toolbar span{display:none}.workbench-toolbar button{font-size:12px;padding:4px 7px}.reader-workbench{height:calc(100dvh - 85px);min-height:630px;margin-top:20px;scroll-margin-top:76px}.workbench-columns{grid-template-columns:1fr;grid-template-rows:minmax(0,.42fr) minmax(0,.58fr)}.source-pane{border-right:0;border-bottom:2px solid #cadcc4}.pane-header{min-height:72px;padding:8px 12px}.pane-header h2{font-size:15px}.pane-header>div>span{font-size:11px}.segment-selector{margin-top:5px}.segment-selector select{font-size:12px;padding-top:4px;padding-bottom:4px}.analysis-header{min-height:60px;flex-wrap:nowrap}.analysis-navigation button{font-size:12px;padding:4px 7px}.analysis-header span{font-size:11px;margin-top:1px}.analysis-scroll{padding:18px 16px 25px}.analysis-intro h2{font-size:23px}.analysis-summary{font-size:16px!important}.analysis-scroll p,.analysis-scroll li{font-size:15px}.analysis-section h3{font-size:19px}.source-segment pre,.source-context pre{font-size:13px;line-height:1.9}.segment-select{padding:8px 11px}.segment-select strong{font-size:13px}.segment-select span{font-size:11px;margin-bottom:3px}.concept-heading{padding:10px 12px;gap:8px}.concept-heading strong{font-size:14px}.concept-heading button{font-size:11px;padding:4px 6px}.concept-figure figcaption{font-size:13px;padding:12px}.execution-steps strong{font-size:15px}.step-source-link{flex-wrap:wrap;gap:2px}.shape{font-size:12px}.component-table{min-width:550px}.guide-howto{padding:23px}.guide-howto h2{font-size:22px}}
 
 @media(max-width:900px){#reader-focus{display:none}}
+
+/* Compact reading panes: wrap source within a separate line-number gutter. */
+.reader-workbench{--reader-code-size:.78125rem;--reader-body-size:.875rem;--reader-title-size:1.3125rem}
+.reader-workbench .workbench-toolbar{min-height:44px;padding:7px 13px}
+.reader-workbench .workbench-legend{font-size:.8125rem;padding:5px 13px}
+.reader-workbench .pane-header{min-height:86px;padding:10px 13px}
+.reader-workbench .pane-header h2{font-size:1rem}
+.reader-workbench .segment-selector{margin-top:8px}
+.reader-workbench .segment-select{padding:8px 11px;line-height:1.55}
+.reader-workbench .segment-select strong{font-size:.8125rem}
+.reader-workbench .core-badge{font-size:.75rem;padding:0 5px}
+.reader-workbench .source-segment pre,.reader-workbench .source-context pre{font-size:var(--reader-code-size);line-height:1.65;padding:10px 0;white-space:pre-wrap}
+.reader-workbench .code-line{display:grid;grid-template-columns:38px minmax(0,1fr);width:100%;min-width:0;min-height:1.65em;padding-right:10px}
+.reader-workbench .ln{width:auto;min-width:0;padding-right:9px;white-space:nowrap}
+.reader-workbench .code-text{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4}
+.reader-workbench .analysis-scroll{font-size:var(--reader-body-size);line-height:1.8;padding:16px 18px 24px}
+.reader-workbench .analysis-scroll p,.reader-workbench .analysis-scroll li{font-size:var(--reader-body-size);line-height:1.8}
+.reader-workbench .analysis-scroll p{margin:9px 0}
+.reader-workbench .analysis-intro h2{font-size:var(--reader-title-size);line-height:1.5;margin:6px 0 10px}
+.reader-workbench .analysis-summary{font-size:var(--reader-body-size)!important}
+.reader-workbench .segment-context{font-size:.75rem!important;padding:7px 10px;margin:11px 0}
+.reader-workbench .shape{font-size:.75rem;line-height:1.75;padding:9px 11px;margin:12px 0}
+.reader-workbench .analysis-jumps{padding-bottom:12px}
+.reader-workbench .analysis-jumps button{font-size:.75rem;padding:4px 8px}
+.reader-workbench .analysis-section{padding:8px 0 14px}
+.reader-workbench .analysis-section h3{font-size:1.125rem;margin:10px 0}
+.reader-workbench .analysis-section h4{font-size:.9375rem;margin:14px 0 8px}
+.reader-workbench .concept-figure{margin:14px 0}
+.reader-workbench .concept-heading{padding:9px 11px}
+.reader-workbench .concept-heading strong{font-size:.875rem}
+.reader-workbench .concept-figure figcaption{font-size:.8125rem;line-height:1.75;padding:10px 12px}
+.reader-workbench .execution-steps{margin:14px 0}
+.reader-workbench .execution-steps>li{padding-left:26px;padding-bottom:16px}
+.reader-workbench .execution-steps strong{font-size:var(--reader-body-size)}
+.reader-workbench .reader-table-wrap{margin:11px 0}
+.reader-workbench .reader-table{font-size:.8125rem;line-height:1.75;min-width:0}
+.reader-workbench .reader-table th,.reader-workbench .reader-table td{padding:9px 10px}
+.reader-workbench .reader-table code,.reader-workbench .reader-table small{font-size:.75rem}
+.reader-workbench .note{padding:13px;margin:17px 0}
+.reader-workbench .note strong{font-size:var(--reader-body-size)}
+.reader-workbench .next-context{padding:15px;margin-top:18px}
+.reader-workbench .next-context strong{font-size:.9375rem}
+.reader-workbench .reader-flow-canvas svg{width:100%;min-width:0;height:auto}
+@container analysis (max-width:620px){
+ .reader-workbench .reader-table tbody tr{padding:10px 11px}
+ .reader-workbench .reader-table tbody th,.reader-workbench .reader-table tbody td{padding:3px 0}
+}
+@media(max-width:700px){
+ .reader-workbench{--reader-code-size:.75rem;--reader-title-size:1.1875rem}
+ .reader-workbench .pane-header{min-height:65px;padding:7px 11px}
+ .reader-workbench .analysis-header{min-height:55px}
+ .reader-workbench .pane-header h2{font-size:.875rem}
+ .reader-workbench .analysis-scroll{padding:13px 14px 19px}
+ .reader-workbench .code-line{grid-template-columns:33px minmax(0,1fr);padding-right:8px}
+ .reader-workbench .code-text{word-break:break-all}
+ .reader-workbench .ln{padding-right:7px}
+ .reader-workbench .analysis-section h3{font-size:1.0625rem}
+}
