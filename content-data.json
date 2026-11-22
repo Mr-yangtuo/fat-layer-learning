@@ -38,7 +38,8 @@
         ],
         "returns": [
           "导入完成后，调用方可使用这两个名字。"
-        ]
+        ],
+        "core": false
       }
     ],
     "role": "主训练使用：包级导出入口",
@@ -126,7 +127,8 @@
         ],
         "returns": [
           "模块全局配置；后续初始化和取样共同读取这些值。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 35,
@@ -205,7 +207,8 @@
         ],
         "returns": [
           "裁剪后的浮点坐标数组和布尔有效掩码。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 51,
@@ -348,7 +351,8 @@
             }
           ],
           "caption": "原始图像始终保留；此判断只控制是否额外增加裁剪版本。"
-        }
+        },
+        "core": true
       },
       {
         "start": 72,
@@ -452,7 +456,8 @@
         ],
         "returns": [
           "初始化出的路径列表；构造方法本身不返回样本。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 102,
@@ -528,7 +533,8 @@
         ],
         "returns": [
           "包含原图版与可选裁剪版的样本索引。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 130,
@@ -588,7 +594,8 @@
         ],
         "returns": [
           "__len__ 返回 int；初始化保存两个变换器。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 151,
@@ -797,7 +804,8 @@
             }
           ],
           "caption": "图像与标签始终走相同视野分支，再一起进入最终模型尺寸。"
-        }
+        },
+        "core": true
       },
       {
         "start": 185,
@@ -873,7 +881,8 @@
         ],
         "returns": [
           "已处理的 img、y_px、valid，准备生成热图并打包。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 209,
@@ -920,7 +929,8 @@
         ],
         "returns": [
           "dict：image、heatmaps、y_px、valid、name、ann_path。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 220,
@@ -991,7 +1001,8 @@
         ],
         "returns": [
           "dict：image、y_px、valid、name，以及可选 heatmaps。"
-        ]
+        ],
+        "core": true
       }
     ],
     "role": "主训练使用：样本读取、预处理与组批的入口",
@@ -1239,7 +1250,8 @@
         ],
         "returns": [
           "select_target_lines 返回线对象列表；_canonical_label 返回字符串。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 31,
@@ -1359,7 +1371,8 @@
         ],
         "returns": [
           "两个 NumPy 数组：浮点坐标 [L,W]、bool 掩码 [L,W]。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 78,
@@ -1411,7 +1424,8 @@
         ],
         "returns": [
           "bool：仅表示两个目标标签名是否齐全。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 90,
@@ -1527,7 +1541,8 @@
         ],
         "returns": [
           "本段建立插值查询位置；无点的线直接产生全无效输出，其余进入下一段。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 122,
@@ -1671,7 +1686,8 @@
             }
           ],
           "caption": "坐标数组里的一个非零值不自动代表有效标签，必须同时查看 valid。"
-        }
+        },
+        "core": true
       }
     ],
     "role": "主训练使用：标注解析、标签筛选、插值与有效范围处理",
@@ -1908,7 +1924,8 @@
         ],
         "returns": [
           "当前目录下的路径对列表。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 25,
@@ -1975,7 +1992,8 @@
         ],
         "returns": [
           "所有发现的有效图像—标注路径对。"
-        ]
+        ],
+        "core": false
       }
     ],
     "role": "主路径与清单生成共用：样本文件发现",
@@ -2142,7 +2160,8 @@
         ],
         "returns": [
           "list[dict]：按原文件行顺序排列的有效记录。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 26,
@@ -2204,7 +2223,8 @@
         ],
         "returns": [
           "文件绝对路径字符串。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 38,
@@ -2308,7 +2328,8 @@
         ],
         "returns": [
           "本段通过后，得到互不重叠的组集合和待做路径对检查的记录。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 66,
@@ -2381,7 +2402,8 @@
         ],
         "returns": [
           "当前模式的路径对列表。"
-        ]
+        ],
+        "core": false
       }
     ],
     "role": "提供 split_manifest 时的主训练路径：加载和校验固定数据划分",
@@ -2726,7 +2748,8 @@
             }
           ],
           "caption": "parents 的键是样本总数，不是组号；记录前驱才能恢复实际选择。"
-        }
+        },
+        "core": false
       },
       {
         "start": 51,
@@ -2796,7 +2819,8 @@
         ],
         "returns": [
           "write_jsonl 返回 None，副作用是写入文件；manifest_digest 返回 64 字符的 SHA256 字符串。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 65,
@@ -2929,7 +2953,8 @@
         ],
         "returns": [
           "grouped、val_groups、root、output 与 args，供后半段写清单。"
-        ]
+        ],
+        "core": false
       },
       {
         "start": 100,
@@ -3009,7 +3034,8 @@
         ],
         "returns": [
           "磁盘上的 train.jsonl、val.jsonl、meta.json；终端打印元数据与校验后的样本数。"
-        ]
+        ],
+        "core": false
       }
     ],
     "role": "训练前的辅助工具：生成可复现、按目录组隔离的清单",
@@ -3223,7 +3249,8 @@
         ],
         "returns": [
           "进入后续分支的 img、y_px、valid；完整 __call__ 最后返回三者。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 22,
@@ -3280,7 +3307,8 @@
         ],
         "returns": [
           "局部被修改的 img 与 y_px；valid 保持原样。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 33,
@@ -3455,7 +3483,8 @@
             }
           ],
           "caption": "该图描述当前实现，不将注释中的“向下”当作已实现行为。"
-        }
+        },
+        "core": true
       },
       {
         "start": 64,
@@ -3568,7 +3597,8 @@
         ],
         "returns": [
           "Tensor [L,H,W]；有效列包含高斯值，无效列全零。"
-        ]
+        ],
+        "core": false
       }
     ],
     "role": "主训练使用：常规联合增强；同时生成数据集附带热图",
@@ -3777,7 +3807,8 @@
         ],
         "returns": [
           "与输入形状相同的图像数组。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 27,
@@ -3852,7 +3883,8 @@
         ],
         "returns": [
           "uint8 图像数组。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 36,
@@ -3945,7 +3977,8 @@
         ],
         "returns": [
           "同尺寸图像数组。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 62,
@@ -4033,7 +4066,8 @@
         ],
         "returns": [
           "同尺寸 uint8 图像。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 83,
@@ -4086,7 +4120,8 @@
         ],
         "returns": [
           "单次特殊外观增强后的图像。"
-        ]
+        ],
+        "core": true
       }
     ],
     "role": "主训练的可选外观增强：在张量标准化之前使用",
@@ -4332,7 +4367,8 @@
         ],
         "returns": [
           "new_img=[1,H,W]、new_y=[N,W]；非法 x 时返回原对象。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 61,
@@ -4436,7 +4472,8 @@
         ],
         "returns": [
           "padded=[C,H,W]、new_y=[N,W]。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 125,
@@ -4626,7 +4663,8 @@
             }
           ],
           "caption": "安全范围计算没有使用 valid；无效零占位也会影响是否能执行。"
-        }
+        },
+        "core": true
       },
       {
         "start": 196,
@@ -4757,7 +4795,8 @@
         ],
         "returns": [
           "aug_img=[C,H,W]、new_y=[N,W]；默认 y_noise=0 时坐标不变。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 258,
@@ -4863,7 +4902,8 @@
         ],
         "returns": [
           "smooth_noise_1d 返回 [W]；smooth_noise_2d 返回 [H,W]。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 287,
@@ -5114,7 +5154,8 @@
             }
           ],
           "caption": "图像反向映射和标签前向映射不是自动互为逆；当前实现还存在横向标签未同步等限制。"
-        }
+        },
+        "core": true
       },
       {
         "start": 353,
@@ -5324,7 +5365,8 @@
             }
           ],
           "caption": "scale_eff 在中间区域随深度变化；下方的位移来自整列区域厚度变化。"
-        }
+        },
+        "core": true
       },
       {
         "start": 426,
@@ -5376,7 +5418,8 @@
         ],
         "returns": [
           "new_img=[C,H,W]，空间尺寸不变但内容已形变。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 438,
@@ -5452,7 +5495,8 @@
         ],
         "returns": [
           "new_img=[C,H,W]、new_y=[N,W]。"
-        ]
+        ],
+        "core": true
       },
       {
         "start": 466,
@@ -5527,7 +5571,8 @@
         ],
         "returns": [
           "增强后的图像与坐标；外层数据集仍使用原 valid。"
-        ]
+        ],
+        "core": true
       }
     ],
     "role": "主训练的可选张量增强：在 z-score 和 JointAugment 之后调用",

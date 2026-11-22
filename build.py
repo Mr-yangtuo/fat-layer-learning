@@ -57,6 +57,7 @@ for part in ("data", "model", "training"):
             assert 1 <= seg["start"] <= seg["end"] <= len(lines), (item["path"], seg["title"])
             assert seg["start"] > previous, (item["path"], "overlapping segments", seg["title"])
             previous = seg["end"]
+            assert isinstance(seg.get("core"), bool), (item["path"], "missing core classification", seg["title"])
             for key in ("title","summary","principle","syntax","steps","returns"):
                 assert seg.get(key), (item["path"], key, seg["title"])
             assert not any(key in seg for key in ("exercise", "answer", "diagram")), (item["path"], "obsolete teaching schema")
@@ -149,7 +150,7 @@ for visual in visuals:
         file = next(f for f in files if f["path"] == link["path"])
         segment = next(s for s in file["segments"] if s["start"] == link["start"])
         segment.setdefault("visuals", []).append(visual["id"])
-manifest = {"created":"2026-11-14","updated":"2026-11-22","reader_version":5,"files":files,"visuals":visuals}
+manifest = {"created":"2026-11-14","updated":"2026-11-22","reader_version":6,"files":files,"visuals":visuals}
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {
@@ -166,5 +167,6 @@ assert "/*__" not in html
 summary = {"files":len(files),"segments":sum(len(f["segments"]) for f in files),"source_lines":sum(len(f["lines"]) for f in files),"html_bytes":len(html.encode()),"hashes":{f["path"]:f["sha256"] for f in files}}
 summary.update(definitions=sum(len(f.get("definitions",[])) for f in files), parameter_entries=sum(len(s["parameters"]) for f in files for s in f["segments"]), variable_entries=sum(len(s["variables"]) for f in files for s in f["segments"]), flowcharts=sum(bool(f.get("pipeline")) + sum(bool(s.get("flow")) for s in f["segments"]) for f in files))
 summary.update(concept_illustrations=len(visuals), illustrated_segments=sum(bool(s.get("visuals")) for f in files for s in f["segments"]))
+summary.update(core_segments=sum(s["core"] for f in files for s in f["segments"]))
 (ROOT / "build-manifest.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
 print(json.dumps({k:v for k,v in summary.items() if k!="hashes"},ensure_ascii=False))
