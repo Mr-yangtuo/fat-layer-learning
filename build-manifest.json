@@ -2,7 +2,7 @@
   "files": 19,
   "segments": 114,
   "source_lines": 2572,
-  "html_bytes": 1477945,
+  "html_bytes": 2825940,
   "hashes": {
     "LineDet/dataset/__init__.py": "bae4c91e4ec7411341a0714ce1530c11c6f03a490490e0f43d82944554a35425",
     "LineDet/dataset/dataset.py": "e8f4ecfc579411b3dd38ef7ce57663de1479a57d3f42c1d86b1edcff190920a5",
@@ -27,5 +27,7 @@
   "definitions": 93,
   "parameter_entries": 349,
   "variable_entries": 595,
-  "flowcharts": 53
+  "flowcharts": 53,
+  "concept_illustrations": 29,
+  "illustrated_segments": 82
 }

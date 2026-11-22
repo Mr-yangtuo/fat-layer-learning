@@ -1,0 +1,613 @@
+[
+  {
+    "id": "reader-data-sparse",
+    "title": "从离散点到逐列坐标",
+    "caption": "图中使用同尺寸数例，专门拆开“插值高度”和“有效列”两件事。两个或更多有效点时，首末点之间的空列会被线性插值并设为有效；两端之外虽填入端点高度，仍不参与标签监督。代码的单点特例会把整行标记有效，不能照搬本图的有效区间。",
+    "alt": "坐标网格上三个实心人工点由折线连接，中间各列出现空心插值点，底部掩码条把端点之外涂为无效。",
+    "links": [
+      {
+        "path": "LineDet/dataset/line_utils.py",
+        "start": 31
+      },
+      {
+        "path": "LineDet/dataset/line_utils.py",
+        "start": 90
+      },
+      {
+        "path": "LineDet/dataset/line_utils.py",
+        "start": 122
+      }
+    ],
+    "file_note": "line_utils.py 文件级首选插图"
+  },
+  {
+    "id": "reader-data-resize",
+    "title": "裁剪副本与坐标缩放",
+    "caption": "示意尺寸与源码公式一致：422×728 的图可追加 422×485 的底部裁剪版。两份图随后分别缩放到256×256，因此同一原始高度会变成不同的新高度。裁剪不移动左上原点；落在裁剪高度之外的标注先置无效。是否追加副本由目标线保留检查决定。",
+    "alt": "并列展示完整超声示意图和只保留上部的裁剪副本，原图底部区域以橙色遮罩表示被移除，并给出同一高度的两种缩放结果。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 1
+      },
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 35
+      },
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 51
+      },
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 102
+      },
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 151
+      }
+    ],
+    "file_note": "dataset.py 文件级数据几何图"
+  },
+  {
+    "id": "reader-data-standardize",
+    "title": "标准化前后：坐标没动，数值换了尺度",
+    "caption": "先把图像像素缩放到0～1量级，再对当前图像计算均值与标准差。图中四值例子用torch.std默认样本标准差（分母N−1），说明负值的来源和尺度变化；正式图像有更多像素。高斯噪声、亮度等训练变换可能在标准化前改变分布。",
+    "alt": "左右两个2×2灰度数值表保持同一格子位置，右侧出现负数与正数；底部按每个数各一次出现绘制数值分布。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 130
+      },
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 185
+      }
+    ],
+    "file_note": "适用于标准化片段；不是图像几何变换"
+  },
+  {
+    "id": "reader-data-batch",
+    "title": "样本字典与批次张量",
+    "caption": "Dataset返回一个样本字典。default_collate分别收集image、y_px、valid、heatmaps并调用torch.stack，增加最前面的批次维度；names与ann_paths保持字符串列表。图中B=3只是示例，真实batch_size由训练配置决定。",
+    "alt": "三张示意图下方分别带两行坐标带和两行有效掩码带；底部画出图像、坐标、掩码各自的三层堆叠。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 209
+      },
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 220
+      }
+    ],
+    "file_note": "批次组织与字段契约图"
+  },
+  {
+    "id": "reader-data-augment",
+    "title": "水平翻转、遮挡与上移的空间对照",
+    "caption": "水平翻转会同时翻转图像、逐列坐标与掩码。深色遮罩只标记被置零的位置，标准化后的0并不等于原始灰度0。图中的纵移示例对应第一条上移分支：roll(shifts=-shift)后底部补零、坐标减shift。源码第二条名义“下移”分支仍使用负shift且顶部补零，与正常下移不同。边缘遮挡会修改坐标但没有更新valid，erase_width=0时右侧切片也存在特殊行为。",
+    "alt": "三幅组织图并列展示原始、镜像和左侧遮挡，黄色点可追踪翻转位置；底部两组横条展示向上移动与底部补零。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset_utils.py",
+        "start": 1
+      },
+      {
+        "path": "LineDet/dataset/dataset_utils.py",
+        "start": 22
+      },
+      {
+        "path": "LineDet/dataset/dataset_utils.py",
+        "start": 33
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils.py",
+        "start": 36
+      }
+    ],
+    "file_note": "联合增强的几何关系；不能作为所有分支正确性的证明"
+  },
+  {
+    "id": "reader-data-warp",
+    "title": "用网格看见非均匀组织形变",
+    "caption": "图示表达逐列改变组织厚度、上部保持与下部位移的设计思路，不是对实际grid_sample结果的数值重现。代码对图像做反向取样，对边界做前向高度变换；它并未同步处理标签的横向位移，也未更新有效掩码，而且深度权重使两种映射不一定互为严格逆变换。",
+    "alt": "左右坐标网格中两条组织边界之间以紫色竖段标厚度，右侧中间列更厚、网格发生弯曲，用来观察非均匀拉伸。",
+    "links": [
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 287
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 353
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 426
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 438
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 466
+      }
+    ],
+    "file_note": "非均匀形变函数的主要图解"
+  },
+  {
+    "id": "reader-data-split",
+    "title": "用文件夹和源图身份理解数据划分",
+    "caption": "上半图是按目录分组的示意，没有使用真实样本身份；整个目录组分到一侧后再生成裁剪副本。下半图对应无清单旧路径：训练保留全部源图，而验证截取末尾部分，导致源图交集。固定清单同时检查目录组与图像-标注身份交集，但不能仅凭目录名称证明患者级隔离。",
+    "alt": "上方三个文件夹装着不同标记的图像缩略图，训练两组和验证一组由虚线分隔；下方训练与验证都有同一个橙色框D。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 72
+      },
+      {
+        "path": "LineDet/dataset/utils.py",
+        "start": 1
+      },
+      {
+        "path": "LineDet/dataset/utils.py",
+        "start": 25
+      },
+      {
+        "path": "LineDet/dataset/split_manifest.py",
+        "start": 38
+      },
+      {
+        "path": "LineDet/dataset/split_manifest.py",
+        "start": 66
+      },
+      {
+        "path": "generate_group_split.py",
+        "start": 1
+      },
+      {
+        "path": "generate_group_split.py",
+        "start": 65
+      },
+      {
+        "path": "generate_group_split.py",
+        "start": 100
+      }
+    ],
+    "file_note": "划分相关文件的整体图；图中样本标记是虚构示例"
+  },
+  {
+    "id": "reader-data-appearance",
+    "title": "外观增强六宫格",
+    "caption": "同一合成像素阵列分别展示局部变暗、全图强度放大、局部覆盖、局部强度跳变与浅部亮带。前四类由special_enhancement随机选一种，浅部亮带来自另一套增强。图中线条是额外叠加的位置参照，操作数值仅作示例；真实代码的随机范围、数值裁剪和标准化时机见参数与原理说明。",
+    "alt": "六幅纹理完全对应的组织示意图显示不同亮度与遮挡效果，同一对彩色曲线保持相同位置。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset.py",
+        "start": 130
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils.py",
+        "start": 1
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils.py",
+        "start": 27
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils.py",
+        "start": 36
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils.py",
+        "start": 62
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils.py",
+        "start": 83
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 196
+      }
+    ],
+    "file_note": "特殊外观增强文件级首选图"
+  },
+  {
+    "id": "reader-data-geometric",
+    "title": "三种纵向几何增强的坐标对照",
+    "caption": "条带表示原图中不同高度的组织。图中H=100、处理20行，原y=40分别变为50、25或52，直接对应三个函数中的坐标公式。实际代码会把结果夹到[0,H−1]；这些函数只返回图像与坐标，没有同步返回更新后的valid。函数名crop_upper_and_stretch实际裁掉底部，crop_lower_and_stretch实际裁掉顶部，应以切片和公式判断。",
+    "alt": "四幅相同尺寸的竖向条带图分别显示原图、裁下部再拉伸、裁上部再拉伸、压缩后顶部补零，一条带橙色点的绿线追踪同一个原高度。",
+    "links": [
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 1
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 61
+      },
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 125
+      }
+    ],
+    "file_note": "纵向裁剪压缩三个函数的共用比较图"
+  },
+  {
+    "id": "reader-data-gaussian",
+    "title": "未归一化热图与损失目标的区别",
+    "caption": "这是同一列的计算对照，为单独观察归一化，把两边σ都设为1；正式默认路径的数据集σ来自配置，损失函数内部固定为3，因此真实两张图的宽度也可能不同。Dataset直接写入高斯值，整数中心的峰值为1，但每列之和不必为1；损失里的工具把有效列除以高度方向的总和。main.py取出batch热图却未传给loss_fn，实际监督目标在损失内部由坐标重新生成。无效列的热图为0，并被损失掩码排除。",
+    "alt": "两组并列的五行热图色块分别列出未归一化高斯值和列归一化后的值，下面标出列和2.4837与1，以及默认训练实际使用哪一组。",
+    "links": [
+      {
+        "path": "LineDet/dataset/dataset_utils.py",
+        "start": 64
+      }
+    ],
+    "file_note": "用于未归一化Dataset热图函数；不要与模型/损失的Gaussian图混成同一张标签。"
+  },
+  {
+    "id": "reader-data-noise",
+    "title": "多频正弦叠加与二维外积噪声",
+    "caption": "上部示例只画3个频率分量，便于看到高频幅度按1/k衰减；真实默认num_freqs=4，每个频率为k×(1+randint(1,4))，相位也随机。代码最后除以最大绝对值，分母下限1e−6，非零结果归一化到[−1,1]；这与旧注释“未严格归一化”不同。下部用两条简化向量展示广播外积noise_y[:,None]×noise_x[None,:]，实际二维结果也再做最大绝对值归一化。其纹理是可分离的，不等于通用二维Perlin算法。",
+    "alt": "左上三条不同频率与幅度的正弦波与右上归一化叠加波形对照；下方4×4矩阵以正负色彩和数值呈现两个向量的外积。",
+    "links": [
+      {
+        "path": "LineDet/dataset/special_dataset_utils2.py",
+        "start": 258
+      }
+    ],
+    "file_note": "噪声辅助函数图，强调1D波形叠加与2D可分离外积，不暗示独立像素白噪声。"
+  },
+  {
+    "id": "reader-model-assembly",
+    "title": "网络是怎样装配起来的",
+    "caption": "先产生细节较丰富的浅层特征，再继续计算分辨率更低的深层特征。融合时将深层特征双线性上采样到浅层大小，沿通道拼接，随后三次卷积依次完成融合压缩、隐藏特征扩展和两条边界评分。每张评分图沿高度解码为一条曲线。图中使用主训练的2条边界配置；构造函数默认值本身是3。",
+    "alt": "灰度图、不同分辨率的浅深特征堆叠、上采样后的两组特征以及两张边界评分图的立体装配示意。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 81
+      },
+      {
+        "path": "LineDet/model/model.py",
+        "start": 155
+      },
+      {
+        "path": "LineDet/model/model.py",
+        "start": 176
+      }
+    ]
+  },
+  {
+    "id": "reader-model-fusion",
+    "title": "通道拼接以后，卷积具体在做什么",
+    "caption": "拼接后的每个像素位置有1000个输入特征。融合3×3卷积的每个输出通道都使用1000×3×3个权重，并输出40通道；预测头的3×3卷积再从40扩展到128通道。最后1×1卷积在每个空间位置用两组128维权重分别产生上下边界的原始分数，末层没有Sigmoid或ReLU。",
+    "alt": "两组通道薄片拼成1000通道；跨通道三乘三邻域加权；128维同位置特征经两组权重投影成两个评分。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 139
+      },
+      {
+        "path": "LineDet/model/model.py",
+        "start": 155
+      }
+    ]
+  },
+  {
+    "id": "reader-model-gaussian",
+    "title": "把一个高度，展开成一整列软目标",
+    "caption": "参考坐标不是被取整为一行硬标签，而是作为高斯函数中心，为每个整数行计算权重，再沿高度除以这一列权重总和。五行数例的目标为[0.0545,0.2442,0.4026,0.2442,0.0545]。损失会重新生成这种列归一化目标；Dataset提供的未归一化热图并没有被默认损失直接使用。",
+    "alt": "一列五行像素、逐行高斯权重长条和归一化后的数值对照，展示从边界高度2生成高斯软目标。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 119
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 17
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 87
+      }
+    ]
+  },
+  {
+    "id": "reader-model-score-paths",
+    "title": "同一份评分，两种不同的使用方式",
+    "caption": "默认热图损失对原始分数逐元素做Sigmoid，再与归一化高斯软目标计算二元交叉熵；坐标解码对同一原始分数沿高度做Softmax，再算行号期望。两条路径共享原始评分，但不是同一组概率，不能把Sigmoid结果直接当作Softmax分布。",
+    "alt": "同一个三行原始评分，左侧逐元素Sigmoid条形结果总和不为1，右侧Softmax条形结果总和为1并得到坐标1.575。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 105
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 27
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 87
+      }
+    ]
+  },
+  {
+    "id": "reader-model-expectation",
+    "title": "为什么加权平均不一定落在峰上",
+    "caption": "这组概率总和为1、左右对称，期望是第3行，而最大概率出现在第2和第4行。Soft-argmax是全部行号的加权平均，不是挑一个最大值索引；不同分布可能产生同样的坐标。下方用支点与不同大小的配重直观表示同一个平均计算。",
+    "alt": "两个高概率峰位于2和4，虚线平均位置位于3；下方对称配重的平衡支点也位于3，说明期望与最大峰不同。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 105
+      }
+    ]
+  },
+  {
+    "id": "reader-model-geometry",
+    "title": "三个几何约束，看的是不同问题",
+    "caption": "拓扑项惩罚上边界高度大于下边界高度的列。二阶平滑项看相邻三列的二阶差分，匀速倾斜可以为零。TV看相邻两列的绝对高度差，即使是一条平直斜线也可能大于零。当前代码这三种几何项都没有使用valid掩码，因此无标签列也会受到它们的约束。",
+    "alt": "上部两条边界交叉，中部匀速斜线与折角对比，下部斜线与水平线对比，分别展示拓扑、二阶平滑和TV的惩罚对象。",
+    "links": [
+      {
+        "path": "LineDet/loss.py",
+        "start": 38
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 45
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 52
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 100
+      }
+    ]
+  },
+  {
+    "id": "reader-model-denoise",
+    "title": "可学习滤波层怎样开始工作",
+    "caption": "DenoiseBlock用二维高斯权重初始化一个5×5分组卷积。主模型只有一个灰度通道，padding=2保留空间尺寸，bias=False不加偏置。learnable=True意味着初始化后这些权重仍参与梯度更新；它是一层可学习卷积，而不是每次前向都重新生成固定高斯滤波器。矩阵数值仅显示三位小数，精确权重之和为1。 色块亮度用来显示相对权重，不代表原始像素值的统一显示尺度。",
+    "alt": "五乘五高斯初始化矩阵及其数值；孤立亮点输入在卷积后成为局部亮度团，展示邻域加权混合。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 17
+      },
+      {
+        "path": "LineDet/model/model.py",
+        "start": 39
+      }
+    ]
+  },
+  {
+    "id": "reader-model-smoothing",
+    "title": "推理后的曲线怎样变平滑",
+    "caption": "smooth_y_px沿宽度方向对每条边界的高度序列做分组一维卷积，默认kernel_size=5、sigma=1.5，边缘使用replicate复制端点。例子中的尖峰14被附近10的高度拉回。infer_lines默认启用这一步，但训练验证指标直接使用模型原始坐标；两者可能不同。",
+    "alt": "五个原始边界高度中有一个尖峰，一维高斯平滑后曲线变缓；下方显示五个归一化权重和中心高度的计算。",
+    "links": [
+      {
+        "path": "LineDet/utils.py",
+        "start": 7
+      },
+      {
+        "path": "LineDet/utils.py",
+        "start": 30
+      }
+    ]
+  },
+  {
+    "id": "reader-model-coordinate-loss",
+    "title": "坐标误差怎样被有效掩码筛选",
+    "caption": "坐标MSE先求预测与参考高度之差的平方，再用valid_mask保留有效位置并求均值。MAE则把平方换为绝对值。本例有效误差为0、1、−2，因此MSE=5/3，MAE=1像素；无效位置即使误差很大，也不进入这两项的分子和分母。这里仅示意一条边界。",
+    "alt": "绿色参考曲线与橙色预测曲线逐列对照，灰色无效列被排除，三列误差进入MSE和MAE的明确数值计算。",
+    "links": [
+      {
+        "path": "LineDet/loss.py",
+        "start": 10
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 143
+      }
+    ]
+  },
+  {
+    "id": "reader-model-export",
+    "title": "端侧文件里实际装了两个模型",
+    "caption": "导出包装器把输入按整体均值和标准差归一化，同时调用已训练的边界模型和从外部检查点加载的MobileNetV3-small质量模型。边界输出转float32；质量分数沿类别维argmax后转uint8。torch.export捕获联合计算，XNNPACK参与后端转换，再写成best.pte。后续运行时烟雾检查会运行样例并打印形状，但没有数值等价验证。",
+    "alt": "一个PTE文件外壳内并列装着两个独立模型，共享同一标准化灰度图；一个输出两条曲线坐标，另一个输出质量类别0或1。",
+    "links": [
+      {
+        "path": "LineDet/export.py",
+        "start": 15
+      },
+      {
+        "path": "LineDet/export.py",
+        "start": 122
+      },
+      {
+        "path": "LineDet/export.py",
+        "start": 153
+      },
+      {
+        "path": "LineDet/export.py",
+        "start": 172
+      }
+    ]
+  },
+  {
+    "id": "reader-model-bce",
+    "title": "热图损失怎样逐位置比较",
+    "caption": "上半图使用五行高斯软目标和一组示意预测值，逐行计算−[q ln p+(1−q)ln(1−p)]，然后对这一个有效列的五个位置求平均。实际代码对批次中所有有效列的所有高度位置统一求平均。下半图固定q=0.4，预测p=0.4时BCE约0.673，是该目标的最小值；软目标下最小交叉熵通常不是零。",
+    "alt": "高斯软目标与预测响应逐行对照，展示每个位置的BCE；曲线显示目标0.4对应的最优预测也是0.4，而非1。",
+    "links": [
+      {
+        "path": "LineDet/loss.py",
+        "start": 27
+      },
+      {
+        "path": "LineDet/loss.py",
+        "start": 87
+      }
+    ]
+  },
+  {
+    "id": "reader-model-visualization",
+    "title": "源码里的绘图，画的是哪些数据",
+    "caption": "图中使用人工合成的背景、曲线和评分，展示绘图函数的输入关系，不是真实病例或预测。左侧为教学用途，把GT虚线与预测实线叠在一起；实际visualize_pred_gt生成GT和Pred左右双栏，各自按边界编号着色，且heatmaps参数未被使用。右侧显示原始logits，经颜色映射后仍不是概率。当前main传给visualize_heatmaps的曲线形状为[1,L,W]，不满足函数内要求的二维[L,W]条件，所以那一路的曲线叠加会被跳过；热图本身仍会绘出。",
+    "alt": "左侧合成超声样式图像上叠加两条参考虚线和两条预测实线，右侧上下两张彩色评分网格及颜色标尺，说明坐标叠图与热图着色的数据区别。",
+    "links": [
+      {
+        "path": "LineDet/utils.py",
+        "start": 50
+      },
+      {
+        "path": "LineDet/utils.py",
+        "start": 69
+      },
+      {
+        "path": "LineDet/utils.py",
+        "start": 97
+      },
+      {
+        "path": "main.py",
+        "start": 331
+      }
+    ]
+  },
+  {
+    "id": "reader-model-backbones",
+    "title": "两种骨干怎样交出浅层与深层特征",
+    "caption": "V3-large使用torchvision的features顺序模块，前5个子模块生成浅层特征，其余子模块继续从浅层特征生成深层特征。V4调用timm特征提取器，按out_indices=(2,4)一次返回两层特征；通道数从feature_info元数据读取，不应套用V3的40和960。主网络检测返回值是否为list或tuple来区分这两种协议。V4分支返回的第二个模块是Identity占位，正常前向不会再用它计算深层。",
+    "alt": "上半图将顺序模块序列的前五项和后续项分成两组并画出不同尺度特征，下半图用一个返回列表托盘呈现V4一次提供的low和high两个特征张量。",
+    "links": [
+      {
+        "path": "LineDet/model/model.py",
+        "start": 47
+      },
+      {
+        "path": "LineDet/model/model.py",
+        "start": 69
+      }
+    ]
+  },
+  {
+    "id": "reader-training-update",
+    "title": "梯度怎样改变卷积核",
+    "caption": "为看清一次参数更新，图中只给中心权重一个非零梯度。数值使用 AdamW 首步的偏差修正：β₁=0.9、β₂=0.999、ε=10⁻⁸、学习率 0.001、权重衰减 10⁻⁴；该例梯度总范数 0.3 小于裁剪阈值 5。下方损失曲线取 L=½(w−0.5)²，仅用于解释负梯度方向，所有数值都不是实际训练记录。",
+    "alt": "三个三乘三矩阵分别表示权重0.2、梯度负0.3与更新后约0.201，并以局部损失曲线展示下降方向。",
+    "links": [
+      {
+        "path": "main.py",
+        "start": 85
+      },
+      {
+        "path": "main.py",
+        "start": 105
+      },
+      {
+        "path": "main.py",
+        "start": 230
+      }
+    ]
+  },
+  {
+    "id": "reader-training-metrics",
+    "title": "误差带、逐列偏差与 HD 的局限",
+    "caption": "上图在每一列比较预测和参考高度：误差为 [1,2,4,0,6]，因此 A@2=A@3=60%，A@5=80%。下图的两条曲线逐列相差 3，但两组高度都只含 1 与 4；当前 hausdorff_distance 丢掉横坐标后得到 HD=HD95=0。该例说明这个实现不是二维曲线距离；阈值指标和当前 HD 均未使用 valid 掩码。",
+    "alt": "带有正负二三五像素容差带的参考水平线与预测折线，以及高度集合相同但逐列不重合的两条交叉曲线。",
+    "links": [
+      {
+        "path": "main.py",
+        "start": 50
+      },
+      {
+        "path": "main.py",
+        "start": 60
+      },
+      {
+        "path": "main.py",
+        "start": 115
+      }
+    ]
+  },
+  {
+    "id": "reader-training-states",
+    "title": "训练与验证改变了哪些状态",
+    "caption": "两边都把一批图像送入同一个网络。训练调用 model.train()，BatchNorm 使用当前批统计并更新运行统计；随后 backward 和 optimizer.step 才更新可学习权重。验证同时调用 model.eval() 和 no_grad()：BatchNorm 读取训练累计的统计，不记录梯度，也不执行参数更新。图中的权重和统计位置仅作示意。",
+    "alt": "左右两栏各有一叠灰度图和两张权重网格；训练一侧中心参数变化，验证一侧保持相等，底部标尺显示BatchNorm统计更新与保持。",
+    "links": [
+      {
+        "path": "main.py",
+        "start": 85
+      },
+      {
+        "path": "main.py",
+        "start": 115
+      },
+      {
+        "path": "main.py",
+        "start": 247
+      }
+    ]
+  },
+  {
+    "id": "reader-training-checkpoints",
+    "title": "最佳模型与每十轮快照",
+    "caption": "示意曲线在第 23 轮达到最低验证 MAE，第 27 轮只是相等，因判断是严格小于而不会替换 best。周期快照独立于最佳判断，在第 10、20、30 轮保存。实际 best.pth 记录模型、轮次、指标和配置，但不保存优化器与完整随机状态；它不等价于可精确续训的完整状态。",
+    "alt": "三十轮示意验证MAE折线，最低点在第二十三轮，十、二十、三十轮有周期保存标记，下方绘制best和周期权重文件。",
+    "links": [
+      {
+        "path": "main.py",
+        "start": 247
+      },
+      {
+        "path": "main.py",
+        "start": 294
+      },
+      {
+        "path": "main.py",
+        "start": 354
+      }
+    ]
+  },
+  {
+    "id": "reader-training-comparison",
+    "title": "两种训练协议的集合关系",
+    "caption": "用 10 张源图说明集合关系，不代表真实数据量。train100 使用全部源图训练，验证取其中一部分，因此存在同源重叠；train90 依据预生成清单按目录组留出，训练和验证源图隔离。图片的裁剪副本不改变来源身份。目录组隔离仍不自动等于患者身份隔离；两次运行要结合划分摘要解释各自指标。",
+    "alt": "左侧十张训练源图中有一张同时被选作验证，右侧九张属于三个训练目录组、另一张属于独立验证目录组。",
+    "links": [
+      {
+        "path": "main.py",
+        "start": 33
+      },
+      {
+        "path": "main.py",
+        "start": 194
+      },
+      {
+        "path": "run_dual_split.sh",
+        "start": 119
+      },
+      {
+        "path": "summarize_comparison.py",
+        "start": 19
+      },
+      {
+        "path": "train减脂.sh",
+        "start": 9
+      }
+    ]
+  }
+]

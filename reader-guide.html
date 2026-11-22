@@ -1,0 +1,38 @@
+<section class="project-reading-guide">
+  <span class="eyebrow">SOURCE READER / 全局导读</span>
+  <h1>从一张图出发，<br>沿着数据读完整个项目。</h1>
+  <p class="guide-lead">先理解文件之间怎样合作，再进入具体实现。左侧文件地图按目录排列；下面的阅读顺序按理解过程排列，两者承担不同的作用。</p>
+  <div class="guide-opening">
+    <h2>这张文件地图，围绕一个训练闭环展开</h2>
+    <p><strong>main.py 是调度入口。</strong>它先准备数据、模型和损失，再重复训练与验证，最后保存或导出模型。真正处理标注的算法、卷积网络和误差公式，分别放在不同模块中。</p>
+    <p><strong>LineDet/dataset 管“给模型什么”。</strong>它把磁盘上的图像和稀疏边界点，变成尺寸一致的图像、逐列坐标和有效掩码。<strong>LineDet/model 管“怎样预测”。</strong>它把图像转换为两张边界评分图，再得到两条坐标曲线。<strong>LineDet/loss.py 管“怎样判断预测好坏”。</strong>它把预测与标签比较，产生用于更新网络的损失。</p>
+    <p>其余文件围绕这条主线服务：划分清单决定哪些原图进入训练或验证；增强增加输入变化；可视化帮助检查预测；Shell 脚本组织实验；导出器将模型打包。包目录中的 <code>__init__.py</code> 只是对外提供导入入口。</p>
+  </div>
+  <div class="guide-reading-rule"><strong>先追踪四种数据</strong><span>图像 <code>[B,1,H,W]</code></span><span>标签与掩码 <code>[B,2,W]</code></span><span>评分图 <code>[B,2,H,W]</code></span><span>预测坐标 <code>[B,2,W]</code></span><p>B 是批大小，H、W 是图像高宽，2 是两条边界。读每个函数时，先看它接收哪一种数据、改变了什么、交出哪一种数据，再理解具体语法。</p></div>
+</section>
+
+<section class="guide-order" aria-labelledby="guide-order-title">
+  <div class="guide-section-head"><span class="reader-kicker">建议阅读顺序</span><h2 id="guide-order-title">第一遍，沿七站读通主线</h2><p>这是理解顺序。实际执行时，主程序会先建立划分与数据加载器，再进入训练循环。</p></div>
+  <ol class="reading-stations">
+    <li><span class="station-number">1</span><div><h3>先认出总入口</h3><p>扫读主程序如何配置数据、模型和损失。暂时把它调用的函数当作有明确输入输出的部件，先知道全局有哪些参与者。</p><a href="#code/main.py?line=167">main.py · 主程序装配</a></div></li>
+    <li><span class="station-number">2</span><div><h3>弄懂参考答案从哪里来</h3><p>看人工标注怎样选出两条边界、同列点怎样合并、缺失列怎样插值，以及有效掩码究竟保留了哪些位置。</p><a href="#code/LineDet/dataset/line_utils.py?line=31">line_utils.py · 标注解析与插值</a></div></li>
+    <li><span class="station-number">3</span><div><h3>跟完一个样本，再看一批样本</h3><p>追踪原图、裁剪副本、缩放、标准化和增强。最后检查样本字典怎样被堆叠成 batch，图像和标签有没有对齐。</p><a href="#code/LineDet/dataset/dataset.py?line=151">dataset.py · 取样本与批处理</a></div></li>
+    <li><span class="station-number">4</span><div><h3>顺着特征形状走过网络</h3><p>先看模型装配和完整前向，再返回各个部件：去噪、双尺度骨干、通道融合、评分图预测、按高度求坐标。</p><a href="#code/LineDet/model/model.py?line=155">model.py · 模型装配与信息传递</a></div></li>
+    <li><span class="station-number">5</span><div><h3>把预测变成可学习的误差</h3><p>分清高斯目标、热图损失和坐标损失，再看上下顺序、二阶平滑与 TV 怎样约束曲线，以及哪些地方使用了 valid。</p><a href="#code/LineDet/loss.py?line=87">loss.py · 目标构造与复合损失</a></div></li>
+    <li><span class="station-number">6</span><div><h3>回到入口，读懂参数怎样更新</h3><p>此时再读一批训练与一轮验证：清梯度、前向、反向、裁剪、更新、计算指标、选择最佳权重，整条主线就闭合了。</p><a href="#code/main.py?line=85">main.py · 训练与验证</a><a href="#code/LineDet/utils.py?line=30">utils.py · 推理与检查图</a></div></li>
+    <li><span class="station-number">7</span><div><h3>最后看怎样组织实验和使用模型</h3><p>检查固定分组清单及两组实验脚本，再看最佳模型如何与独立质量分类器一起导出。阅读结果时区分训练重叠与独立留出。</p><a href="#code/generate_group_split.py?line=65">生成划分</a><a href="#code/run_dual_split.sh">组织两组实验</a><a href="#code/LineDet/export.py?line=153">导出模型</a></div></li>
+  </ol>
+</section>
+
+<section class="guide-map" aria-labelledby="guide-map-title">
+  <div class="guide-section-head"><span class="reader-kicker">文件地图</span><h2 id="guide-map-title">19 个文件，按职责放回全局</h2><p>第一遍沿主线阅读；第二遍按下面的职责分组补齐辅助函数、增强细节、划分审计和实验脚本。</p></div>
+  <div class="file-map-grid">
+    <article><span class="map-category">实验编排</span><h3>决定何时运行、记录和保存</h3><p>主程序串起各模块，脚本设定实验配置，汇总器读取已有实验结果。</p><a href="#code/main.py">main.py <small>训练与验证总控</small></a><a href="#code/run_dual_split.sh">run_dual_split.sh <small>两组划分的实验编排</small></a><a href="#code/train减脂.sh">train减脂.sh <small>一次训练的启动配置</small></a><a href="#code/summarize_comparison.py">summarize_comparison.py <small>对照实验结果汇总</small></a></article>
+    <article><span class="map-category">数据与标签</span><h3>把文件变成可训练的张量</h3><p>先找到图像与标注，再解析边界、构造样本、同步变换与批处理。</p><a href="#code/LineDet/dataset/utils.py">dataset/utils.py <small>扫描图像与标注配对</small></a><a href="#code/LineDet/dataset/line_utils.py">dataset/line_utils.py <small>标签筛选、插值与掩码</small></a><a href="#code/LineDet/dataset/dataset.py">dataset/dataset.py <small>数据集与 batch 组装</small></a><a href="#code/LineDet/dataset/dataset_utils.py">dataset/dataset_utils.py <small>联合变换与数据集热图</small></a><a href="#code/LineDet/dataset/special_dataset_utils.py">special_dataset_utils.py <small>外观变化与局部遮挡</small></a><a href="#code/LineDet/dataset/special_dataset_utils2.py">special_dataset_utils2.py <small>几何变化与组织形变</small></a></article>
+    <article><span class="map-category">划分协议</span><h3>决定哪些原图可以一起出现</h3><p>清单生成器先按目录分组；加载器读取清单并检查训练、验证之间的关系。</p><a href="#code/generate_group_split.py">generate_group_split.py <small>生成固定分组清单</small></a><a href="#code/LineDet/dataset/split_manifest.py">dataset/split_manifest.py <small>加载与检查清单</small></a></article>
+    <article><span class="map-category">预测与学习目标</span><h3>从图像得到曲线，再计算误差</h3><p>模型负责特征与预测，损失负责比较答案；损失中的梯度最终回到模型参数。</p><a href="#code/LineDet/model/model.py">model/model.py <small>网络、融合和坐标解码</small></a><a href="#code/LineDet/loss.py">loss.py <small>热图、坐标与几何损失</small></a></article>
+    <article><span class="map-category">预测检查与部署</span><h3>观察结果，把模型带出训练环境</h3><p>工具文件做推理、平滑与绘图；导出文件组合边界和质量模型，生成端侧模型包。</p><a href="#code/LineDet/utils.py">utils.py <small>推理、平滑与可视化</small></a><a href="#code/LineDet/export.py">export.py <small>双模型包装与 PTE 导出</small></a></article>
+    <article><span class="map-category">包入口</span><h3>让其他文件能方便地导入</h3><p>这三个小文件转出公共名称。主算法理解以后，再回来核对 import 路径即可。</p><a href="#code/LineDet/__init__.py">LineDet/__init__.py <small>顶层导入入口</small></a><a href="#code/LineDet/dataset/__init__.py">dataset/__init__.py <small>数据接口入口</small></a><a href="#code/LineDet/model/__init__.py">model/__init__.py <small>模型接口入口</small></a></article>
+  </div>
+</section>
+<div class="guide-howto"><h2>进入文件后，左右对照着读</h2><p>左侧保留完整源码并按职责划段；点击任一段，右侧立即切换为对应的图解与说明。先看图里的数据变化，再顺着执行步骤回到左侧行号，最后查参数、变量和语法细节。</p><a class="primary" href="#code/main.py?line=167">开始阅读主程序</a></div>

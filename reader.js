@@ -75,49 +75,79 @@ function typeGuide(f){
   if(!/torch|numpy|Tensor/.test(f.source))return '';
   return '<details class="definition-index type-guide"><summary>类型与张量尺寸怎么读</summary><div><p>Tensor 是 PyTorch 的多维数组，ndarray 是 NumPy 的多维数组。float 表示可带小数的数值，int 表示整数，bool 只有 True / False；list 是列表，tuple 是元组，dict 是按键名取值的字典。</p><p>形状中的 B 表示一批图像的数量，C 表示特征通道数，L 表示边界条数，H 表示高度，W 表示宽度。例如 [B,L,H,W] 是每张图、每条边界各有一张高度为 H、宽度为 W 的评分图；[B,L,W] 则是每条边界每列各有一个纵坐标。</p><p>项目的图像尺寸参数通常写成 (W,H)，图像张量的空间维度通常写成 [H,W]。每个函数的具体约定以参数表为准。</p></div></details>';
 }
+function visualFigure(id){
+  const visual=DATA.visuals?.find(v=>v.id===id);if(!visual)return '';
+  return '<figure class="concept-figure"><div class="concept-heading"><strong>'+esc(visual.title)+'</strong><button type="button" data-visual-zoom="'+esc(id)+'" aria-label="放大：'+esc(visual.title)+'">放大图解</button></div><button class="concept-image" data-visual-zoom="'+esc(id)+'" aria-label="查看大图：'+esc(visual.title)+'"><img src="'+visual.uri+'" alt="'+esc(visual.alt)+'" width="'+visual.width+'" height="'+visual.height+'" loading="lazy"></button><figcaption>'+esc(visual.caption)+'</figcaption></figure>';
+}
+function showProjectGuide(){
+  currentFile=null;currentSegment=null;$('#reader-guide').hidden=false;$('#file-view').hidden=true;
+  document.body.classList.remove('reader-wide');
+  $('#project-guide-link')?.classList.add('active');window.scrollTo(0,0);
+}
+function revealWorkbench(){
+  const workbench=$('#reader-workbench');if(!workbench)return;
+  const headerHeight=$('.header').getBoundingClientRect().height;
+  window.scrollTo({top:window.scrollY+workbench.getBoundingClientRect().top-headerHeight-10,behavior:'instant'});
+}
 function renderFile(path){
-  const f=files.find(f=>f.path===path);currentFile=f||null;
-  if(!f){$('#file-view').innerHTML='<h2>未找到这个文件</h2><p>请从左侧文件树选择一个文件。</p>';return}
-  let html='<article class="file-guide"><div class="file-heading"><div><span class="reader-kicker">文件导读</span><h2>'+esc(f.path)+'</h2></div><div class="source-actions"><button id="copy-file">复制源码</button><button id="download-file">下载文件</button></div></div><div class="file-purpose"><div class="file-role">'+esc(f.role)+'</div><h3>'+esc(f.title)+'</h3>'+paragraphs(f.overview)+'</div><div class="file-contract"><section><h3>接收什么</h3>'+readerList(f.inputs)+'</section><section><h3>产生什么</h3>'+readerList(f.outputs)+'</section></div><section class="file-components"><h3>通过哪些部分完成工作</h3>'+componentTable(f)+'</section>'+flowFigure(f.pipeline)+'<div class="file-reading"><h3>放回项目中理解</h3>'+readerList(f.readingGuide)+'</div>';
-  html+=typeGuide(f);
+  const f=files.find(f=>f.path===path);currentFile=f||null;currentSegment=null;
+  $('#reader-guide').hidden=true;$('#file-view').hidden=false;
+  if(!f){$('#file-view').innerHTML='<h2>未找到这个文件</h2><p><a href="#code/guide">返回全局导读与文件地图</a></p>';return}
+  let html='<nav class="reader-breadcrumb" aria-label="当前位置"><a href="#code/guide">全局导读与阅读顺序</a><span>/</span><code>'+esc(f.path)+'</code></nav><article class="file-guide file-guide-compact"><div class="file-heading"><div><span class="reader-kicker">文件导读</span><h1>'+esc(f.title)+'</h1></div><div class="source-actions"><button id="copy-file">复制源码</button><button id="download-file">下载文件</button></div></div><div class="file-purpose"><div class="file-role">'+esc(f.role)+'</div>'+paragraphs(f.overview)+'</div><details class="file-details"><summary>查看这个文件的输入输出、函数分工和依赖关系</summary><div class="file-contract"><section><h3>接收什么</h3>'+readerList(f.inputs)+'</section><section><h3>产生什么</h3>'+readerList(f.outputs)+'</section></div><section class="file-components"><h3>主要函数与类怎样分工</h3>'+componentTable(f)+'</section><div class="file-reading"><h3>放回项目中理解</h3>'+readerList(f.readingGuide)+'</div>'+typeGuide(f);
   if(f.dependencies?.length)html+='<div class="file-dependencies"><span>直接依赖的项目文件</span>'+f.dependencies.map(p=>'<a href="#code/'+encodeURI(p)+'">'+esc(p)+'</a>').join('')+'</div>';
-  if(f.definitions?.length)html+='<details class="definition-index"><summary>全部函数与类的定义索引 · '+f.definitions.length+' 项</summary><div>'+f.definitions.map(d=>'<button data-open-line="'+d.segmentStart+'"><code>'+esc(d.signature)+'</code><span>L'+d.line+' · '+esc(d.scope||'文件级')+'</span></button>').join('')+'</div></details>';
-  html+='</article><div class="reader-source-heading"><div><h2>逐段阅读源码</h2><p>展开任一片段，查看完整参数、变量、执行步骤与原理。</p></div><span>'+f.lines.length+' 行 · '+f.segments.length+' 段</span></div><nav class="segment-index" aria-label="本文件讲解目录">'+f.segments.map((s,i)=>'<button data-scroll-line="'+s.start+'"><span>L'+s.start+'</span>'+esc(s.title)+'</button>').join('')+'</nav>';
+  if(f.definitions?.length)html+='<details class="definition-index"><summary>全部函数与类的定义 · '+f.definitions.length+' 项</summary><div>'+f.definitions.map(d=>'<button data-open-line="'+d.segmentStart+'"><code>'+esc(d.signature)+'</code><span>L'+d.line+' · '+esc(d.scope||'文件级')+'</span></button>').join('')+'</div></details>';
+  html+='</details></article><section class="reader-workbench" id="reader-workbench" aria-label="源码与解析对照阅读"><div class="workbench-toolbar"><div><strong>源码与解析对照</strong><span>'+f.lines.length+' 行 · '+f.segments.length+' 个代码段</span></div><button id="reader-focus">'+(document.body.classList.contains('reader-wide')?'显示文件目录':'展开阅读区')+'</button></div><div class="workbench-columns"><section class="source-pane" aria-label="左侧源码"><header class="pane-header"><div><h2>源码</h2><span>点击代码段，右侧同步解释</span></div><label class="segment-selector"><span class="sr-only">选择代码段</span><select id="segment-picker">'+f.segments.map((s,i)=>'<option value="'+i+'">L'+s.start+'–'+s.end+' · '+esc(s.title)+'</option>').join('')+'</select></label></header><div class="source-scroll" id="source-scroll" tabindex="0" aria-label="完整源码，可独立滚动">';
   let cursor=1;
-  for(let i=0;i<f.segments.length;i++){
-    const s=f.segments[i];
-    if(s.start>cursor)html+='<details class="segment gap"><summary>L'+cursor+'–'+(s.start-1)+' · 源码上下文</summary>'+codeBlock(f,cursor,s.start-1)+'</details>';
-    html+='<article class="segment" id="seg-'+s.start+'"><div class="segment-head"><div><small>L'+s.start+'–'+s.end+'</small><h3>'+esc(s.title)+'</h3></div><button data-explain="'+i+'">展开讲解</button></div><p class="segment-summary">'+esc(s.summary)+'</p>'+codeBlock(f,s.start,s.end)+'</article>';
+  f.segments.forEach((s,i)=>{
+    if(s.start>cursor)html+='<div class="source-context"><div class="context-label">上下文 · L'+cursor+'–'+(s.start-1)+'</div>'+codeBlock(f,cursor,s.start-1)+'</div>';
+    html+='<article class="source-segment" id="seg-'+s.start+'" data-segment="'+i+'"><button class="segment-select" data-select-segment="'+i+'" aria-pressed="false"><span>L'+s.start+'–'+s.end+'</span><strong>'+esc(s.title)+'</strong></button>'+codeBlock(f,s.start,s.end)+'</article>';
     cursor=s.end+1;
-  }
-  if(cursor<=f.lines.length)html+='<details class="segment gap"><summary>L'+cursor+'–'+f.lines.length+' · 剩余完整源码</summary>'+codeBlock(f,cursor,f.lines.length)+'</details>';
+  });
+  if(cursor<=f.lines.length)html+='<div class="source-context"><div class="context-label">剩余上下文</div>'+codeBlock(f,cursor,f.lines.length)+'</div>';
+  html+='</div></section><section class="analysis-pane" aria-label="右侧解析"><header class="pane-header analysis-header"><div><h2>图解与解析</h2><span id="selection-status" role="status" aria-live="polite"></span></div><div class="analysis-navigation"><button id="previous-segment" aria-label="选择上一代码段">上一段</button><button id="next-segment" aria-label="选择下一代码段">下一段</button></div></header><div class="analysis-scroll" id="analysis-content" tabindex="0" aria-label="当前代码段解析，可独立滚动"></div></section></div></section>';
   $('#file-view').innerHTML=html;
   $$('[data-file]').forEach(a=>a.classList.toggle('active',a.dataset.file===path));
-  $$('[data-explain]').forEach(b=>b.onclick=()=>openSegment(Number(b.dataset.explain)));
-  $$('[data-open-line]').forEach(b=>b.onclick=()=>openSegment(f.segments.findIndex(s=>s.start===Number(b.dataset.openLine))));
-  $$('[data-scroll-line]').forEach(b=>b.onclick=()=>$('#seg-'+b.dataset.scrollLine)?.scrollIntoView({block:'start'}));
-  $('#copy-file').onclick=()=>copy(f.source);
-  $('#download-file').onclick=()=>download(f.source,f.path.split('/').pop(),'text/plain;charset=utf-8');
+  $$('[data-select-segment]').forEach(button=>button.onclick=()=>openSegment(Number(button.dataset.selectSegment),{scrollSource:false}));
+  $$('.source-segment pre').forEach(pre=>pre.onclick=()=>{if(!getSelection()?.toString())openSegment(Number(pre.closest('[data-segment]').dataset.segment),{scrollSource:false})});
+  $$('[data-open-line]').forEach(button=>button.onclick=()=>{openSegment(f.segments.findIndex(s=>s.start===Number(button.dataset.openLine)));revealWorkbench()});
+  $('#segment-picker').onchange=e=>openSegment(Number(e.target.value));
+  $('#previous-segment').onclick=()=>openSegment(currentSegment-1);
+  $('#next-segment').onclick=()=>openSegment(currentSegment+1);
+  $('#reader-focus').onclick=()=>{document.body.classList.toggle('reader-wide');$('#reader-focus').textContent=document.body.classList.contains('reader-wide')?'显示文件目录':'展开阅读区';revealWorkbench()};
+  $('#copy-file').onclick=()=>copy(f.source);$('#download-file').onclick=()=>download(f.source,f.path.split('/').pop(),'text/plain;charset=utf-8');
 }
-function openSegment(index){
+function stepRange(step,s){
+  const m=(step.title+' '+step.detail).match(/L(\d+)(?:[–—−-](\d+))?/);
+  return m?{start:Math.max(s.start,Number(m[1])),end:Math.min(s.end,Number(m[2]||m[1]))}:null;
+}
+function highlightSourceLines(start,end){
+  $$('#source-scroll .code-line').forEach(line=>line.classList.toggle('step-highlight',Number(line.dataset.codeLine)>=start&&Number(line.dataset.codeLine)<=end));
+  const target=$('#source-scroll [data-code-line="'+start+'"]'),scroller=$('#source-scroll');
+  if(target)scroller.scrollTop+=target.getBoundingClientRect().top-scroller.getBoundingClientRect().top-40;
+}
+function openSegment(index,options={}){
   const f=currentFile,s=f?.segments[index];if(!s)return;
-  if(!$('#explanation').open)returnFocus=document.activeElement;
-  currentSegment=index;$('#drawer-path').textContent=f.path+' / L'+s.start+'–'+s.end;
-  const parts=[['purpose','作用与原理'],['params','参数'],['variables','变量'],['steps','执行过程'],['syntax','语法与调用'],['returns','输出'],['source','源码']];
-  $('#drawer-content').innerHTML='<div class="explain-intro"><span class="reader-kicker">源码详解 · '+(index+1)+' / '+f.segments.length+'</span><h2 id="drawer-title">'+esc(s.title)+'</h2><p>'+esc(s.summary)+'</p>'+(s.shapes?'<div class="shape">'+esc(s.shapes)+'</div>':'')+'</div><nav class="explain-nav" aria-label="讲解内容">'+parts.map(([key,label])=>'<button data-reader-anchor="explain-'+key+'">'+label+'</button>').join('')+'</nav><section id="explain-purpose" class="explain-part"><h3 tabindex="-1">作用与计算原理</h3>'+paragraphs(s.principle)+'</section><section id="explain-params" class="explain-part"><h3 tabindex="-1">函数参数与配置</h3>'+parameterTable(s.parameters)+'</section><section id="explain-variables" class="explain-part"><h3 tabindex="-1">重要变量与数据结构</h3>'+variableTable(s.variables)+'</section><section id="explain-steps" class="explain-part"><h3 tabindex="-1">内部怎样一步步执行</h3>'+flowFigure(s.flow)+'<ol class="execution-steps">'+s.steps.map(step=>'<li><strong>'+esc(step.title)+'</strong><p>'+esc(step.detail)+'</p></li>').join('')+'</ol></section><section id="explain-syntax" class="explain-part"><h3 tabindex="-1">语法、函数调用与具体参数</h3>'+paragraphs(s.syntax)+'</section><section id="explain-returns" class="explain-part"><h3 tabindex="-1">返回值与后续用途</h3>'+readerList(s.returns)+'</section>'+(s.pitfall?'<aside class="note warn"><strong>对照实际实现时要注意</strong>'+paragraphs(s.pitfall)+'</aside>':'')+'<section id="explain-source" class="explain-part"><h3 tabindex="-1">对照原始源码 · L'+s.start+'–'+s.end+'</h3>'+codeBlock(f,s.start,s.end)+'</section><div class="drawer-actions"><button id="previous-segment" '+(index===0?'disabled':'')+'>上一段</button><span>'+(index+1)+' / '+f.segments.length+'</span><button id="next-segment">'+(index<f.segments.length-1?'下一段':'返回文件')+'</button></div>';
-  $('#previous-segment').onclick=()=>openSegment(index-1);
-  $('#next-segment').onclick=()=>index<f.segments.length-1?openSegment(index+1):$('#explanation').close();
-  $$('[data-reader-anchor]').forEach(b=>b.onclick=()=>{const target=$('#'+b.dataset.readerAnchor);target.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});target.querySelector('h3').focus({preventScroll:true})});
-  if(!$('#explanation').open)$('#explanation').showModal();
-  $('#explanation').scrollTop=0;
+  currentSegment=index;
+  $$('.source-segment').forEach(el=>el.classList.toggle('selected',Number(el.dataset.segment)===index));
+  $$('[data-select-segment]').forEach(el=>el.setAttribute('aria-pressed',String(Number(el.dataset.selectSegment)===index)));
+  $$('#source-scroll .step-highlight').forEach(el=>el.classList.remove('step-highlight'));
+  $('#segment-picker').value=String(index);
+  $('#selection-status').textContent=(index+1)+' / '+f.segments.length+' · L'+s.start+'–'+s.end;
+  $('#previous-segment').disabled=index===0;$('#next-segment').disabled=index===f.segments.length-1;
+  const visuals=s.visuals||[],previous=f.segments[index-1],next=f.segments[index+1];
+  const steps=s.steps.map(step=>{const range=stepRange(step,s);return '<li>'+(range&&range.end>=range.start?'<button class="step-source-link" data-step-start="'+range.start+'" data-step-end="'+range.end+'"><strong>'+esc(step.title)+'</strong><span>定位源码</span></button>':'<strong>'+esc(step.title)+'</strong>')+'<p>'+esc(step.detail)+'</p></li>'}).join('');
+  $('#analysis-content').innerHTML='<div class="analysis-intro"><span class="reader-kicker">当前代码段 · L'+s.start+'–'+s.end+'</span><h2 id="analysis-title">'+esc(s.title)+'</h2><p class="analysis-summary">'+esc(s.summary)+'</p>'+(previous?'<p class="segment-context"><span>前一段</span>'+esc(previous.title)+'</p>':'<p class="segment-context">从本文件的定义与准备工作开始阅读。</p>')+(s.shapes?'<div class="shape">'+esc(s.shapes)+'</div>':'')+'</div><nav class="analysis-jumps" aria-label="当前解析内容">'+(visuals.length?'<button data-analysis-anchor="analysis-visuals">图解</button>':'')+'<button data-analysis-anchor="analysis-steps">逐步执行</button><button data-analysis-anchor="analysis-data">参数与变量</button><button data-analysis-anchor="analysis-syntax">语法细节</button></nav><section class="analysis-section" id="analysis-purpose"><h3>这段代码解决什么问题</h3>'+paragraphs(s.principle)+'</section>'+(visuals.length?'<section class="analysis-section" id="analysis-visuals"><h3>把代码中的变化画出来</h3>'+visuals.map(visualFigure).join('')+'</section>':'')+'<section class="analysis-section" id="analysis-steps"><h3>对着左侧源码，逐步执行</h3><ol class="execution-steps">'+steps+'</ol></section><section class="analysis-section" id="analysis-data"><h3>参数与数据对照</h3><h4>调用时传入什么</h4>'+parameterTable(s.parameters)+'<h4>执行中产生和使用什么</h4>'+variableTable(s.variables)+'</section><section class="analysis-section" id="analysis-syntax"><h3>调用与语法怎样理解</h3>'+paragraphs(s.syntax)+'</section><section class="analysis-section"><h3>这一段交出了什么</h3>'+readerList(s.returns)+'</section>'+(s.pitfall?'<aside class="note warn"><strong>对照当前实现时要注意</strong>'+paragraphs(s.pitfall)+'</aside>':'')+(s.flow?'<details class="control-flow-details"><summary>补充：查看条件判断与控制分支</summary>'+flowFigure(s.flow)+'</details>':'')+(next?'<div class="next-context"><span>接下来</span><strong>'+esc(next.title)+'</strong><p>'+esc(next.summary)+'</p><button id="continue-segment">继续读下一段</button></div>':'<div class="next-context"><strong>本文件读到这里</strong><p>可以返回全局导读，继续下一站。</p><a href="#code/guide">查看建议阅读顺序</a></div>');
+  $('#analysis-content').scrollTop=0;
+  $$('[data-analysis-anchor]').forEach(button=>button.onclick=()=>{const target=$('#'+button.dataset.analysisAnchor),scroll=$('#analysis-content');scroll.scrollTop+=target.getBoundingClientRect().top-scroll.getBoundingClientRect().top-16});
+  $$('[data-step-start]').forEach(button=>button.onclick=()=>highlightSourceLines(Number(button.dataset.stepStart),Number(button.dataset.stepEnd)));
+  if($('#continue-segment'))$('#continue-segment').onclick=()=>openSegment(index+1);
+  if(options.scrollSource!==false){const target=$('#seg-'+s.start),scroll=$('#source-scroll');scroll.scrollTop+=target.getBoundingClientRect().top-scroll.getBoundingClientRect().top-10}
+  if(options.updateURL!==false)history.replaceState(null,'','#code/'+encodeURI(f.path)+'?line='+s.start);
+  if(options.reveal!==false)revealWorkbench();
 }
 document.addEventListener('click',event=>{
-  const button=event.target.closest('[data-flow-zoom]');if(!button)return;
-  const figure=button.closest('.reader-flow'),svg=figure.querySelector('svg');
-  $('#figure-title').textContent=figure.querySelector('strong').textContent;
-  $('#figure-image').src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg.outerHTML);
-  $('#figure-image').alt=figure.querySelector('strong').textContent;
-  figureWidth=Number(svg.getAttribute('width'));
-  $('#figure-dialog').showModal();setFigureScale(Math.min(1,($('#figure-stage').clientWidth-32)/figureWidth));
-  $('#figure-stage').scrollTop=0;$('#figure-stage').scrollLeft=0;
+  const visualButton=event.target.closest('[data-visual-zoom]');
+  if(visualButton){const visual=DATA.visuals.find(v=>v.id===visualButton.dataset.visualZoom);if(!visual)return;$('#figure-title').textContent=visual.title;$('#figure-image').src=visual.uri;$('#figure-image').alt=visual.alt;figureWidth=Number(visual.width)}
+  else {const button=event.target.closest('[data-flow-zoom]');if(!button)return;const figure=button.closest('.reader-flow'),svg=figure.querySelector('svg');$('#figure-title').textContent=figure.querySelector('strong').textContent;$('#figure-image').src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg.outerHTML);$('#figure-image').alt=figure.querySelector('strong').textContent;figureWidth=Number(svg.getAttribute('width'))}
+  $('#figure-dialog').showModal();setFigureScale(Math.min(1,($('#figure-stage').clientWidth-32)/figureWidth));$('#figure-stage').scrollTop=0;$('#figure-stage').scrollLeft=0;
 });

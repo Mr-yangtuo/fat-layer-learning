@@ -131,12 +131,31 @@ def embed_figure(match):
 report = re.sub(r"<!--FIG:([a-z]+)-->", embed_figure, report)
 assert "<!--FIG:" not in report
 assert all(link in {f["path"] for f in files} for link in re.findall(r'href="#code/([^"?]+)',report))
-manifest = {"created":"2026-11-14","updated":"2026-11-21","reader_version":4,"files":files}
+guide = (ROOT / "reader-guide.html").read_text(encoding="utf-8-sig")
+for path, line in re.findall(r'href="#code/([^"?]+)(?:\?line=(\d+))?"', guide):
+    file = next((f for f in files if f["path"] == path), None)
+    assert file, ("guide links to unknown file", path)
+    if line:
+        assert any(s["start"] <= int(line) <= s["end"] for s in file["segments"]), (path, line)
+visuals = json.loads((ROOT / "reader-visuals.json").read_text(encoding="utf-8-sig"))
+assert len({v["id"] for v in visuals}) == len(visuals)
+for visual in visuals:
+    svg = (ROOT / "figures" / (visual["id"] + ".svg")).read_bytes()
+    xml = ET.fromstring(svg)
+    assert xml.tag.endswith("svg"), visual["id"]
+    box = xml.attrib["viewBox"].split()
+    visual.update(uri="data:image/svg+xml;base64," + base64.b64encode(svg).decode(), width=float(box[2]), height=float(box[3]))
+    for link in visual["links"]:
+        file = next(f for f in files if f["path"] == link["path"])
+        segment = next(s for s in file["segments"] if s["start"] == link["start"])
+        segment.setdefault("visuals", []).append(visual["id"])
+manifest = {"created":"2026-11-14","updated":"2026-11-22","reader_version":5,"files":files,"visuals":visuals}
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {
     "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "reader.css").read_text(encoding="utf-8-sig"),
     "REPORT":report,
+    "GUIDE":guide,
     "DATA":payload,
     "APP":(ROOT / "app.js").read_text(encoding="utf-8-sig").replace("/*__READER__*/", (ROOT / "reader.js").read_text(encoding="utf-8-sig"))
 }.items():
@@ -146,5 +165,6 @@ assert "/*__" not in html
 (OUT / ".nojekyll").touch()
 summary = {"files":len(files),"segments":sum(len(f["segments"]) for f in files),"source_lines":sum(len(f["lines"]) for f in files),"html_bytes":len(html.encode()),"hashes":{f["path"]:f["sha256"] for f in files}}
 summary.update(definitions=sum(len(f.get("definitions",[])) for f in files), parameter_entries=sum(len(s["parameters"]) for f in files for s in f["segments"]), variable_entries=sum(len(s["variables"]) for f in files for s in f["segments"]), flowcharts=sum(bool(f.get("pipeline")) + sum(bool(s.get("flow")) for s in f["segments"]) for f in files))
+summary.update(concept_illustrations=len(visuals), illustrated_segments=sum(bool(s.get("visuals")) for f in files for s in f["segments"]))
 (ROOT / "build-manifest.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
 print(json.dumps({k:v for k,v in summary.items() if k!="hashes"},ensure_ascii=False))
