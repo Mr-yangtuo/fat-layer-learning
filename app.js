@@ -29,8 +29,9 @@ function selectMethod(id){
   document.body.dataset.method=currentMethod.id;
 }
 function reportToc(){
-  const entries=[{id:currentMethod.intro,title:'方法概览'},...sections.filter(s=>s.id!==currentMethod.intro).map(s=>({id:s.id,title:s.dataset.title}))];
-  return entries.map((s,i)=>'<a href="'+route('report',s.id)+'"><b>'+String(i+1).padStart(2,'0')+'</b>'+esc(s.title)+'</a>').join('');
+  const intro=document.getElementById(currentMethod.intro);
+  const entries=[{id:currentMethod.intro,title:intro?.dataset.tocTitle||'方法概览',number:intro?.dataset.tocNumber},...sections.filter(s=>s.id!==currentMethod.intro).map(s=>({id:s.id,title:s.dataset.title,number:s.dataset.tocNumber}))];
+  return entries.map((s,i)=>'<a href="'+route('report',s.id)+'"><b>'+esc(s.number||String(i+1).padStart(2,'0'))+'</b>'+esc(s.title)+'</a>').join('');
 }
 function treeHTML(){const root={};files.forEach(f=>{const parts=f.path.split('/');let node=root;parts.forEach((p,i)=>{if(i===parts.length-1)node[p]=f;else node=node[p]||(node[p]={})})});function walk(obj){return Object.entries(obj).sort((a,b)=>{const ad=!a[1].path,bd=!b[1].path;return ad===bd?a[0].localeCompare(b[0]):ad?-1:1}).map(([name,value])=>value.path?'<a class="tree-file" href="'+codeHref(value.path)+'" data-file="'+esc(value.path)+'"><span>'+(/\.py$/.test(name)?'PY':/\.json$/.test(name)?'JSON':'SH')+'</span>'+esc(name)+'</a>':'<details class="tree-folder" open><summary>▱ '+esc(name)+'</summary>'+walk(value)+'</details>').join('')}return '<a id="project-guide-link" class="project-guide-link" href="'+codeHref('guide')+'">整体导读与阅读顺序</a><p class="tree-intro">主程序串起数据、模型与损失。先读导读中的主线，再按目录补齐细节。</p><div class="tree-map-label">文件地图</div>'+walk(root)+'<p class="coverage-note">完整源码与配置；样本索引仅在导读中解释结构，原始样本、权重和运行产物未嵌入。</p>'}
 function updateCounts(){$('#source-summary').textContent=files.length+' 个文件 · '+files.reduce((n,f)=>n+f.segments.length,0)+' 段讲解';$('#hero-file-count').textContent=DATA.files.filter(f=>f.method==='heatmap').length}

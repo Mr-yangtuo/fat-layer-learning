@@ -1,64 +1,118 @@
-<section class="section" id="regions-intro" data-title="从找峰改为估计区域">
-  <div class="section-head"><h1>区域法：先判断边界上下，再从面积读出高度。</h1></div>
-  <p class="lead">本节对应 <code>072_区域调优</code> 的 <code>ordinal_regions</code> 配置。它仍预测真皮层下界与脂肪层下界，但不再让网络在边界处形成高斯亮峰，而是预测“这个像素位于该边界下方”的概率。</p>
-  <p>每条边界对应一张区域图：在边界上方接近 0，下方接近 1。两张图是包含关系，深处的像素可以同时位于两条边界下方。它们不是两个互斥类别，也不是一张“脂肪／背景”分类图。脂肪位于上界下方、下界上方；理想情况下两张区域图相减才得到中间层的区域。</p>
-  <!--VIS:regions-ordinal-->
-  <div class="table-wrap"><table><thead><tr><th>环节</th><th>原热图方案</th><th>当前区域方案</th></tr></thead><tbody><tr><td>特征与融合</td><td>两尺度拼接后卷积</td><td>四尺度从深到浅逐级上采样、相加与加工</td></tr><tr><td>监督图形</td><td>边界附近的高斯软目标</td><td>边界下方的抗锯齿阶跃目标</td></tr><tr><td>纵向解码</td><td>沿高度 softmax 后求坐标期望</td><td>对区域补集沿高度积分</td></tr><tr><td>学习方式</td><td>真实标注监督</td><td>教师真实标注监督；学生再增加可信教师蒸馏</td></tr></tbody></table></div>
-  <p>因此，这不只是换一个损失名称：输入归一化、取用的骨干层、特征融合、输出含义及坐标解码都改变了。卷积等通用基础可回看<a href="#heatmap/report/architecture">热图法的结构说明</a>，下面集中解释当前方法的区别。</p>
+<section class="section paper-intro" id="regions-intro" data-title="阅读路线" data-toc-title="阅读路线" data-toc-number="导">
+  <div class="paper-kicker">区域法项目汇报 · 从一张图到两条边界</div>
+  <h1>区域法到底怎样找到<br>脂肪层的上下边界？</h1>
+  <p class="paper-lead">输入一张超声图像，输出真皮层下界和脂肪层下界：每一列都要给出两个纵坐标。下面先沿着一次预测走完网络，再回头解释人工标签和训练。</p>
+  <div class="paper-claim"><strong>这套方法的关键：先预测两张“边界以下”的区域图，再根据区域面积算出边界高度。</strong><small>本篇对应 072 区域方案。结构尺寸以 MobileNetV3-Large 学生和 256×256 输入为例；所有图片均为教学示意。</small></div>
+  <nav class="paper-route" aria-label="区域法报告阅读路线">
+    <div><strong>先看：一次预测怎样完成</strong><p>只跟踪图像和网络输出，暂时不引入损失。</p><a href="#report/regions-data">01 准备输入</a><a href="#report/regions-architecture">02 提取特征</a><a href="#report/regions-fusion">03 融合特征</a><a href="#report/regions-head">04 预测区域</a><a href="#report/regions-integral">05 解码坐标</a></div>
+    <div><strong>再看：这些能力怎样学会</strong><p>将刚才的预测与人工答案接起来。</p><a href="#report/regions-target">06 制作标签</a><a href="#report/regions-loss">07 计算误差</a><a href="#report/regions-training">08 更新模型</a></div>
+    <div><strong>最后：怎样使用和评价</strong><p>回到原图，并核对已有实验材料。</p><a href="#report/regions-evidence">09 推理与证据</a></div>
+  </nav>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>先看终点：</strong>用户要的是两条线，区域图是网络内部用于得到这两条线的表示。</p><!--VIS:regions-paper-task--></div>
+  <p class="paper-next">正文尺寸统一按“通道数 × 高 × 宽”书写，省略批量维；每节末尾会说明得到了什么、下一步接着做什么。</p>
 </section>
 
-<section class="section" id="regions-data" data-title="数据怎样到达模型">
-  <div class="section-head"><h2>固定视图与联合变换，保留同一套坐标约定</h2></div>
-  <p>数据从固定索引选择原图或裁底视图。人工点先按原图整数列分组，同列纵坐标取均值；新图第 j 列查询原图横坐标 j×原图宽／256，在已知点之间线性插值。首末点外虽有端点填充值，仍标记无效；不足两列有效点会报错。插值高度保留小数，原始点和插值点没有额外权重区分。</p>
-  <p>图像裁剪后缩放到 256×256，坐标同步乘 256／当前视图高度。训练时图像、坐标与有效掩码共同水平翻转，或做三选一的纵向几何变换；裁掉有效标注时更新掩码，并要求每条线仍保留监督。随后加入配置允许的亮度、对比度、散斑等外观变化。区域法配置的伪亮带概率为 0。</p>
-  <!--VIS:regions-data-->
-  <p>外部图像张量只有一个灰度通道，取值除以 255 后在 0～1。模型内部再把它扩展成三个通道，使用固定均值和标准差归一化，以接入标准骨干；这里没有旧模型的可学习高斯去噪层。<a class="source-link" href="#code/072_区域调优/代码/data.py?line=70">标注插值</a><a class="source-link" href="#code/072_区域调优/代码/data.py?line=114">裁剪与坐标换算</a></p>
+<section class="section" id="regions-data" data-title="准备输入" data-toc-number="01" data-phase="predict">
+  <div class="paper-section-heading"><span class="paper-step">01</span><div><div class="paper-kicker">预测路线 · 图像进入网络</div><h2>一张原图怎样变成网络输入？</h2></div></div>
+  <p class="paper-answer"><strong>先统一图像尺寸和数值范围，得到骨干能够接收的三通道张量。</strong>这一步还没有提取组织特征。</p>
+  <ol class="paper-sequence"><li><div><strong>统一尺寸：</strong>读取灰度图，缩放到 256×256。此时只有一个通道，形状为 <strong>1×256×256</strong>。</div></li><li><div><strong>统一数值：</strong>像素除以 255，变成 0～1 的浮点数。模型内部把同一份灰度扩展为三个通道，并分别使用固定均值、标准差归一化。</div></li></ol>
+  <div class="paper-io"><div><span>本步接收</span>任意宽高的单张灰度图</div><div><span>交给下一步</span><strong>3×256×256</strong> 的归一化图像张量</div></div>
+  <details class="paper-detail"><summary>补充：三个通道里的图像有什么区别？</summary><p>扩展时三个通道的灰度完全相同；随后分别计算（灰度−均值）／标准差。均值为 0.485、0.456、0.406，标准差为 0.229、0.224、0.225，因此归一化后的数值不同。这是在适配骨干的输入约定，没有产生三份不同的组织观测。</p><p>本方案使用固定的 ImageNet 归一化，入口没有原热图模型的可学习去噪卷积。训练样本还可能采用裁剪视图和增强；图像与人工坐标如何同步，放到第 06 节说明。</p></details>
+  <div class="paper-takeaway"><b>本节记住</b><span>现在只准备好了输入。真正的特征提取从接下来的骨干卷积开始。</span></div>
+  <p class="paper-next">下一步：沿着骨干连续计算，看看四级特征究竟从哪里取出。</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/data.py?line=130">图像转张量</a> · <a href="#code/072_区域调优/代码/models.py?line=76">模型输入归一化</a></p>
 </section>
 
-<section class="section" id="regions-architecture" data-title="四尺度模型与嵌套区域">
-  <div class="section-head"><h2>四级特征逐步恢复细节，再明确上下关系</h2></div>
-  <p>以附带学生权重对应的 MobileNetV3-Large、256×256 输入为例，骨干取出四级特征：24×64×64、40×32×32、112×16×16、960×8×8。每一级先用 1×1 卷积投影为 64 通道。最深层投影后先经过一次 3×3 卷积、8 组 GroupNorm 和 SiLU，加工成融合的起点；这一层还没有与其他尺度相加。随后三层依次把当前特征上采样到下一浅层尺寸，与该层投影逐元素相加，再经过同样的 3×3 卷积、GroupNorm 和 SiLU，最终得到 64×64×64 的融合特征。教师换成 ResNet18 后通道数不同，仍经过四级侧向投影接入同样的融合形式。</p>
-  <!--VIS:regions-architecture-->
-  <p>模型再拼入两张从 0 到 1 的横纵位置图，让预测头直接知道当前像素处于什么相对位置。于是区域头输入为 64＋2＝66 通道，经 3×3 加工成 64 通道，再用 1×1 卷积产生两张原始评分图 z₁、z₂。</p>
-  <div class="math">R<sub>上</sub>＝sigmoid(z₁)<br>R<sub>下</sub>＝R<sub>上</sub> · sigmoid(z₂)<br>0 ≤ R<sub>下</sub> ≤ R<sub>上</sub> ≤ 1</div>
-  <p>这种乘积构造使“下边界下方”始终包含在“上边界下方”中；两张图同一像素可以都接近 1。它保证两图的包含关系，但没有硬性保证每张图沿高度只能出现一次转折：后面的纵向单调损失才负责抑制上下反复变化。<a class="source-link" href="#code/072_区域调优/代码/models.py?line=76">四尺度前向</a><a class="source-link" href="#code/072_区域调优/代码/models.py?line=84">坐标通道与嵌套概率</a></p>
+<section class="section" id="regions-architecture" data-title="四级特征从哪里来" data-toc-number="02" data-phase="predict">
+  <div class="paper-section-heading"><span class="paper-step">02</span><div><div class="paper-kicker">预测路线 · 骨干提取特征</div><h2>四级特征不是凭空出现的，它们来自哪里？</h2></div></div>
+  <p class="paper-answer"><strong>同一张图沿 MobileNetV3-Large 连续向后计算，项目在四个位置保留中间输出。</strong>保留一份后，原来的计算仍继续向更深处进行。</p>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>这张图只看两件事：</strong>主线怎样继续向深处计算；哪四个位置把中间结果交给后面的融合模块。</p><!--VIS:regions-paper-backbone--><div class="paper-readout"><p><strong>沿主线看：</strong>骨干包含多个卷积模块，部分模块执行下采样，空间网格逐步变小。每个编号模块内部可能包含多层卷积。</p><p><strong>沿旁路看：</strong>在编号 3、6、12、16 的模块后各保留一份，分别得到 24×64×64、40×32×32、112×16×16、960×8×8。编号从 0 开始。</p></div></div>
+  <p>形状中的 <strong>24、40、112、960</strong> 是骨干这些位置原本的输出通道数；<strong>64、32、16、8</strong> 是下采样后的空间尺寸。浅层网格较细，保留较多位置细节；深层经过更多加工、通常覆盖更大的输入范围。融合模块希望把这些层次的线索一起用起来。</p>
+  <div class="paper-io"><div><span>本步接收</span>3×256×256 图像</div><div><span>交给下一步</span>四组通道数、网格尺寸都不同的特征</div></div>
+  <div class="paper-takeaway"><b>本节记住</b><span>四级特征是<strong>一条骨干计算链上的四个中间结果</strong>，不是四张缩放后的原图，也不是四个独立网络。</span></div>
+  <p class="paper-next">下一步：这些特征大小和通道数都不同，怎样把它们合到一起？</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/models.py?line=14">四个输出位置</a> · <a href="#code/072_区域调优/代码/models.py?line=33">连续计算并收集中间结果</a></p>
 </section>
 
-<section class="section" id="regions-integral" data-title="区域如何变成坐标">
-  <div class="section-head"><h2>数出“边界上方有多少”，就能得到高度</h2></div>
-  <p>对某一列，R 表示边界下方的概率，1−R 就表示边界上方的概率。若边界位于高度的四分之一处，边界以上约占整列的四分之一。因此，把所有高度的 1−R 相加并除以区域图高度，就得到归一化边界位置：</p>
-  <div class="math">u(x)＝(1／h<sub>区域</sub>) Σ<sub>i</sub> [1−R(i,x)]<br>ŷ(x)＝u(x) · (H<sub>输入</sub>−1)</div>
-  <!--VIS:regions-integral-->
-  <p>例如 8 格的一列 R＝[0, 0, 0.5, 1, 1, 1, 1, 1]，边界上方占 2.5 格，u＝2.5／8＝0.3125。输入高 256 时，预测高度是 79.6875 像素。模型先在 64 列得到这种坐标，再沿宽度线性插值为 256 列；不需要先把区域图放大成 256×256，也不需要在每列寻找峰值。</p>
-  <p>因为 R<sub>下</sub>≤R<sub>上</sub>，其补集与均值关系相反，所以解码后自然满足 ŷ<sub>上</sub>≤ŷ<sub>下</sub>。这种顺序来自结构，而不是最后强行交换两条线。仅靠面积仍可能把不同形状的区域图解码成同一坐标，所以还需要下面的区域监督。</p>
-  <p><a class="source-link" href="#code/072_区域调优/代码/models.py?line=98">积分解码源码</a></p>
+<section class="section" id="regions-fusion" data-title="四级特征怎样融合" data-toc-number="03" data-phase="predict">
+  <div class="paper-section-heading"><span class="paper-step">03</span><div><div class="paper-kicker">预测路线 · 由深到浅融合</div><h2>尺寸不同的四级特征，怎样合成一组？</h2></div></div>
+  <p class="paper-answer"><strong>先把通道都变成 64，再逐级放大深层特征，与同尺寸的浅层特征相加、加工。</strong>最后得到 64×64×64 的融合结果。</p>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>先看整体，再看局部：</strong>上半图跟踪四级合成一组；下半图放大一次“尺寸对齐后相加”。</p><!--VIS:regions-paper-fusion--><div class="paper-readout"><p><strong>看四个向下的投影箭头：</strong>四组特征各过一个可学习的 1×1 卷积，分别变成 64 通道。宽高保持各自的 64、32、16、8；这一步重新组合通道信息，不是截掉多余通道。</p><p><strong>看右端的最深起点：</strong>最深层的 64×8×8 先独立过一次 3×3 卷积、GroupNorm 和 SiLU。此时还没有与其他层相加。</p><p><strong>顺箭头从右向左：</strong>当前结果依次放大到 16×16、32×32、64×64。每次与对应浅层的 64 通道投影相加，再过 3×3 卷积、GroupNorm 和 SiLU。</p><p><strong>看下半图的单通道数例：</strong>用 2×2 放大到 4×4 演示实际的 16×16 放大到 32×32。放大后的 1 与浅层同位置的 4 相加得到 5；其余位置和所有通道都按相同规则逐元素相加。</p></div></div>
+  <div class="paper-subsection"><h3>相加后，为什么还要卷积？为什么宽高不变？</h3><p><strong>相加</strong>把两个来源在对应位置上的数值汇合，仍是 64 通道；后面的 <strong>3×3 卷积</strong>再学习如何利用周围 3×3 邻域和所有输入通道，重新组织已经汇合的信息。GroupNorm 调整特征数值分布，SiLU 提供非线性。</p><p>这些 3×3 卷积使用步长 1、边缘补 1 格，所以宽高不变；输出通道也设为 64。空间尺寸变大，发生在前面的<strong>双线性上采样</strong>，不是这次卷积。</p></div>
+  <details class="paper-detail"><summary>对照热图法：40＋960＝1000，与这里有什么不同？</summary><p>原热图方案取 40×32×32 和 960×8×8 两级：将后者放大到 32×32，沿通道拼成 1000×32×32，再卷积压到 40 通道。</p><p>当前区域方案取四级，先各自投影成 64 通道，再逐元素相加。<strong>拼接会增加通道数；相加保持通道数。</strong>因此这里的两个 64 通道相加后仍为 64，不会变成 128，也不是把四个原始通道数直接相加。</p></details>
+  <div class="paper-io"><div><span>本步接收</span>24×64²、40×32²、112×16²、960×8²</div><div><span>交给下一步</span><strong>64×64×64</strong> 的融合特征</div></div>
+  <div class="paper-takeaway"><b>本节记住</b><span>到这里已经组织好了多尺度信息，但 <strong>64 个通道仍然是特征描述</strong>，还不是两条边界的答案。</span></div>
+  <p class="paper-next">下一步：用预测头把这 64 个特征通道变成两张有明确含义的区域图。</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/models.py?line=47">卷积加工块</a> · <a href="#code/072_区域调优/代码/models.py?line=76">四级融合前向</a></p>
 </section>
 
-<section class="section" id="regions-loss" data-title="阶跃标签与复合损失">
-  <div class="section-head"><h2>标签也按“格子有多少在边界下方”构造</h2></div>
-  <p>真实坐标先除以 255，得到归一化高度 u，再沿横向插值到区域图的 64 列。第 i 个纵向格子的中心是 (i＋0.5)／h，目标值为：</p>
-  <div class="math">Q(i,x)＝clip([(i＋0.5)／h−u(x)] · h＋0.5, 0, 1)</div>
-  <p>完全在边界上方的格子取 0，下方取 1，边界穿过的格子取介于 0 和 1 的覆盖比例。这就是抗锯齿阶跃软标签。图中的 0.5 表示半格位于边界下方；它不是高斯峰，也不是人工额外画出的概率。对该标签的补集积分，会恢复原来的归一化高度。无效列通过掩码从损失中排除。</p>
-  <!--VIS:regions-objective-->
-  <div class="table-wrap"><table><thead><tr><th>监督项</th><th>当前作用与实际配置</th></tr></thead><tbody><tr><td>坐标 SmoothL1</td><td>预测位置对照真值；β＝3，逐线加权平均权重为 1.372、1.387。</td></tr><tr><td>斜率误差</td><td>比较预测和真值的相邻列差分，系数 0.4；允许真实边界起伏。</td></tr><tr><td>厚度误差</td><td>比较两条线间距，系数 0.05；只用双线都有效的列。</td></tr><tr><td>区域 BCE</td><td>逐格比较区域概率与阶跃标签，系数 1.0；约束完整区域形状。</td></tr><tr><td>纵向单调</td><td>平均 ReLU(R(i)−R(i＋1))，源码固定系数 0.5；惩罚往下走概率反而降低。</td></tr></tbody></table></div>
-  <p>区域概率是两个 sigmoid 的乘积，因此显式对概率做 BCE，并在混合精度环境之外使用 FP32 计算。上述系数是本配置选定的超参数；当前包不提供足以证明其为最优值的调参记录。<a class="source-link" href="#code/072_区域调优/代码/losses.py?line=9">目标构造</a><a class="source-link" href="#code/072_区域调优/代码/losses.py?line=20">五项监督</a></p>
+<section class="section" id="regions-head" data-title="特征怎样变成区域图" data-toc-number="04" data-phase="predict">
+  <div class="paper-section-heading"><span class="paper-step">04</span><div><div class="paper-kicker">预测路线 · 生成区域概率</div><h2>网络输出的两张区域图，各自代表什么？</h2></div></div>
+  <p class="paper-answer"><strong>第一张表示“位于上边界下方”的概率，第二张表示“位于下边界下方”的概率。</strong>这里的上、下边界分别是真皮层下界、脂肪层下界。</p>
+  <div class="paper-subsection"><h3>4.1 先明确输出含义，再看怎样计算</h3><div class="paper-figure-block"><p class="paper-figure-question"><strong>沿图像从上往下读：</strong>上方、两条线之间、两条线下方，分别应怎样填色？</p><!--VIS:regions-paper-meaning--><div class="paper-readout"><p><strong>两条线以上：</strong>两张图都接近 0。<strong>两条线之间：</strong>第一张接近 1，第二张接近 0。<strong>两条线以下：</strong>两张图都接近 1。</p><p>因此两张图是包含关系。第二张的“下方区域”包含在第一张里面；同一像素可以在两张图里同时接近 1。</p></div></div></div>
+  <div class="paper-subsection"><h3>4.2 用预测头把特征变成这两个概率</h3><p>给 64 通道融合特征附加两张位置图：一张标记从上到下的相对位置，一张标记从左到右的相对位置。这里按通道拼接，增加两个位置通道，于是输入变成 <strong>66×64×64</strong>。预测头先用 3×3 卷积、GroupNorm、SiLU 加工回 64 通道，再用 1×1 卷积输出两个分数。</p>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>这张图看数值怎样变：</strong>64 个特征通道怎样变成两个分数；两个分数又怎样保证区域的包含关系。</p><!--VIS:regions-paper-head--><div class="paper-readout"><p><strong>先得两个分数：</strong>最后的 1×1 卷积有两组可学习权重，在每个位置把 64 个特征组合成两个数。分数本身尚不是概率。</p><p><strong>再得两个概率：</strong>第一个分数经 sigmoid 得到上界下方概率；第二个分数经 sigmoid 后，再乘前一个概率，得到下界下方概率。</p></div></div>
+  <div class="paper-formula">R<sub>上</sub> = sigmoid(z₁)<br>R<sub>下</sub> = R<sub>上</sub> × sigmoid(z₂)<small>z₁、z₂：该位置的两个原始分数；R<sub>上</sub>、R<sub>下</sub>：对应的两种“在边界下方”的概率。乘积保证 0 ≤ R<sub>下</sub> ≤ R<sub>上</sub> ≤ 1。例如 0.8×0.5＝0.4。</small></div></div>
+  <div class="paper-io"><div><span>本步接收</span>64×64×64 融合特征</div><div><span>交给下一步</span><strong>两张 64×64 区域概率图</strong></div></div>
+  <div class="paper-takeaway"><b>本节记住</b><span>两张图并非两个互斥类别；它们也不要求同一列的概率总和为 1。每格都在回答一个“是否位于这条边界下方”的问题。</span></div>
+  <p class="paper-next">下一步：已知一列哪些位置更可能在边界下方，怎样算出边界的具体高度？</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/models.py?line=84">位置通道、分数与嵌套概率</a></p>
 </section>
 
-<section class="section" id="regions-training" data-title="教师学生与训练选择">
-  <div class="section-head"><h2>真实标注决定方向，可靠教师提供额外指导</h2></div>
-  <p>教师使用 ResNet18，学生可用 MobileNetV3-Large 或 Small，三者采用当前区域表示。先用真实标注训练教师，学生再同时学习真实标注和冻结教师。教师与学生看到相同增强图像；教师处于 eval 和无梯度状态，不会在学生训练过程中被更新。</p>
-  <!--VIS:regions-distill-->
-  <div class="math">门控 g＝valid · exp(−|ŷ<sub>教师</sub>−y<sub>真值</sub>|／8)<br>L<sub>蒸馏</sub>＝门控加权坐标 SmoothL1＋门控加权区域 Bernoulli KL<br>L<sub>学生</sub>＝L<sub>监督</sub>＋0.55 · min(epoch／10, 1) · L<sub>蒸馏</sub></div>
-  <p>教师在某列错得越多，该列蒸馏影响越弱。例如误差 0、8、16 像素时，门控约为 1、0.368、0.135。这种可信度由当前训练标注计算，不使用验证标签；它降低错误教师影响，但不会自动把所有错误点完全剔除。门控在加权平均中会归一化，主要调整各位置的相对信任；整体蒸馏强度另由外部系数控制。</p>
-  <!--VIS:regions-training-->
-  <p>优化器是 AdamW，基础学习率 0.0007，先预热再余弦下降。微批量 16，累积 3 批梯度后裁剪总范数至 5 并更新；末组不足 3 批时使用实际批数归一。教师最多 100 轮，学生最多 80 轮，至少 40 轮后，距最佳轮已 20 轮可早停。保存 best 的依据是“两条线相对参考误差中的较大者＋0.05×相对误差均值”，不等同于训练 loss 或单纯总体 MAE 最小。</p>
-  <p>单图推理只需最终学生权重，不再需要教师；输出的 256 列坐标按原图宽高重新插值和缩放，得到原图每列的两条边界。<a class="source-link" href="#code/072_区域调优/代码/train.py?line=162">训练核心</a><a class="source-link" href="#code/072_区域调优/代码/train.py?line=187">验证与选优</a><a class="source-link" href="#code/072_区域调优/代码/infer.py?line=21">单图推理</a></p>
+<section class="section" id="regions-integral" data-title="区域怎样变成边界坐标" data-toc-number="05" data-phase="predict">
+  <div class="paper-section-heading"><span class="paper-step">05</span><div><div class="paper-kicker">预测路线 · 从面积读取高度</div><h2>有了区域图，边界坐标怎样算出来？</h2></div></div>
+  <p class="paper-answer"><strong>计算每列“边界上方占了多少”。</strong>区域概率 R 表示下方，所以 1−R 表示上方；沿高度相加，再除以格子数，就得到归一化高度。</p>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>先只看一条线、一个列：</strong>下面用 8 格代替实际的 64 格，把面积到坐标的计算完整算一遍。</p><!--VIS:regions-paper-decode--><div class="paper-readout"><p><strong>① 取补集：</strong>R＝[0, 0, 0.5, 1, 1, 1, 1, 1]，因此 1−R＝[1, 1, 0.5, 0, 0, 0, 0, 0]。</p><p><strong>② 算占比：</strong>上方共有 2.5 格，占整列 2.5／8＝0.3125。</p><p><strong>③ 换成像素：</strong>256 高的输入，行坐标范围是 0～255，所以得到 0.3125×255＝<strong>79.6875 像素</strong>。坐标可以是小数，不需要取整。</p></div></div>
+  <div class="paper-formula">u(x) = (1／h) ∑<sub>i=0…h−1</sub> [1−R(i,x)]<br>预测高度 = u(x) × 255<small>i 是区域图的行号，x 是列，h 是区域图高度（实际为 64）；u 是归一化高度。这个求和平均，就是代码所说的“区域积分”。</small></div>
+  <p>实际网络先对两张 64×64 图分别沿高度平均，得到<strong>两条各有 64 列的坐标序列</strong>；再沿横向线性插值到 256 列，最后乘 255。横向插值是在已有坐标之间加密，不是在区域图中寻找峰值。</p>
+  <details class="paper-detail"><summary>为什么上下两条线不会颠倒？</summary><p>第 04 节已经保证 R<sub>下</sub>≤R<sub>上</sub>，所以 1−R<sub>下</sub>≥1−R<sub>上</sub>。取平均后，下边界高度就不小于上边界高度；后续同样的线性插值和尺度换算仍保留这个顺序。</p><p>这种顺序约束不代表每张区域图沿高度一定平滑、单调。不同概率排列可能有相同面积，这也是第 07 节还要监督整个区域图的原因。</p></details>
+  <div class="paper-io"><div><span>本步接收</span>两张 64×64 区域概率图</div><div><span>预测路线完成</span><strong>2×256 个浮点纵坐标</strong>，每列一对上下边界</div></div>
+  <div class="paper-takeaway"><b>本节记住</b><span>网络的预测路线到这里已经闭合：<strong>图像 → 特征 → 区域概率 → 两条边界。</strong>下面才开始解释训练时的正确答案与误差。</span></div>
+  <p class="paper-next">接下来切换到训练路线：人只标了边界点，怎样给区域图提供正确答案？</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/models.py?line=98">区域积分与横向插值</a></p>
 </section>
 
-<section class="section" id="regions-evidence" data-title="当前证据与阅读边界">
-  <div class="section-head"><h2>包里有什么，尚不能证明什么</h2></div>
-  <p>本包提供区域法源码、配置、固定索引，以及一份命名为 train100 MobileNetV3-Large 蒸馏 best 的权重。固定索引记录 8,300 张原图、13,277 个含裁剪视图；train90 使用 7,470 张原图的 11,617 个视图训练、830 张原图按目录分组验证；train100 包含全部视图，仍在这 830 张上复评，存在训练重合。</p>
-  <p>新附的 300 张测试图均有两条目标标注，但移动清单中 52 张的原始路径也出现在附带 train100 索引里。这说明清单重合；尚未据此核实当前权重实际训练时是否见过它们。当前没有随包提供独立的 300 张对比结果，不能在此宣称区域法优于热图法，或把所有配置支持的实验组合视为均已完成。</p>
-  <div class="note"><strong>源码理解与运行条件分开看</strong><p>工程入口依赖 Linux 的 fcntl、/proc 路径及 GPU0；训练还需要本包未包含的初始化权重、教师状态/权重和带标记的 README。网站展示实际代码和解释，没有执行训练、推理或修改原始数据。</p></div>
-  <p><a class="primary" href="#regions/code/guide">进入区域法源码导读</a></p>
+<section class="section" id="regions-target" data-title="人工线怎样变成训练标签" data-toc-number="06" data-phase="train">
+  <div class="paper-section-heading"><span class="paper-step">06</span><div><div class="paper-kicker">训练路线 · 制作正确答案</div><h2>人只标了边界点，区域图的答案从哪里来？</h2></div></div>
+  <p class="paper-answer"><strong>先把人工点插成逐列边界，再按每格位于边界下方的比例，自动生成区域标签。</strong>这张标签图由人工线计算，不是网络预测的图。</p>
+  <ol class="paper-sequence"><li><div><strong>从点到线：</strong>有效人工点按原图整数列分组，同列高度取均值；在点之间线性插值，得到缩放后 256 列的浮点高度。有效范围以首末标注点为界，范围外即使有填充值，也不参与监督。</div></li><li><div><strong>从线到区域图网格：</strong>将 256 列高度横向重采样到 64 列，并除以 255，得到归一化高度 u。对每一列，完全在边界上方的格子取 0，下方取 1，被边界穿过的格子，取其中位于边界下方的部分占整格的比例。</div></li></ol>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>沿用上一节的同一个数例：</strong>人工答案为 79.6875 像素，即 u＝0.3125；在 8 格示意中恰好落在行号为 2 的格子中间（行号从 0 开始）。</p><!--VIS:regions-paper-target--><div class="paper-readout"><p><strong>读被穿过的那一格：</strong>半格位于边界下方，因此标签为 0.5。上面的格子为 0，下面的格子为 1，得到 [0, 0, 0.5, 1, 1, 1, 1, 1]。</p><p><strong>与第 05 节接起来：</strong>把这张理想标签当成预测图再做补集积分，就会还原 0.3125。这使标签的构造与坐标的解码相互对应。</p></div></div>
+  <div class="paper-formula">Q(i,x) = clip(i + 1 − h·u(x), 0, 1)<small>Q 是人工区域标签；i 从 0 开始，h 实际为 64；clip 把数值截到 0～1。它与源码的“行中心减边界高度、乘 h、再加 0.5”完全等价。边界格保留小数，这就是抗锯齿阶跃软标签。</small></div>
+  <details class="paper-detail"><summary>补充：没有标注的列、非整数坐标和裁剪怎样处理？</summary><p>假设两个有效点为 (2,40)、(6,60)，查询原图横坐标 3.5 时，插值比例为 (3.5−2)／(6−2)＝0.375，因此高度为 40＋0.375×20＝47.5。这个独立小例说明：查询位置和纵坐标都可以是小数，计算不要求取整。</p><p>实际先按 j×原图宽／256 查询每个新列的原图位置，再按 256／当前视图高度缩放纵坐标。同列点合并时横坐标会先四舍五入；后面的插值高度保留浮点。原始点与区间内插值点没有额外的来源权重之分；每条线不足两个有效列会报错。</p><p>裁剪视图、水平翻转及纵向几何增强需要同步改变图像、坐标与有效掩码；亮度等外观增强不移动坐标。区域监督还会把逐列掩码扩展到每个高度格，只比较有效列。</p></details>
+  <div class="paper-io"><div><span>本步接收</span>人工边界点、图像尺寸和有效范围</div><div><span>交给损失函数</span><strong>坐标真值＋两张区域标签＋有效掩码</strong></div></div>
+  <div class="paper-takeaway"><b>本节记住</b><span>预测图 R 来自网络，目标图 Q 来自人工线。两者形状相同、含义相同，下一步才能逐格比较。</span></div>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/data.py?line=70">人工点插值</a> · <a href="#code/072_区域调优/代码/losses.py?line=9">区域标签与掩码</a></p>
+</section>
+
+<section class="section" id="regions-loss" data-title="损失分别纠正什么" data-toc-number="07" data-phase="train">
+  <div class="paper-section-heading"><span class="paper-step">07</span><div><div class="paper-kicker">训练路线 · 比较预测与答案</div><h2>坐标已经有答案，为什么还要监督区域图？</h2></div></div>
+  <p class="paper-answer"><strong>坐标损失检查“面积算出的高度对不对”；区域损失检查“每个位置的上下判断对不对”。</strong>相同的面积，可能来自不同甚至错误的概率排列。</p>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>仍然看刚才的 8 格：</strong>下面两列的区域总量都是 5.5，解码都得 79.6875 像素，但右边的形状明显不对。</p><!--VIS:regions-paper-loss--><div class="paper-readout"><p><strong>坐标项看不出的错误：</strong>错误列把一些上方格子赋了较高概率，又把下方格子赋了较低概率；总量恰好抵消，积分坐标没有变。</p><p><strong>区域 BCE 逐格纠正：</strong>每格都比较预测概率与标签。<strong>单调项再限制方向：</strong>从上往下走，概率应趋向增大；例如 0.7 降到 0.2，会产生 0.5 的局部惩罚。</p></div></div>
+  <div class="paper-subsection"><h3>五项监督，各自负责一个明确问题</h3><table class="paper-table"><thead><tr><th style="width:25%">监督项</th><th>它具体比较什么</th><th style="width:18%">系数</th></tr></thead><tbody><tr><td><strong>坐标</strong></td><td>预测高度与人工高度，修正边界位置。</td><td>1</td></tr><tr><td><strong>斜率</strong></td><td>预测与人工线的相邻列高度差，修正局部走势。</td><td>0.4</td></tr><tr><td><strong>层厚</strong></td><td>两条预测线的间距与真实间距，修正层厚。</td><td>0.05</td></tr><tr><td><strong>区域 BCE</strong></td><td>每格预测概率 R 与人工标签 Q，修正完整区域形状。</td><td>1.0</td></tr><tr><td><strong>纵向单调</strong></td><td>惩罚往下走概率反而降低，抑制上下反复。</td><td>0.5</td></tr></tbody></table></div>
+  <div class="paper-formula">L<sub>监督</sub> = L<sub>坐标</sub> + 0.4L<sub>斜率</sub> + 0.05L<sub>层厚</sub> + L<sub>区域</sub> + 0.5L<sub>单调</sub><small>前三项采用 Smooth L1。斜率比较的是预测差分与人工差分，不是强迫真实边界变平。系数来自当前配置，其中单调系数写在源码里。</small></div>
+  <details class="paper-detail"><summary>进一步计算：BCE、单调项和加权细节</summary><p>单格区域误差为 −[Q·ln(R)＋(1−Q)·ln(1−R)]。R 越符合该格标签 Q，误差越小；Q＝0.5 时允许部分覆盖。这里逐格比较“在边界下方／不在下方”的概率，不对整列做 softmax。</p><p>纵向相邻两格的局部惩罚为 max(R(i)−R(i＋1),0)，再在有效位置求平均。它是软约束，不能保证每一列在任何时候都严格单调。</p><p>坐标 Smooth L1 的 β＝3 像素，两条线的加权平均权重为 1.372、1.387；斜率项 β＝1、厚度项 β＝2。区域概率先限制在 10<sup>−5</sup>～1−10<sup>−5</sup>，BCE 使用 FP32 计算。不同项的单位、归一化与误差范围不同，不能只按外部系数大小判断谁更重要。</p><p>无效位置不计入损失；斜率要求相邻两列均有效，层厚要求两条线均有效。当前资料没有提供足以证明这些超参数是最优值的调参结果。</p></details>
+  <div class="paper-takeaway"><b>本节记住</b><span>监督同时约束<strong>边界坐标、曲线形状和区域内部的概率形状</strong>。它们汇总成一个可反向传播的标量。</span></div>
+  <p class="paper-next">下一步：训练器用这个标量更新网络；学生训练还会加入教师提供的额外监督。</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/losses.py?line=20">三项几何监督</a> · <a href="#code/072_区域调优/代码/losses.py?line=29">区域与单调监督</a></p>
+</section>
+
+<section class="section" id="regions-training" data-title="教师与学生怎样训练" data-toc-number="08" data-phase="train">
+  <div class="paper-section-heading"><span class="paper-step">08</span><div><div class="paper-kicker">训练路线 · 从误差到参数更新</div><h2>监督已经定义好，网络怎样一步步学会？</h2></div></div>
+  <p class="paper-answer"><strong>先用人工答案训练教师，再让学生同时学习人工答案和冻结教师的输出。</strong>两者使用同样的区域表示和解码方式，骨干不同：教师为 ResNet18，本文学生为 MobileNetV3-Large。</p>
+  <div class="paper-figure-block"><p class="paper-figure-question"><strong>这张图只看学生训练：</strong>教师和学生看的是同一份增强图像；教师在哪些列更可信，就相对多学那些列。</p><!--VIS:regions-paper-teacher--><div class="paper-readout"><p><strong>教师先冻结：</strong>学生训练时，教师只给预测，不更新参数。人工标签仍直接监督学生，不会被教师替代。</p><p><strong>按误差分配相对信任：</strong>教师坐标误差为 0、8、16 像素时，门控约为 1、0.368、0.135。随后还会按权重总和归一化，主要调整各位置之间的相对影响。</p></div></div>
+  <ol class="paper-sequence"><li><div><strong>前向预测：</strong>同一批图像进入可训练网络；学生阶段同时运行冻结教师。按前面 01～05 步得到区域图和边界。</div></li><li><div><strong>汇总损失：</strong>教师只用第 07 节的人工监督；学生在此基础上，再比较自己的坐标、区域概率与教师输出。</div></li><li><div><strong>反向更新：</strong>每微批 16 张，损失按当前组实际批数归一后反向传播。通常累积 3 批，再裁剪梯度、执行一次 AdamW 更新、清空梯度。骨干、融合模块和预测头一起参与学习。</div></li><li><div><strong>验证选模：</strong>每轮结束评估两条线的误差，按平衡评分保存最佳模型。达到最少训练轮数后，长期无改进可以早停。</div></li></ol>
+  <details class="paper-detail"><summary>本项目实际使用的蒸馏公式与训练参数</summary><div class="paper-formula">门控 = 有效掩码 × exp(−|教师高度−人工高度|／8)<br>L<sub>学生</sub> = L<sub>监督</sub> + 0.55 × min(轮次／10,1) × L<sub>蒸馏</sub><small>区域法的 L<sub>蒸馏</sub> 是门控加权坐标 Smooth L1 ＋ 门控加权区域 Bernoulli KL。这里两个蒸馏子项之间没有额外的 0.5 系数。</small></div><p>基础学习率 0.0007，AdamW 权重衰减 10<sup>−4</sup>；前 5 个调度索引预热，随后余弦下降。总梯度范数裁剪阈值为 5；最后一组不足 3 批时使用实际批数作为除数。</p><p>教师最多 100 轮、学生最多 80 轮；至少训练 40 轮后，距最佳轮达到 20 轮且没有新改进，可早停。选优评分为两条线“当前 MAE／固定参考 MAE”中的较大者，再加 0.05 倍两者平均；参考值约为 1.10525、2.02256，它们不是本次新测出的结果。</p></details>
+  <div class="paper-takeaway"><b>本节记住</b><span>预测路线说明“怎么算答案”，训练路线说明“怎样用错误更新所有可学习模块”。教师只在学生训练时提供额外指导。</span></div>
+  <p class="paper-next">最后：训练结束后怎样回到原图使用，以及当前资料能支持哪些结论？</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/losses.py?line=41">教师蒸馏</a> · <a href="#code/072_区域调优/代码/train.py?line=162">训练更新</a> · <a href="#code/072_区域调优/代码/train.py?line=187">验证选优</a></p>
+</section>
+
+<section class="section" id="regions-evidence" data-title="回到原图与实验依据" data-toc-number="09" data-phase="use">
+  <div class="paper-section-heading"><span class="paper-step">09</span><div><div class="paper-kicker">使用与核验 · 把工作流闭合</div><h2>训练结束后，怎样在一张新图上使用？</h2></div></div>
+  <p class="paper-answer"><strong>只加载最终学生模型，重走 01～05 的预测路线。</strong>新图不需要人工标注，也不需要教师。</p>
+  <p>模型得到 256 列坐标后，推理程序按原图宽度重新插值，纵坐标乘原图高／256，输出原图每一列的两条边界并写入 JSON。这一步恢复的是坐标尺度，不再训练模型。</p>
+  <div class="paper-subsection"><h3>学完再对照：它与原热图法的关键差别</h3><table class="paper-table"><thead><tr><th style="width:22%">环节</th><th>原热图方案</th><th>当前区域方案</th></tr></thead><tbody><tr><td>融合</td><td>两级特征，通道拼接后卷积。</td><td>四级特征，统一 64 通道后逐级相加与卷积。</td></tr><tr><td>输出含义</td><td>边界在各个高度处的评分。</td><td>每格位于某条边界下方的概率。</td></tr><tr><td>坐标解码</td><td>沿高度归一化，再求坐标期望。</td><td>沿高度平均区域补集，再恢复横向列数。</td></tr><tr><td>图形监督</td><td>以人工边界为中心的高斯软目标。</td><td>按人工边界切分格子的阶跃软标签。</td></tr></tbody></table></div>
+  <div class="paper-claim"><strong>整条主线：</strong>图像经骨干得到四级特征，融合后预测两张嵌套区域图，区域补集积分得到边界；训练再用人工坐标、区域标签和教师输出纠正这些预测。</div>
+  <details class="paper-detail"><summary>实验材料与结论边界：当前有权重，但没有独立测试排名</summary><p>资料包有区域法源码、配置、固定索引及一份命名为 train100 MobileNetV3-Large 蒸馏 best 的权重。固定索引含 8,300 张原图、13,277 个视图；train90 使用 7,470 张原图的 11,617 个视图训练、830 张原图评估，train100 用全部视图训练后仍在这 830 张上复评。</p><p>300 张测试图的移动清单中，52 个原始路径与附带 train100 索引重合。目前只能确认清单重合，尚未核实权重实际训练时见过哪些图。包内没有独立的 300 张测试对比报告，因此不能根据本页判断区域法优于其他方法。</p><p>本报告基于实际代码和配置，没有重新训练或评测。工程入口还依赖 Linux 路径、fcntl、/proc、GPU0，以及未完整随包提供的初始化权重、教师状态和 README 等资料。</p></details>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/infer.py?line=21">原图推理与坐标恢复</a> · <a href="#code/guide">进入区域法源码导读</a></p>
 </section>

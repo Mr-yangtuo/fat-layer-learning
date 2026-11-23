@@ -2,7 +2,7 @@
   "files": 47,
   "segments": 316,
   "source_lines": 5905,
-  "html_bytes": 4729373,
+  "html_bytes": 5056978,
   "hashes": {
     "LineDet/dataset/__init__.py": "bae4c91e4ec7411341a0714ce1530c11c6f03a490490e0f43d82944554a35425",
     "LineDet/dataset/dataset.py": "e8f4ecfc579411b3dd38ef7ce57663de1479a57d3f42c1d86b1edcff190920a5",
@@ -56,7 +56,7 @@
   "parameter_entries": 603,
   "variable_entries": 1305,
   "flowcharts": 105,
-  "concept_illustrations": 52,
+  "concept_illustrations": 61,
   "illustrated_segments": 149,
   "methods": {
     "heatmap": {

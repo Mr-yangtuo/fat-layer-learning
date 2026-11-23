@@ -156,7 +156,7 @@ for method in methods:
 visuals.extend(json.loads((ROOT / "methods/shared-visuals.json").read_text(encoding="utf-8")))
 assert len({v["id"] for v in visuals}) == len(visuals)
 for visual in visuals:
-    svg = (ROOT / "figures" / (visual["id"] + ".svg")).read_bytes()
+    svg = (ROOT / "figures" / visual.get("asset", visual["id"] + ".svg")).read_bytes()
     xml = ET.fromstring(svg)
     assert xml.tag.endswith("svg"), visual["id"]
     box = xml.attrib["viewBox"].split()
@@ -206,7 +206,7 @@ manifest = {"created":"2026-11-14","updated":"2026-11-23","reader_version":8,"me
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {
-    "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "reader.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "methods.css").read_text(encoding="utf-8-sig"),
+    "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "reader.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "methods.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "regions-report.css").read_text(encoding="utf-8-sig"),
     "METHOD_TABS":"".join('<button data-method="' + m["id"] + '" aria-pressed="false">' + html_module.escape(m["label"]) + '</button>' for m in methods),
     "REPORT":report,
     "GUIDE":guide,
