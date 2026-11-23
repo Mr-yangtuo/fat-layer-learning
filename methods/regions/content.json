@@ -1,0 +1,4426 @@
+[
+  {
+    "path": "072_区域调优/代码/config.json",
+    "title": "072实际配置：哪些值控制训练、哪些只是记录",
+    "overview": "这份JSON选择ordinal_regions方法并规定训练轮数、优化、蒸馏、损失、增强和选优参考。它不是可执行算法。实际生效值要结合调用处判断：train.py按角色硬编码教师ResNet18，data.py从data_index读取根路径并固定SIZE=256，GPU也由训练入口硬约束；因此不能只改同名元数据就认为流程已改变。",
+    "role": "train.py读取的本方案参数及方案来源元信息。",
+    "inputs": [
+      "人工维护的JSON键值。"
+    ],
+    "outputs": [
+      "用于模型选择、优化器、loss和augment的配置字典；部分字段仅描述方案。"
+    ],
+    "readingGuide": [
+      "先核对method，再核对loss和augmentation，然后阅读选优与训练资源。",
+      "这些系数是配置值，包内无证据证明它们是理论推导或全局最优。"
+    ],
+    "components": [
+      {
+        "name": "方法、教师与数据来源元信息",
+        "kind": "配置组",
+        "summary": "声明072区域方案、随机种子和来源数据根目录。",
+        "segmentStart": 1
+      },
+      {
+        "name": "训练预算、优化、蒸馏与模型选优",
+        "kind": "配置组",
+        "summary": "规定教师/学生轮数、梯度累积和两条线的平衡评分。",
+        "segmentStart": 7
+      },
+      {
+        "name": "损失、外观增强与父方案",
+        "kind": "配置组",
+        "summary": "设置本区域法的相对监督强度和外观扰动概率。",
+        "segmentStart": 26
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 6,
+        "title": "方法、教师与数据来源元信息",
+        "summary": "声明072区域方案、随机种子和来源数据根目录。",
+        "principle": [
+          "method=ordinal_regions传入build_model，直接选择区域积分路径。teacher_backbone和data_root在这版调用链中不是实际读取的决定点：教师骨干来自role分支，数据根来自data_index。"
+        ],
+        "syntax": [
+          "JSON键和字符串用双引号；对象会由json.loads变成Python dict。"
+        ],
+        "variables": [
+          {
+            "name": "scheme,method",
+            "type": "str",
+            "meaning": "方案标识与实际模型分支。"
+          },
+          {
+            "name": "teacher_backbone",
+            "type": "str",
+            "meaning": "记录教师为resnet18；train.py仍按角色硬编码。"
+          },
+          {
+            "name": "seed",
+            "type": "int",
+            "meaning": "20260925，控制主进程和采样随机源。"
+          },
+          {
+            "name": "data_root",
+            "type": "str",
+            "meaning": "原Linux路径元信息；数据读取以固定索引内部字段为准。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L2–6 读取方法与来源",
+            "detail": "method和seed实际使用，其余需核对调用链。"
+          }
+        ],
+        "returns": [
+          "方法选择与来源信息。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 7,
+        "end": 25,
+        "title": "训练预算、优化、蒸馏与模型选优",
+        "summary": "规定教师/学生轮数、梯度累积和两条线的平衡评分。",
+        "principle": [
+          "batch_size=16、accumulation=3让常规一次更新聚合3个微批；teacher_epochs=100、student_epochs=80是最大轮数，满足min_epochs=40和patience=20时可提前结束。",
+          "distill_weight=0.55在入口还会乘min(epoch/10,1)；selection_reference是固定归一化参考，不是当前模型测试结果。"
+        ],
+        "syntax": [
+          "列表input_size和selection_reference分别表示二维尺寸与两条线参考值；数值0.0007是AdamW基础学习率。"
+        ],
+        "variables": [
+          {
+            "name": "teacher_epochs,student_epochs,min_epochs,patience",
+            "type": "int",
+            "meaning": "100、80、40、20：轮数上限与早停条件。"
+          },
+          {
+            "name": "batch_size,accumulation,workers",
+            "type": "int",
+            "meaning": "16、3、4：训练微批、累积批数与数据worker。"
+          },
+          {
+            "name": "lr,distill_weight",
+            "type": "float",
+            "meaning": "0.0007、0.55：学习率与外部蒸馏强度。"
+          },
+          {
+            "name": "input_size,gpu",
+            "type": "list[int] / int",
+            "meaning": "[256,256]与0是协议元信息，代码另有固定SIZE/GPU检查。"
+          },
+          {
+            "name": "selection,selection_reference",
+            "type": "str / list[float]",
+            "meaning": "balanced_lines及[1.1052500071,2.0225625704]逐线参考。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L7–15 训练与优化设置",
+            "detail": "轮数、批次、worker、lr和蒸馏。"
+          },
+          {
+            "title": "L16–25 输入协议与选优",
+            "detail": "实际尺寸固定256；按两线相对误差择best。"
+          }
+        ],
+        "returns": [
+          "训练入口所用数值及协议记录。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 26,
+        "end": 42,
+        "title": "损失、外观增强与父方案",
+        "summary": "设置本区域法的相对监督强度和外观扰动概率。",
+        "principle": [
+          "坐标SmoothL1的beta=3；逐线权重用于加权平均。总监督是坐标+0.4斜率+0.05厚度+1.0区域BCE+源码固定0.5单调。",
+          "noise_probability=0.15、blur_probability=0.05、ridge_probability=0使伪亮带分支关闭；翻转和三种几何增强概率写在data.py，不在本字典。"
+        ],
+        "syntax": [
+          "嵌套loss与augmentation会分别经config.get传给损失和数据集；parent_scheme只记录来源，不自动加载父训练权重。"
+        ],
+        "variables": [
+          {
+            "name": "line_weights",
+            "type": "list[float]",
+            "meaning": "[1.372,1.387]对应真皮下界、脂肪下界坐标误差。"
+          },
+          {
+            "name": "coord_beta",
+            "type": "float",
+            "meaning": "3.0，SmoothL1二次/线性转折像素尺度。"
+          },
+          {
+            "name": "slope_weight,thickness_weight,region_weight",
+            "type": "float",
+            "meaning": "0.4、0.05、1.0。"
+          },
+          {
+            "name": "noise_probability,blur_probability,ridge_probability",
+            "type": "float",
+            "meaning": "0.15、0.05、0.0。"
+          },
+          {
+            "name": "parent_scheme",
+            "type": "str",
+            "meaning": "006_区域调优，参数来源标识。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L26–35 设置损失",
+            "detail": "实际监督目标不是高斯热图。"
+          },
+          {
+            "title": "L36–42 设置外观与来源",
+            "detail": "关闭伪亮带，保留其他默认几何过程。"
+          }
+        ],
+        "returns": [
+          "损失与增强配置子字典。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/data.py",
+    "title": "区域法的数据入口：固定视图、逐列标签与联合增强",
+    "overview": "这个文件把固定索引中的一个视图变成训练字典。annotation读取稀疏线标注、合并同列点并插值得到256列坐标；BoundaryDataset按索引选择原图或裁剪视图，执行灰度缩放和坐标换算；augment在训练时同步修改图像、坐标及有效掩码，并加入外观扰动。DataLoader使用默认拼装，把样本字典自动堆成一批。",
+    "role": "train.py的数据源；不生成高斯热图，也不保存图像缓存。",
+    "inputs": [
+      "data_index.json：data_root、items、indices、audit。",
+      "原始灰度图及含items/data点列表的JSON标注。"
+    ],
+    "outputs": [
+      "image [1,256,256]、y [2,256]、valid [2,256]、index以及original_scale。"
+    ],
+    "readingGuide": [
+      "先看load_view和__getitem__如何得到一份样本，再追踪annotation与augment。",
+      "train100使用所有视图，evaluation固定取830张原图，因此train100复评与训练重合。",
+      "固定索引的生成过程未包含在本文件；不应声称__init__会自动扫描或重新划分数据。"
+    ],
+    "components": [
+      {
+        "name": "augment",
+        "kind": "函数",
+        "summary": "训练随机水平翻转，并以30%概率选择一种旧几何变换。",
+        "segmentStart": 14
+      },
+      {
+        "name": "annotation",
+        "kind": "函数",
+        "summary": "按固定两条标签筛选点、合并同列标注，并线性插值。",
+        "segmentStart": 70
+      },
+      {
+        "name": "BoundaryDataset",
+        "kind": "类",
+        "summary": "只加载固定清单并选索引，不重新扫描、裁剪或划分图像。",
+        "segmentStart": 100
+      },
+      {
+        "name": "BoundaryDataset.__init__",
+        "kind": "函数",
+        "summary": "只加载固定清单并选索引，不重新扫描、裁剪或划分图像。",
+        "segmentStart": 100
+      },
+      {
+        "name": "BoundaryDataset.__len__",
+        "kind": "函数",
+        "summary": "只加载固定清单并选索引，不重新扫描、裁剪或划分图像。",
+        "segmentStart": 100
+      },
+      {
+        "name": "BoundaryDataset.load_view",
+        "kind": "函数",
+        "summary": "根据固定视图元数据，变换图像与坐标并返回有效监督。",
+        "segmentStart": 114
+      },
+      {
+        "name": "BoundaryDataset.__getitem__",
+        "kind": "函数",
+        "summary": "将一个固定视图转为PyTorch字典样本，训练时再增强。",
+        "segmentStart": 130
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 11,
+        "title": "数据依赖与旧几何函数接口",
+        "summary": "引入数组、图像、张量及三种几何变换工具。",
+        "principle": [
+          "PIL负责图像文件和Lanczos缩放，NumPy处理标注插值，PyTorch负责张量与在线增强。三种legacy函数只变图像与坐标，valid更新由本文件负责。"
+        ],
+        "syntax": [
+          "from legacy_crops import ... 使用同目录模块；Dataset提供可供DataLoader取样的接口约定。"
+        ],
+        "variables": [
+          {
+            "name": "Image,np,torch,F",
+            "type": "模块",
+            "meaning": "图像读取、数值插值、张量和函数式算子。"
+          },
+          {
+            "name": "Dataset,lru_cache",
+            "type": "类 / 装饰器",
+            "meaning": "样本访问基类与有限内存标注缓存。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L2–11 导入所需部件",
+            "detail": "没有开始读取图像，也没有执行训练。"
+          }
+        ],
+        "returns": [
+          "可供后续函数使用的名称。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 14,
+        "end": 38,
+        "title": "augment前半：翻转与裁剪时一起维护valid",
+        "summary": "训练随机水平翻转，并以30%概率选择一种旧几何变换。",
+        "principle": [
+          "横向翻转必须同时翻转图像最后一维、两条坐标序列和valid，否则标签与图像错位。",
+          "裁底或裁顶后，不仅判断原坐标是否留在视野，也检查缩放后的坐标是否越过H−1；每条线至少保留一个有效列才执行。压缩加顶部黑边保持原内容，因此valid保持。"
+        ],
+        "syntax": [
+          "random.random()<p是一次伯努利触发；randrange(3)等概率选0/1/2。new_valid.any(1).all()先逐线判断存在有效列，再要求所有线都满足。"
+        ],
+        "variables": [
+          {
+            "name": "settings",
+            "type": "dict",
+            "meaning": "外观增强配置，None转空字典。"
+          },
+          {
+            "name": "h,w",
+            "type": "int",
+            "meaning": "图像高宽。"
+          },
+          {
+            "name": "kind",
+            "type": "int",
+            "meaning": "0裁底拉伸、1压缩并补顶、2裁顶拉伸。"
+          },
+          {
+            "name": "amount,maximum",
+            "type": "int",
+            "meaning": "裁剪/压缩像素数及安全上限。"
+          },
+          {
+            "name": "new_valid",
+            "type": "bool Tensor [2,W]",
+            "meaning": "裁剪范围和缩放范围都合法的原有效列。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "image",
+            "type": "float Tensor [1,H,W]",
+            "default": "必填",
+            "meaning": "0～1范围的单图。"
+          },
+          {
+            "name": "y",
+            "type": "float Tensor [2,W]",
+            "default": "必填",
+            "meaning": "输入网格中的两条边界高度。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [2,W]",
+            "default": "必填",
+            "meaning": "哪些坐标有监督依据。"
+          },
+          {
+            "name": "settings",
+            "type": "dict / None",
+            "default": "None",
+            "meaning": "可调噪声、模糊、亮带概率。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L17–18 水平翻转",
+            "detail": "三份数据一起flip(-1)。"
+          },
+          {
+            "title": "L20–30 裁底或压缩",
+            "detail": "裁底先算掩码；压缩保持所有原内容。"
+          },
+          {
+            "title": "L31–38 裁顶",
+            "detail": "上界最小高度限制裁剪量，然后判断保留监督。"
+          }
+        ],
+        "returns": [
+          "更新后的image、y、valid，继续外观增强。"
+        ],
+        "core": true,
+        "pitfall": "裁顶安全上限用y[0].min()，没有先按valid筛选；无效列填充值也可能限制增强强度。",
+        "shapes": "",
+        "flow": {
+          "title": "几何增强控制",
+          "caption": "三个legacy函数不接收valid，因此这里的预检和掩码更新是监督对齐的关键。",
+          "nodes": [
+            {
+              "id": "0",
+              "title": "水平翻转抽签",
+              "detail": "图像、坐标、掩码同步"
+            },
+            {
+              "id": "1",
+              "title": "30%几何抽签",
+              "detail": "三种变换等概率选一种"
+            },
+            {
+              "id": "2",
+              "title": "判断裁剪后监督",
+              "detail": "裁顶/裁底需每条线仍有有效列"
+            },
+            {
+              "id": "3",
+              "title": "执行并继续",
+              "detail": "不满足条件则保留当前图像"
+            }
+          ],
+          "edges": [
+            {
+              "to": "1",
+              "from": "0"
+            },
+            {
+              "to": "2",
+              "from": "1"
+            },
+            {
+              "to": "3",
+              "from": "2"
+            }
+          ]
+        }
+      },
+      {
+        "start": 39,
+        "end": 66,
+        "title": "augment后半：外观扰动与安全伪亮带",
+        "summary": "在不移动边界的情况下改变亮度、对比度、噪声和清晰度。",
+        "principle": [
+          "亮度是乘系数，对比度围绕均值放缩，gamma是像素幂变换；三者作用不同。散斑噪声幅度与像素强度成比例，平均池化降低局部高频，先缩小再放大模拟低分辨率。",
+          "伪亮带只在两条线都有效且距任一边界超过8像素的位置叠加，避免把真实边界直接改写；本配置ridge_probability=0，实际关闭这个分支。"
+        ],
+        "syntax": [
+          "randn_like给同形标准高斯噪声；avg_pool2d(kernel=3,stride=1,padding=1)保持高宽。pow改变强度映射而非坐标。",
+          "row[None]-y[:,None]广播成[2,H,W]，amin(0)取到两条线的最小纵向距离。"
+        ],
+        "variables": [
+          {
+            "name": "mean",
+            "type": "scalar Tensor",
+            "meaning": "当前图像平均强度，对比度变换中心。"
+          },
+          {
+            "name": "small",
+            "type": "int",
+            "meaning": "降采样方形边长，在0.65H到H−1间。"
+          },
+          {
+            "name": "row,col,center",
+            "type": "Tensor [H,1] / [W]",
+            "meaning": "亮带的纵坐标网格、横向相位和正弦中心线。"
+          },
+          {
+            "name": "ridge,distance,safe",
+            "type": "Tensor [H,W]",
+            "meaning": "亮带强度、最近边界距离、允许叠加的位置。"
+          },
+          {
+            "name": "gain",
+            "type": "Tensor [1,H,1]",
+            "meaning": "纵向线性增益，广播到各列。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L39–49 调整外观",
+            "detail": "亮度、对比度、gamma、散斑和模糊分别抽签。"
+          },
+          {
+            "title": "L50–62 清晰度与亮带",
+            "detail": "低分辨率模拟；配置允许时生成避开边界的亮带。"
+          },
+          {
+            "title": "L63–66 增益与限幅",
+            "detail": "最后限制像素到0～1并返回三份数据。"
+          }
+        ],
+        "returns": [
+          "增强后的image、y、valid；外观变换不修改几何标签。"
+        ],
+        "core": true,
+        "pitfall": "SIZE固定256时降采样方形与输入一致；推广到非方图时中间small×small会改变比例。",
+        "shapes": ""
+      },
+      {
+        "start": 70,
+        "end": 97,
+        "title": "annotation：原图稀疏点转成256列浮点坐标",
+        "summary": "按固定两条标签筛选点、合并同列标注，并线性插值。",
+        "principle": [
+          "横坐标四舍五入到原图列，同列多个纵坐标取均值。至少两列有效点才允许插值；与旧热图数据代码不同，这里单点会报错，不会扩成全宽有效线。",
+          "新列j反查原图x=j·原宽/256。首末已知点之间的空列线性插值并设有效，两端外由np.interp填端点高度但mask为False；插值点和原点没有额外置信权重区别。",
+          "这里返回的y仍是原图高度单位，之后load_view才按裁剪高度变换。"
+        ],
+        "syntax": [
+          "@lru_cache(maxsize=256)缓存同一(path,w,h)解析结果；最多256条调用结果，不是磁盘缓存。",
+          "next(generator,None)取第一条匹配标注；setdefault列桶；np.interp(query,xs,ys)要求xs有序。"
+        ],
+        "variables": [
+          {
+            "name": "SIZE,LABELS",
+            "type": "int / list[str]",
+            "meaning": "固定输出256列，两条线按真皮下界、脂肪下界排序。"
+          },
+          {
+            "name": "obj,item",
+            "type": "dict",
+            "meaning": "整份JSON与当前边界items条目。"
+          },
+          {
+            "name": "columns",
+            "type": "dict[int,list[float]]",
+            "meaning": "原图同一整数列收集多个y。"
+          },
+          {
+            "name": "ix,xs,ys",
+            "type": "int / ndarray",
+            "meaning": "原列索引、有序已知列和各列平均高度。"
+          },
+          {
+            "name": "query",
+            "type": "ndarray [256]",
+            "meaning": "每个新列对应的原图横坐标。"
+          },
+          {
+            "name": "result,masks",
+            "type": "list[ndarray]",
+            "meaning": "两条插值线及首末点范围掩码。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "path",
+            "type": "Path",
+            "default": "必填",
+            "meaning": "标注JSON路径，内容有items及点列表data。"
+          },
+          {
+            "name": "w",
+            "type": "int",
+            "default": "必填",
+            "meaning": "原图宽度，用于点筛选和横向查询。"
+          },
+          {
+            "name": "h",
+            "type": "int",
+            "default": "必填",
+            "meaning": "原图高度，用于筛除越界y。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L77–90 筛选合法标注",
+            "detail": "缺线或不足两列直接报错。"
+          },
+          {
+            "title": "L91–96 建立查询位置并插值",
+            "detail": "同列均值后排序，保留首末点范围作为valid。"
+          },
+          {
+            "title": "L97 转为固定类型",
+            "detail": "坐标float32，掩码bool。"
+          }
+        ],
+        "returns": [
+          "ndarray坐标[2,256]（原图纵向单位）与bool掩码[2,256]。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "稀疏点列表 → 原列分桶 → [2,256] 坐标＋有效掩码"
+      },
+      {
+        "start": 100,
+        "end": 112,
+        "title": "BoundaryDataset初始化：选择固定视图索引",
+        "summary": "只加载固定清单并选索引，不重新扫描、裁剪或划分图像。",
+        "principle": [
+          "items描述全部原图/裁剪视图，indices给出某个集合应访问的条目编号。training=True时选train90或train100；False时无条件选evaluation。"
+        ],
+        "syntax": [
+          "Path(...).read_text()+json.loads读取清单；[:limit]限制取前若干条；__len__给DataLoader样本数。"
+        ],
+        "variables": [
+          {
+            "name": "payload,self.items",
+            "type": "dict / list[dict]",
+            "meaning": "包含视图信息的完整索引结构。"
+          },
+          {
+            "name": "self.data_root",
+            "type": "Path",
+            "meaning": "取自索引内部data_root，非config.json的同名字段。"
+          },
+          {
+            "name": "self.indices",
+            "type": "list[int]",
+            "meaning": "本次Dataset实际访问的视图编号。"
+          },
+          {
+            "name": "self.training,self.settings,self.audit",
+            "type": "bool / dict / dict",
+            "meaning": "增强开关、增强参数及划分审计。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "index_file",
+            "type": "str / Path",
+            "default": "必填",
+            "meaning": "固定data_index.json路径。"
+          },
+          {
+            "name": "split",
+            "type": "str",
+            "default": "必填",
+            "meaning": "train90或train100；training=False时不用于选择集合。"
+          },
+          {
+            "name": "training",
+            "type": "bool",
+            "default": "必填",
+            "meaning": "决定用训练索引还是evaluation，并控制在线增强。"
+          },
+          {
+            "name": "limit",
+            "type": "int",
+            "default": "0",
+            "meaning": "大于0时仅取前limit条，用于小样本调试。"
+          },
+          {
+            "name": "settings",
+            "type": "dict / None",
+            "default": "None",
+            "meaning": "augment所需的外观概率配置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L102–109 保存清单信息",
+            "detail": "训练和评估分别选相应编号集合。"
+          },
+          {
+            "title": "L111–112 报告长度",
+            "detail": "返回视图数，未必等于原图数。"
+          }
+        ],
+        "returns": [
+          "可由索引访问的Dataset实例。"
+        ],
+        "core": true,
+        "pitfall": "config.json中的data_root不被这个类读取，修改数据路径须核对data_index.json。",
+        "shapes": ""
+      },
+      {
+        "start": 114,
+        "end": 128,
+        "title": "load_view：原图或裁剪视图同步变成256网格",
+        "summary": "根据固定视图元数据，变换图像与坐标并返回有效监督。",
+        "principle": [
+          "同一原图可以对应未裁和裁底两个视图；item[view_height]决定当前视野的纵向比例。图像先裁再缩放，坐标乘256/crop_h同步缩放。",
+          "coords的clip只是让数值落在范围内，mask仍需排除落在被裁底部的真实点；不能把夹到边缘的无效点当真实监督。"
+        ],
+        "syntax": [
+          "image.convert(\"L\")转灰度，Image.Resampling.LANCZOS缩放像素；np.array(copy=True)得到可写数组。with结束后关闭图像文件。"
+        ],
+        "variables": [
+          {
+            "name": "item",
+            "type": "dict",
+            "meaning": "image、crop、source_width、source_height、view_height等字段。"
+          },
+          {
+            "name": "path,ann",
+            "type": "Path",
+            "meaning": "原图与同名annotations JSON。"
+          },
+          {
+            "name": "width,height,crop_h",
+            "type": "int",
+            "meaning": "源尺寸与当前视图保留高度。"
+          },
+          {
+            "name": "y,valid",
+            "type": "ndarray [2,256]",
+            "meaning": "annotation给出的原图高度和横向掩码。"
+          },
+          {
+            "name": "pixels",
+            "type": "uint8 ndarray [256,256]",
+            "meaning": "实际裁剪/缩放后的灰度图。"
+          },
+          {
+            "name": "coords,mask",
+            "type": "ndarray [2,256]",
+            "meaning": "输入网格坐标及保留范围内的有效性。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "index",
+            "type": "int",
+            "default": "必填",
+            "meaning": "全局items中的编号，不是Dataset局部idx。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L115–120 查视图和标注",
+            "detail": "从全局items取条目，原图尺寸用于解析标注。"
+          },
+          {
+            "title": "L121–125 读图、验证、裁剪、缩放",
+            "detail": "源尺寸不匹配即报错，避免索引过期静默错位。"
+          },
+          {
+            "title": "L126–128 变换监督",
+            "detail": "坐标缩放与掩码范围判断分开完成。"
+          }
+        ],
+        "returns": [
+          "pixels、coords、mask三元组。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "原图/裁剪图 → [256,256]；原高度坐标×256/crop_h"
+      },
+      {
+        "start": 130,
+        "end": 138,
+        "title": "__getitem__：张量样本与默认batch拼装",
+        "summary": "将一个固定视图转为PyTorch字典样本，训练时再增强。",
+        "principle": [
+          "image除255得到[0,1]，此处不按每张图均值方差标准化；固定ImageNet统计量在模型内部使用。",
+          "DataLoader默认collate按字典键堆叠：image成为[B,1,256,256]，y/valid成为[B,2,256]。original_scale用于把256网格误差换回当前原视图像素。"
+        ],
+        "syntax": [
+          "[None]增加通道轴；torch.from_numpy共享数组内存，所以坐标与掩码先copy避免改动缓存数据。"
+        ],
+        "variables": [
+          {
+            "name": "idx,index",
+            "type": "int",
+            "meaning": "Dataset局部序号与全局视图编号。"
+          },
+          {
+            "name": "image",
+            "type": "float Tensor [1,256,256]",
+            "meaning": "归一到0～1的图像。"
+          },
+          {
+            "name": "y,valid",
+            "type": "Tensor [2,256]",
+            "meaning": "浮点坐标及布尔有效性。"
+          },
+          {
+            "name": "original_scale",
+            "type": "float",
+            "meaning": "view_height/256，用来恢复原视图纵向误差尺度。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "idx",
+            "type": "int",
+            "default": "必填",
+            "meaning": "0到len(dataset)−1的局部位置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L131–135 加载并转张量",
+            "detail": "局部idx映射全局index，图像加通道轴。"
+          },
+          {
+            "title": "L136–138 条件增强并返回",
+            "detail": "验证不增强，训练样本进入augment。"
+          }
+        ],
+        "returns": [
+          "包含image/y/valid/index/original_scale的字典。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "单样本字典 → DataLoader自动按键stack成batch"
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/legacy_crops.py",
+    "title": "三种保留的纵向几何变换",
+    "overview": "这个文件仅实现图像和边界坐标的几何变换：crop_upper_and_stretch实际裁掉底部再拉伸，compress_height_with_pad把图像压缩后在顶部补黑，crop_lower_and_stretch实际裁掉顶部再拉伸。函数名容易误导，应以切片方向为准。三者均不接收valid，当前主数据函数augment负责额外的有效监督检查。",
+    "role": "data.augment以30%概率三选一调用，属于训练数据几何增强。",
+    "inputs": [
+      "img [1,H,W]，y_px [2,W]，可选显式像素数x及随机比例rand_ratio。"
+    ],
+    "outputs": [
+      "同形图像与变换后的浮点坐标，未返回valid。"
+    ],
+    "readingGuide": [
+      "看切片决定裁的是顶部还是底部；再检查坐标公式是否同步。",
+      "这三段是保留原实现，新的安全掩码逻辑位于data.py。"
+    ],
+    "components": [
+      {
+        "name": "crop_upper_and_stretch",
+        "kind": "函数",
+        "summary": "保留图像上部H−x行，再拉伸回H行。",
+        "segmentStart": 5
+      },
+      {
+        "name": "compress_height_with_pad",
+        "kind": "函数",
+        "summary": "将完整内容压到H−x行，放在黑色画布下部。",
+        "segmentStart": 61
+      },
+      {
+        "name": "crop_lower_and_stretch",
+        "kind": "函数",
+        "summary": "删除顶部x行，保留较深部分并拉回原高度。",
+        "segmentStart": 125
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 3,
+        "title": "几何算子的依赖",
+        "summary": "导入张量、插值和随机数模块。",
+        "principle": [
+          "图像先暂时增加batch轴，再使用二维插值。"
+        ],
+        "syntax": [
+          "torch.nn.functional作为F提供interpolate；random生成裁剪整数。"
+        ],
+        "variables": [
+          {
+            "name": "torch,F,random",
+            "type": "模块",
+            "meaning": "创建张量、双线性插值、抽样。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L1–3 导入工具",
+            "detail": "没有任何文件读取或原图修改。"
+          }
+        ],
+        "returns": [
+          "函数后续使用的模块引用。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 5,
+        "end": 58,
+        "title": "裁底再拉伸：y乘H/(H−x)",
+        "summary": "保留图像上部H−x行，再拉伸回H行。",
+        "principle": [
+          "实际切片img[:,:H−x,:]删除底部；原坐标0不动，其他高度按H/(H−x)放大。",
+          "如H=100、x=20，原y=40变50。函数对坐标clamp不代表被裁掉的点有效，调用者必须维护valid。"
+        ],
+        "syntax": [
+          "unsqueeze(0)添加batch轴，squeeze(0)仅删该轴。interpolate双线性、align_corners=False。assert检查维度和宽度。"
+        ],
+        "variables": [
+          {
+            "name": "H,W,N,W2",
+            "type": "int",
+            "meaning": "图像高宽、边界条数及坐标宽度。"
+          },
+          {
+            "name": "max_x,x",
+            "type": "int",
+            "meaning": "随机裁底上限和实际裁掉行数。"
+          },
+          {
+            "name": "cropped,stretched",
+            "type": "Tensor [1,1,H−x,W] / [1,1,H,W]",
+            "meaning": "保留上部后放大。"
+          },
+          {
+            "name": "scale,new_y,new_img",
+            "type": "float / Tensor",
+            "meaning": "纵向缩放率、夹到合法范围的坐标、恢复三维图像。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [1,H,W]",
+            "default": "必填",
+            "meaning": "当前单通道图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "各条边界浮点高度。"
+          },
+          {
+            "name": "x",
+            "type": "int / None",
+            "default": "None",
+            "meaning": "裁掉的底部行数；None按比例随机。"
+          },
+          {
+            "name": "rand_ratio",
+            "type": "float",
+            "default": "0.125",
+            "meaning": "随机裁剪上限约H的此比例。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L16–32 检查与决定裁剪量",
+            "detail": "x不合法则原样返回。"
+          },
+          {
+            "title": "L37–48 裁图并恢复尺寸",
+            "detail": "仅保留上方，增加batch轴供插值。"
+          },
+          {
+            "title": "L55–58 同步坐标",
+            "detail": "乘比例并夹到[0,H−1]。"
+          }
+        ],
+        "returns": [
+          "new_img [1,H,W]与new_y [N,W]。"
+        ],
+        "core": true,
+        "pitfall": "函数名含upper，实际删除的是底部。",
+        "shapes": "保留[0,H−x) → 拉回H；y′=yH/(H−x)"
+      },
+      {
+        "start": 61,
+        "end": 123,
+        "title": "压缩并补顶：y乘(H−x)/H再加x",
+        "summary": "将完整内容压到H−x行，放在黑色画布下部。",
+        "principle": [
+          "图像信息整体保留；上下边界先按压缩比例上移，再因顶部补x行整体下移。H=100、x=20、y=40时，y′=40×0.8+20=52。"
+        ],
+        "syntax": [
+          "zeros_like(img)创建同形、同设备、同dtype全零画布；padded[:,x:H,:]=resized写入下部切片。"
+        ],
+        "variables": [
+          {
+            "name": "C,H,W,N,W2",
+            "type": "int",
+            "meaning": "通道、高宽、边界数与标签宽度。"
+          },
+          {
+            "name": "max_x,x,new_h",
+            "type": "int",
+            "meaning": "补顶像素数和压缩后高度H−x。"
+          },
+          {
+            "name": "img_4d,resized",
+            "type": "Tensor",
+            "meaning": "增加batch轴后的输入与压缩输出。"
+          },
+          {
+            "name": "padded",
+            "type": "Tensor [1,H,W]",
+            "meaning": "顶部x行黑色、下部为压缩图像。"
+          },
+          {
+            "name": "scale,new_y",
+            "type": "float / Tensor [N,W]",
+            "meaning": "比例(H−x)/H和压缩加偏移后的边界。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [1,H,W]",
+            "default": "必填",
+            "meaning": "输入图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "原边界坐标。"
+          },
+          {
+            "name": "x",
+            "type": "int / None",
+            "default": "None",
+            "meaning": "顶部补黑高度，同时是被压缩掉的高度。"
+          },
+          {
+            "name": "rand_ratio",
+            "type": "float",
+            "default": "0.25",
+            "meaning": "随机压缩量上限占H比例。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L75–92 决定压缩量",
+            "detail": "维度与宽度检查，非法x返回原样。"
+          },
+          {
+            "title": "L97–113 压缩与补顶",
+            "detail": "完整图像缩至H−x，再写入零画布。"
+          },
+          {
+            "title": "L118–123 坐标同比例移动",
+            "detail": "缩放后加顶部偏移x。"
+          }
+        ],
+        "returns": [
+          "padded图像和new_y。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "全图H→H−x，顶部补x；y′=y(H−x)/H+x"
+      },
+      {
+        "start": 125,
+        "end": 194,
+        "title": "裁顶再拉伸：先减x再乘H/(H−x)",
+        "summary": "删除顶部x行，保留较深部分并拉回原高度。",
+        "principle": [
+          "上界坐标最小值限制最大裁顶量，尽量避免删除最浅边界。原坐标先减x，是把新顶部设为0，再按H/(H−x)缩放。H=100、x=20、y=40时结果25。"
+        ],
+        "syntax": [
+          "torch.min(y_px[0]).item()将第一条线最小值变成Python数；x=min(x,max_safe_x)进一步限制显式输入。"
+        ],
+        "variables": [
+          {
+            "name": "C,H,W,N,W2",
+            "type": "int",
+            "meaning": "输入和边界维度。"
+          },
+          {
+            "name": "top_line_min,max_safe_x,max_rand",
+            "type": "float / int",
+            "meaning": "第一条线最小高度、安全裁剪量和随机上限。"
+          },
+          {
+            "name": "cropped,stretched,new_img",
+            "type": "Tensor",
+            "meaning": "删除顶部后的图像、四维插值结果和三维输出。"
+          },
+          {
+            "name": "scale,new_y",
+            "type": "float / Tensor [N,W]",
+            "meaning": "比例H/(H−x)及减去顶部偏移后的边界。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "img",
+            "type": "Tensor [1,H,W]",
+            "default": "必填",
+            "meaning": "待裁顶图像。"
+          },
+          {
+            "name": "y_px",
+            "type": "Tensor [N,W]",
+            "default": "必填",
+            "meaning": "第0条视为上界，用其最小值限制裁剪。"
+          },
+          {
+            "name": "x",
+            "type": "int / None",
+            "default": "None",
+            "meaning": "删除顶部行数，会被安全上限再次限制。"
+          },
+          {
+            "name": "rand_ratio",
+            "type": "float",
+            "default": "0.25",
+            "meaning": "随机裁剪量不超过H的此比例。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L138–166 计算安全裁顶范围",
+            "detail": "边界太浅或没有合法随机范围则保留输入。"
+          },
+          {
+            "title": "L171–183 裁顶并拉伸",
+            "detail": "切片从x开始，到H结束。"
+          },
+          {
+            "title": "L190–194 同步坐标",
+            "detail": "(y−x)×scale再clamp。"
+          }
+        ],
+        "returns": [
+          "同形new_img、new_y。"
+        ],
+        "core": true,
+        "pitfall": "安全值使用全部第0条坐标，不识别valid；调用者data.augment还会检查有效列和变换后范围。",
+        "shapes": "保留[x,H) → 拉回H；y′=(y−x)H/(H−x)"
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/models.py",
+    "title": "区域网络：四尺度特征变成两张嵌套区域图",
+    "overview": "这个文件规定区域法怎样从图像得到边界。Encoder 取出骨干的四级特征，block 提供卷积、GroupNorm 和 SiLU 积木；BoundaryNet 逐级上采样相加，加入横纵坐标通道，预测两张“像素在该边界下方”的嵌套概率图，再对其补集沿高度积分得到两条线。build_model 统一创建入口。文件还保留 ordered_curves 的 Transformer 曲线分支，但 072 配置实际选 ordinal_regions，不能把备用分支画进当前模型。",
+    "role": "训练中的 ResNet18 教师、MobileNetV3 学生和单图推理共用的模型定义。",
+    "inputs": [
+      "image：float Tensor [B,1,H,W]，像素已除以255；主路径256×256。",
+      "method、backbone 与可选本地初始化权重目录。"
+    ],
+    "outputs": [
+      "字典 y：[B,2,W] 像素纵坐标；regions：[B,2,fh,fw] 两张区域概率图。"
+    ],
+    "readingGuide": [
+      "先看76–90和98–103追踪当前前向，再回看构造器及Encoder。",
+      "与旧热图法比较：四尺度逐级相加、三通道固定归一化、区域积分替代高斯峰解码。",
+      "upper/lower 指两条边界下方的累积区域，不是互斥的两种组织类别。"
+    ],
+    "components": [
+      {
+        "name": "Encoder",
+        "kind": "类",
+        "summary": "构建标准骨干，选择四个尺度的中间层，并记录通道数。",
+        "segmentStart": 14
+      },
+      {
+        "name": "Encoder.__init__",
+        "kind": "函数",
+        "summary": "构建标准骨干，选择四个尺度的中间层，并记录通道数。",
+        "segmentStart": 14
+      },
+      {
+        "name": "Encoder.forward",
+        "kind": "函数",
+        "summary": "依次运行骨干，把选中的四个中间张量装进列表。",
+        "segmentStart": 33
+      },
+      {
+        "name": "block",
+        "kind": "函数",
+        "summary": "建立所有解码尺度共用的局部加工积木。",
+        "segmentStart": 47
+      },
+      {
+        "name": "BoundaryNet",
+        "kind": "类",
+        "summary": "把不同骨干的四级输出统一成64通道，并建立66到64到2的区域预测头。",
+        "segmentStart": 52
+      },
+      {
+        "name": "BoundaryNet.__init__",
+        "kind": "函数",
+        "summary": "把不同骨干的四级输出统一成64通道，并建立66到64到2的区域预测头。",
+        "segmentStart": 52
+      },
+      {
+        "name": "BoundaryNet.forward",
+        "kind": "函数",
+        "summary": "把灰度图变成四尺度特征，再从深到浅逐级相加。",
+        "segmentStart": 76
+      },
+      {
+        "name": "build_model",
+        "kind": "函数",
+        "summary": "让训练与推理通过相同函数构建模型。",
+        "segmentStart": 106
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 11,
+        "title": "依赖与本地骨干权重表",
+        "summary": "把骨干名称映射到本地初始化权重文件。",
+        "principle": [
+          "这里没有自动下载；assets 非空时才读取指定目录的权重。"
+        ],
+        "syntax": [
+          "from torchvision import models 提供标准骨干构造器；WEIGHTS 是字符串到文件名的字典。"
+        ],
+        "variables": [
+          {
+            "name": "WEIGHTS",
+            "type": "dict[str,str]",
+            "meaning": "ResNet18、MobileNetV3-Large/Small 对应的初始化文件名。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L9–11 建立名称表",
+            "detail": "之后用 WEIGHTS[name] 定位权重。"
+          }
+        ],
+        "returns": [
+          "导入模块与 WEIGHTS 常量。"
+        ],
+        "core": false,
+        "pitfall": "新解压包未包含“模型/初始化权重”目录；训练入口仍要求它存在。",
+        "shapes": ""
+      },
+      {
+        "start": 14,
+        "end": 31,
+        "title": "Encoder 初始化：选择骨干与四个输出层",
+        "summary": "构建标准骨干，选择四个尺度的中间层，并记录通道数。",
+        "principle": [
+          "骨干家族可以相同，但这里提取四个尺度，与原热图法只取两级不同。MobileNetV3-Large 在256输入时对应24×64²、40×32²、112×16²、960×8²。",
+          "教师 ResNet18 的四层通道是64、128、256、512；后面的侧向卷积会统一到64，因此解码器可以共享形式。"
+        ],
+        "syntax": [
+          "getattr(models,name)(weights=None) 按字符串调用构造器，不在线取权重。",
+          "load_state_dict(strict=True) 检查参数名和形状；map_location=\"cpu\"先在CPU加载。ModuleList 让子模块参数被注册。"
+        ],
+        "variables": [
+          {
+            "name": "base",
+            "type": "nn.Module",
+            "meaning": "标准分类骨干；仅复用特征提取部分。"
+          },
+          {
+            "name": "path",
+            "type": "Path",
+            "meaning": "assets 与 WEIGHTS[name] 拼出的本地权重路径。"
+          },
+          {
+            "name": "self.stem,self.stages",
+            "type": "nn.Sequential / nn.ModuleList",
+            "meaning": "ResNet 起始层与四个残差阶段。"
+          },
+          {
+            "name": "self.features",
+            "type": "nn.Sequential",
+            "meaning": "MobileNet 逐层特征网络。"
+          },
+          {
+            "name": "self.indices,self.channels",
+            "type": "list[int]",
+            "meaning": "取出的层编号及各层输出通道。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "type": "str",
+            "default": "必填",
+            "meaning": "resnet18、mobilenet_v3_large或mobilenet_v3_small。"
+          },
+          {
+            "name": "assets",
+            "type": "Path / None",
+            "default": "None",
+            "meaning": "初始化权重目录；推理可为空，随后整体加载训练权重。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L18–21 创建并可选加载权重",
+            "detail": "先构建网络，传入assets时再加载初始化参数。"
+          },
+          {
+            "title": "L22–31 决定输出位置",
+            "detail": "ResNet按stage取，MobileNet按features索引取。"
+          }
+        ],
+        "returns": [
+          "保存骨干层与通道表，不执行输入图像前向。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "Large：24×64×64、40×32×32、112×16×16、960×8×8（单图）"
+      },
+      {
+        "start": 33,
+        "end": 44,
+        "title": "Encoder.forward：边计算边收集四级特征",
+        "summary": "依次运行骨干，把选中的四个中间张量装进列表。",
+        "principle": [
+          "输出顺序从空间细到空间粗；解码器会反向从最后一层往前融合。没有把分类结果当特征。"
+        ],
+        "syntax": [
+          "enumerate(self.features) 同时得到层编号和层对象；append 保存张量引用，梯度链保持连接。"
+        ],
+        "variables": [
+          {
+            "name": "outputs",
+            "type": "list[Tensor]",
+            "meaning": "四个选中尺度，按浅到深排列。"
+          },
+          {
+            "name": "x",
+            "type": "Tensor",
+            "meaning": "不断被当前层变换的特征。"
+          },
+          {
+            "name": "stage,layer,i",
+            "type": "Module / int",
+            "meaning": "ResNet阶段或MobileNet层及编号。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x",
+            "type": "Tensor [B,3,H,W]",
+            "default": "必填",
+            "meaning": "已经过模型内部三通道归一化的图像。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L35–38 ResNet 路径",
+            "detail": "先stem，再运行四个stage并全部收集。"
+          },
+          {
+            "title": "L39–44 MobileNet 路径",
+            "detail": "每层都运行，仅选中索引才加入outputs。"
+          }
+        ],
+        "returns": [
+          "四元素特征列表。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "[B,3,256,256] → 四个不同通道/分辨率的张量"
+      },
+      {
+        "start": 47,
+        "end": 49,
+        "title": "block：卷积后为什么接 GroupNorm 和 SiLU",
+        "summary": "建立所有解码尺度共用的局部加工积木。",
+        "principle": [
+          "3×3卷积组合邻域信息；8组GroupNorm在每个样本内部按通道分组统计，不依赖batch运行均值；SiLU(x)=x·sigmoid(x)提供平滑非线性。"
+        ],
+        "syntax": [
+          "Conv2d(cin,cout,3,padding=1,bias=False) 默认stride=1，空间大小不变。GroupNorm(8,cout)要求cout能被8整除。"
+        ],
+        "variables": [
+          {
+            "name": "cin,cout",
+            "type": "int",
+            "meaning": "输入、输出通道；主路径block(64,64)，区域头block(66,64)。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cin",
+            "type": "int",
+            "default": "必填",
+            "meaning": "输入通道数。"
+          },
+          {
+            "name": "cout",
+            "type": "int",
+            "default": "必填",
+            "meaning": "输出通道数，当前为64。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L48–49 组合三个子层",
+            "detail": "Sequential按卷积、归一化、激活顺序执行。"
+          }
+        ],
+        "returns": [
+          "可调用的 nn.Sequential。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 52,
+        "end": 60,
+        "title": "装配区域模型：四个侧向投影与一个区域头",
+        "summary": "把不同骨干的四级输出统一成64通道，并建立66到64到2的区域预测头。",
+        "principle": [
+          "每级1×1卷积只改变通道混合，不改空间网格；逐级融合前必须把通道数统一才能相加。",
+          "区域头接收64特征通道及2个坐标通道，所以输入是66而不是64；最后2个输出对应两条边界。"
+        ],
+        "syntax": [
+          "ModuleList([ ... for c in channels]) 为每个尺度建立独立权重。nn.Conv2d(64,2,1)是两组覆盖64通道的1×1预测核。"
+        ],
+        "variables": [
+          {
+            "name": "self.encoder",
+            "type": "Encoder",
+            "meaning": "教师或学生的四尺度骨干。"
+          },
+          {
+            "name": "self.lateral",
+            "type": "ModuleList[Conv2d]",
+            "meaning": "四个通道投影到64的1×1卷积。"
+          },
+          {
+            "name": "self.refine",
+            "type": "ModuleList[Sequential]",
+            "meaning": "四个融合后的3×3加工块。"
+          },
+          {
+            "name": "self.regions",
+            "type": "Sequential",
+            "meaning": "66→64的3×3块，再64→2的1×1原始评分层。"
+          },
+          {
+            "name": "self.method,self.backbone",
+            "type": "str",
+            "meaning": "控制当前前向分支和骨干类型。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "method",
+            "type": "str",
+            "default": "ordered_curves",
+            "meaning": "构造器默认是备用曲线法；配置实际传ordinal_regions。"
+          },
+          {
+            "name": "backbone",
+            "type": "str",
+            "default": "resnet18",
+            "meaning": "教师用resnet18，当前附带学生权重用mobilenet_v3_large。"
+          },
+          {
+            "name": "assets",
+            "type": "Path / None",
+            "default": "None",
+            "meaning": "可选本地初始化权重目录，转传Encoder。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L55–57 保存选择并创建骨干",
+            "detail": "当前配置method=ordinal_regions。"
+          },
+          {
+            "title": "L58–60 创建融合与区域头",
+            "detail": "只装配模块；图像到forward才流过它们。"
+          }
+        ],
+        "returns": [
+          "持有可训练骨干、融合层和区域头的 BoundaryNet 实例。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "四尺度各投影成64通道；区域头66→64→2"
+      },
+      {
+        "start": 61,
+        "end": 74,
+        "title": "备用曲线分支与固定归一化缓冲区",
+        "summary": "补充非当前方法的序列预测头，并保存三通道均值和标准差。",
+        "principle": [
+          "ordered_curves 会把特征压成横向序列，使用膨胀Conv1d和两层Transformer，再预测三个非负分层比例；072区域配置不会创建这些部件。",
+          "mean/std 用register_buffer注册，随模型迁移设备并存入state_dict，但不是被优化器学习的Parameter。"
+        ],
+        "syntax": [
+          "Conv1d padding=d、dilation=d 保持序列长度。TransformerEncoderLayer的128是token宽度，4是注意力头数，256是前馈隐藏宽度。",
+          "view(1,3,1,1)使固定通道统计量广播到batch和所有空间位置。"
+        ],
+        "variables": [
+          {
+            "name": "self.reduce,self.context",
+            "type": "Conv2d / Sequential",
+            "meaning": "备用分支把64通道压到16，空间池化后形成128维序列。"
+          },
+          {
+            "name": "self.position",
+            "type": "Parameter [1,64,128]",
+            "meaning": "备用分支学习的位置编码。"
+          },
+          {
+            "name": "layer,self.attention,self.curves",
+            "type": "Transformer / Conv1d",
+            "meaning": "备用序列上下文与三个分层比例评分。"
+          },
+          {
+            "name": "self.mean,self.std",
+            "type": "buffer [1,3,1,1]",
+            "meaning": "ImageNet通道均值[.485,.456,.406]与标准差[.229,.224,.225]。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L61–70 只在备用方法中创建序列头",
+            "detail": "不要把这段Transformer算作072区域法的执行步骤。"
+          },
+          {
+            "title": "L71–74 验证方法名并注册统计量",
+            "detail": "当前区域法也会执行这两行归一化配置。"
+          }
+        ],
+        "returns": [
+          "备用模块（条件创建）和所有方法共用的mean/std。"
+        ],
+        "core": false,
+        "pitfall": "函数默认method并非本配置所用方法，必须追踪调用参数。",
+        "shapes": ""
+      },
+      {
+        "start": 76,
+        "end": 83,
+        "title": "四尺度融合前向：从8×8逐级回到64×64",
+        "summary": "把灰度图变成四尺度特征，再从深到浅逐级相加。",
+        "principle": [
+          "expand复制的是通道视图，不额外学习颜色；三个通道随后使用不同固定均值/标准差，所以归一化后的通道值不同。",
+          "最深层先投影到64并加工；每向浅一层，就把深层放到同尺寸，和浅层投影逐元素相加，再卷积加工。空间层级依次8→16→32→64。"
+        ],
+        "syntax": [
+          "expand(-1,3,-1,-1)中-1保持该维不变；encoded[-1]取最深特征。",
+          "F.interpolate(size=...,mode=\"bilinear\",align_corners=False)对齐空间网格；加号是逐元素融合，不增加通道数。"
+        ],
+        "variables": [
+          {
+            "name": "h,w",
+            "type": "int",
+            "meaning": "原输入高宽，之后用于恢复像素坐标。"
+          },
+          {
+            "name": "x",
+            "type": "Tensor",
+            "meaning": "归一化图像，随后复用变量名保存融合特征。"
+          },
+          {
+            "name": "encoded",
+            "type": "list[Tensor]",
+            "meaning": "四个骨干尺度。"
+          },
+          {
+            "name": "i",
+            "type": "int",
+            "meaning": "按2、1、0依次访问较浅尺度。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "image",
+            "type": "Tensor [B,1,H,W]",
+            "default": "必填",
+            "meaning": "Dataset或infer生成的[0,1]灰度输入。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L77–79 归一化与编码",
+            "detail": "灰度[0,1]输入扩展三通道，Encoder提取四级。"
+          },
+          {
+            "title": "L80–83 逐级相加融合",
+            "detail": "每次尺寸对齐后相加，再用该层refine加工。"
+          }
+        ],
+        "returns": [
+          "当前x为[B,64,64,64]（256输入的标准骨干）。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "[B,1,256,256] → 四尺度 → [B,64,64,64]",
+        "flow": {
+          "title": "四尺度逐级融合",
+          "caption": "三次上采样发生在特征空间；没有旧模型的1000通道拼接。",
+          "nodes": [
+            {
+              "id": "0",
+              "title": "输入归一化",
+              "detail": "灰度扩展为三通道"
+            },
+            {
+              "id": "1",
+              "title": "Encoder",
+              "detail": "保存四个尺度"
+            },
+            {
+              "id": "2",
+              "title": "最深层",
+              "detail": "投影64通道并加工"
+            },
+            {
+              "id": "3",
+              "title": "逐级回到浅层",
+              "detail": "上采样＋浅层投影＋refine"
+            },
+            {
+              "id": "4",
+              "title": "融合结果",
+              "detail": "64×64×64"
+            }
+          ],
+          "edges": [
+            {
+              "to": "1",
+              "from": "0"
+            },
+            {
+              "to": "2",
+              "from": "1"
+            },
+            {
+              "to": "3",
+              "from": "2"
+            },
+            {
+              "to": "4",
+              "from": "3"
+            }
+          ]
+        }
+      },
+      {
+        "start": 84,
+        "end": 90,
+        "title": "坐标通道与嵌套概率：两个区域不是两个互斥类别",
+        "summary": "将空间位置显式输入区域头，并构造必然满足嵌套关系的两个概率。",
+        "principle": [
+          "yy/xx告诉预测头“当前处于图像哪个相对高度和列”；它们不是图像像素亮度，也不是人工边界。",
+          "令a=sigmoid(z1)，b=a·sigmoid(z2)，则0≤b≤a≤1。a表示位于上边界下方的概率，b表示位于下边界下方的概率；越深的区域同时属于二者。这保证坐标解码后的上下顺序。"
+        ],
+        "syntax": [
+          "torch.cat(...,1)沿通道拼接64+1+1=66。[:, :1]保留单通道维度；.float()使区域概率在FP32计算。"
+        ],
+        "variables": [
+          {
+            "name": "b,fh,fw",
+            "type": "int",
+            "meaning": "批大小和融合特征的高宽，常见fh=fw=64。"
+          },
+          {
+            "name": "yy,xx",
+            "type": "Tensor [B,1,fh,fw]",
+            "meaning": "从0到1的纵向、横向位置通道。"
+          },
+          {
+            "name": "logits",
+            "type": "Tensor [B,2,fh,fw]",
+            "meaning": "区域头的两个无界评分。"
+          },
+          {
+            "name": "upper",
+            "type": "Tensor [B,1,fh,fw]",
+            "meaning": "sigmoid第一张评分，表示上边界下方区域。"
+          },
+          {
+            "name": "lower",
+            "type": "Tensor [B,1,fh,fw]",
+            "meaning": "upper乘第二张sigmoid，保证逐像素不大于upper。"
+          },
+          {
+            "name": "regions",
+            "type": "Tensor [B,2,fh,fw]",
+            "meaning": "两张嵌套区域概率图。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L84–86 展开位置网格",
+            "detail": "利用view与expand把一维坐标广播为整张位置图。"
+          },
+          {
+            "title": "L87 生成两个区域评分",
+            "detail": "先拼66个通道，再经过区域头。"
+          },
+          {
+            "title": "L88–90 约束嵌套",
+            "detail": "第二张概率乘第一张，建立结构性上下包含关系。"
+          }
+        ],
+        "returns": [
+          "regions两张概率图，未沿高度softmax，列概率和不要求为1。"
+        ],
+        "core": true,
+        "pitfall": "乘积保证两图嵌套，但不保证每张图沿高度单调；纵向单调由损失软约束。",
+        "shapes": "64特征＋2位置 → 2评分 → 两张嵌套区域概率"
+      },
+      {
+        "start": 91,
+        "end": 97,
+        "title": "备用有序曲线解码：当前区域法跳过",
+        "summary": "保留的ordered_curves路径把横向序列转成三个比例，再累加为两条曲线。",
+        "principle": [
+          "三个比例分别表示顶部到上界、两界之间、下界到底部的相对厚度；softmax确保非负且和为1，前两项累加保证边界有序。"
+        ],
+        "syntax": [
+          "adaptive_avg_pool2d(...,(8,64))固定池化网格；flatten(1,2)合并16通道与8行，形成128维。transpose在[B,C,W]与[B,W,C]间切换。"
+        ],
+        "variables": [
+          {
+            "name": "sequence",
+            "type": "Tensor [B,128,64] / [B,64,128]",
+            "meaning": "卷积与注意力之间调整布局的横向序列。"
+          },
+          {
+            "name": "gap_logits,fractions",
+            "type": "Tensor [B,3,W]",
+            "meaning": "三段厚度的评分及归一化比例。"
+          },
+          {
+            "name": "y",
+            "type": "Tensor [B,2,W]",
+            "meaning": "三个比例前两项的累计和。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L92–94 汇聚序列与上下文",
+            "detail": "池化、膨胀卷积、位置编码、Transformer。"
+          },
+          {
+            "title": "L95–97 比例累计",
+            "detail": "先沿宽度放大，再沿三段通道softmax和cumsum。"
+          }
+        ],
+        "returns": [
+          "备用分支的归一化坐标y。"
+        ],
+        "core": false,
+        "pitfall": "072配置不执行此分支；区域积分在下一段。",
+        "shapes": ""
+      },
+      {
+        "start": 98,
+        "end": 103,
+        "title": "区域积分解码：不找亮峰也能得到小数高度",
+        "summary": "把每列“边界以上的面积”换算为边界高度，再恢复原宽度。",
+        "principle": [
+          "regions表示边界下方，所以1-regions表示边界上方。对高度均值等价于求上方面积占整列比例：u=(1/fh)Σ(1-R)。将u乘H−1就变成像素高度。",
+          "例如8个高度格的R=[0,0,0.5,1,1,1,1,1]，上方面积为2.5格，u=2.5/8=0.3125；输入H=256时得到79.6875像素。",
+          "因为lower≤upper，所以1-lower≥1-upper，两条积分坐标必然上界≤下界；但这不意味着区域图只会有一个清晰转折。"
+        ],
+        "syntax": [
+          "mean(2)消去高度维，得到[B,2,fw]；linear插值作用于一维宽度，不是在高度上寻找峰。"
+        ],
+        "variables": [
+          {
+            "name": "regions",
+            "type": "Tensor [B,2,fh,fw]",
+            "meaning": "上一段得到的嵌套概率。"
+          },
+          {
+            "name": "y",
+            "type": "Tensor [B,2,fw] → [B,2,W]",
+            "meaning": "先为归一化高度，再沿宽度插值。"
+          },
+          {
+            "name": "h-1",
+            "type": "int",
+            "meaning": "输入坐标范围的最大纵坐标，256输入时为255。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L101 对补集积分",
+            "detail": "沿高度平均1-regions。"
+          },
+          {
+            "title": "L102–103 恢复宽度并换算像素",
+            "detail": "宽度线性插值后乘H−1，和regions一起返回。"
+          }
+        ],
+        "returns": [
+          "dict：y是逐列像素坐标，regions保留低分辨率概率供监督/蒸馏。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "[B,2,64,64] → [B,2,64] → [B,2,256]"
+      },
+      {
+        "start": 106,
+        "end": 107,
+        "title": "build_model：统一构造入口",
+        "summary": "让训练与推理通过相同函数构建模型。",
+        "principle": [
+          "这里只转发参数，不加载最终训练权重，也不执行前向；infer会在之后load_state_dict。"
+        ],
+        "syntax": [
+          "位置参数顺序必须对应BoundaryNet(method,backbone,assets)。"
+        ],
+        "variables": [
+          {
+            "name": "method,backbone,assets",
+            "type": "str / str / Path或None",
+            "meaning": "模型分支、骨干名称及可选初始化目录。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "method",
+            "type": "str",
+            "default": "必填",
+            "meaning": "当前配置为ordinal_regions。"
+          },
+          {
+            "name": "backbone",
+            "type": "str",
+            "default": "必填",
+            "meaning": "教师resnet18或学生MobileNetV3。"
+          },
+          {
+            "name": "assets",
+            "type": "Path / None",
+            "default": "None",
+            "meaning": "本地初始化权重目录。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L107 创建BoundaryNet",
+            "detail": "返回已装配的模型对象。"
+          }
+        ],
+        "returns": [
+          "BoundaryNet实例。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/losses.py",
+    "title": "区域监督与可信教师蒸馏",
+    "overview": "这个文件把两条真实边界转成区域阶跃标签，并定义当前区域法的训练目标。masked_mean负责有效位置加权平均，targets把坐标变成低分辨率区域概率标签，supervised汇总坐标、斜率、厚度、区域BCE与纵向单调约束，distillation则根据教师在训练标注上的误差，控制学生模仿教师的强度。这里没有高斯热图损失。",
+    "role": "train.py在每批训练中调用supervised；训练学生时再加入distillation。",
+    "inputs": [
+      "模型输出字典y/regions；真实坐标[B,2,256]与valid布尔掩码；配置loss字典。"
+    ],
+    "outputs": [
+      "可反向传播的标量损失；targets另输出区域目标和像素掩码。"
+    ],
+    "readingGuide": [
+      "先读targets理解目标图是阶跃，再看supervised各项如何配合。",
+      "区域积分与目标生成采用相匹配的归一化高度；不能照搬旧热图的高斯和softmax解释。",
+      "蒸馏权重由训练入口再乘0.55×min(epoch/10,1)。"
+    ],
+    "components": [
+      {
+        "name": "masked_mean",
+        "kind": "函数",
+        "summary": "统一处理布尔掩码和连续权重，并保护空分母。",
+        "segmentStart": 1
+      },
+      {
+        "name": "targets",
+        "kind": "函数",
+        "summary": "把每列边界高度转换为“上方0、下方1、穿过格子取分数”的区域标签。",
+        "segmentStart": 9
+      },
+      {
+        "name": "supervised",
+        "kind": "函数",
+        "summary": "同时约束边界位置、横向走势和上下边界间距。",
+        "segmentStart": 20
+      },
+      {
+        "name": "distillation",
+        "kind": "函数",
+        "summary": "用训练标注判断教师局部可靠性，再蒸馏坐标和区域分布。",
+        "segmentStart": 41
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 6,
+        "title": "masked_mean：有效位置或置信权重上的平均",
+        "summary": "统一处理布尔掩码和连续权重，并保护空分母。",
+        "principle": [
+          "先乘权重再求和，分母也是权重和；因此line_weights改变两条线的相对贡献，不是简单乘完再除原始数量。"
+        ],
+        "syntax": [
+          "clamp_min(1)使全无效时分母至少1，返回0；values和valid必须已经可广播且分母的维度含义正确。"
+        ],
+        "variables": [
+          {
+            "name": "values",
+            "type": "Tensor",
+            "meaning": "逐元素误差或KL。"
+          },
+          {
+            "name": "valid",
+            "type": "bool/float Tensor",
+            "meaning": "有效位置掩码、逐线权重或教师置信门控。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "values",
+            "type": "Tensor",
+            "default": "必填",
+            "meaning": "未归约的误差。"
+          },
+          {
+            "name": "valid",
+            "type": "Tensor",
+            "default": "必填",
+            "meaning": "同形或可广播的有效掩码/权重。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L6 计算加权平均",
+            "detail": "(values*valid).sum()/valid.sum().clamp_min(1)。"
+          }
+        ],
+        "returns": [
+          "标量Tensor，梯度从values回传。"
+        ],
+        "core": true,
+        "pitfall": "本版本分母未自动expand_as；当前调用会给出匹配形状，新增调用必须避免广播后分母少算。",
+        "shapes": ""
+      },
+      {
+        "start": 9,
+        "end": 17,
+        "title": "targets：用抗锯齿阶跃替代高斯软目标",
+        "summary": "把每列边界高度转换为“上方0、下方1、穿过格子取分数”的区域标签。",
+        "principle": [
+          "先把边界按横向插值到区域图宽度，再除255；每个区域格子的中心为(i+0.5)/fh。目标Q=clip((center−u)·fh+0.5,0,1)，等价于格子在边界下方所占的比例。",
+          "例如fh=8、u=2.5/8，目标[0,0,0.5,1,1,1,1,1]；对1-Q求均值正好回到u。它是一条阶跃，不是边界附近的高斯亮带。"
+        ],
+        "syntax": [
+          "linear重采样坐标；nearest重采样布尔valid，避免把真假平均成中间值。[:, :, None]插入高度轴，expand复制视图到每个高度。"
+        ],
+        "variables": [
+          {
+            "name": "h,w",
+            "type": "int",
+            "meaning": "目标区域图的高宽，通常64、64。"
+          },
+          {
+            "name": "yy",
+            "type": "Tensor [B,2,w]",
+            "meaning": "真实像素坐标缩放为0～1的高度。"
+          },
+          {
+            "name": "vv",
+            "type": "bool Tensor [B,2,w]",
+            "meaning": "目标宽度上的有效列。"
+          },
+          {
+            "name": "grid",
+            "type": "Tensor [h]",
+            "meaning": "每个区域格子的中心高度。"
+          },
+          {
+            "name": "region",
+            "type": "Tensor [B,2,h,w]",
+            "meaning": "边界下方区域的抗锯齿阶跃标签。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "y",
+            "type": "Tensor [B,2,W]",
+            "default": "必填",
+            "meaning": "输入尺寸下的真实像素纵坐标。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [B,2,W]",
+            "default": "必填",
+            "meaning": "哪些列有可用监督。"
+          },
+          {
+            "name": "shape",
+            "type": "tuple[int,int]",
+            "default": "必填",
+            "meaning": "模型regions的(h,w)。"
+          },
+          {
+            "name": "height",
+            "type": "int",
+            "default": "256",
+            "meaning": "真实坐标所在图像高度，归一化分母height−1。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L10–12 重采样横向标签与掩码",
+            "detail": "坐标线性插值；有效性用最近邻。"
+          },
+          {
+            "title": "L14–16 制作格子覆盖率",
+            "detail": "边界穿过格子时产生0到1的软值。"
+          },
+          {
+            "title": "L17 扩展掩码",
+            "detail": "一列无效时，该列所有高度不计区域损失。"
+          }
+        ],
+        "returns": [
+          "区域目标region，以及同形布尔监督掩码。"
+        ],
+        "core": true,
+        "pitfall": "supervised调用没有传height，实际固定按256处理；不能只改配置input_size就假设损失自动适配。",
+        "shapes": "[B,2,256] → [B,2,64] → [B,2,64,64]"
+      },
+      {
+        "start": 20,
+        "end": 28,
+        "title": "坐标、斜率与厚度：三种几何误差",
+        "summary": "同时约束边界位置、横向走势和上下边界间距。",
+        "principle": [
+          "坐标使用SmoothL1：误差较小时二次、较大时线性，beta决定转折；本配置beta=3。",
+          "斜率项比较预测与真值的一阶差分，保留真实起伏；它不是要求所有斜率都为0。厚度项比较两线之差，仅在上下界同时有效的列使用。"
+        ],
+        "syntax": [
+          "diff(dim=-1)得到相邻列差值，长度W变W−1。valid[:,:,1:] & valid[:,:,:-1]要求两端都有效。all(1)要求两条边界都有效。"
+        ],
+        "variables": [
+          {
+            "name": "pred",
+            "type": "Tensor [B,2,W]",
+            "meaning": "模型预测像素坐标。"
+          },
+          {
+            "name": "weights",
+            "type": "Tensor [1,2,1]",
+            "meaning": "当前逐线权重[1.372,1.387]。"
+          },
+          {
+            "name": "coord",
+            "type": "scalar Tensor",
+            "meaning": "有效列加权SmoothL1坐标误差。"
+          },
+          {
+            "name": "adjacent,slope",
+            "type": "bool Tensor / scalar",
+            "meaning": "相邻有效掩码及预测/真值斜率差。"
+          },
+          {
+            "name": "both,thickness",
+            "type": "bool Tensor [B,W] / scalar",
+            "meaning": "双线有效掩码与层厚误差。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "output",
+            "type": "dict[str,Tensor]",
+            "default": "必填",
+            "meaning": "BoundaryNet返回的y与regions。"
+          },
+          {
+            "name": "y",
+            "type": "Tensor [B,2,W]",
+            "default": "必填",
+            "meaning": "真实像素高度。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [B,2,W]",
+            "default": "必填",
+            "meaning": "有效列。"
+          },
+          {
+            "name": "settings",
+            "type": "dict / None",
+            "default": "None",
+            "meaning": "loss配置：坐标权重与beta、各分项系数。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L22–24 计算逐线坐标误差",
+            "detail": "权重与valid相乘后做加权平均。"
+          },
+          {
+            "title": "L25–28 计算走势和厚度误差",
+            "detail": "两项都比较真值，并按各自有效条件筛选。"
+          }
+        ],
+        "returns": [
+          "三个标量coord、slope、thickness，下一段组合。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 29,
+        "end": 38,
+        "title": "区域BCE与纵向单调：监督完整的区域形状",
+        "summary": "区域标签约束整张图，单调项抑制由上向下概率反而下降。",
+        "principle": [
+          "仅靠积分坐标，不同区域图可能有相同面积而得到相同坐标；BCE使每个有效位置接近其阶跃目标。",
+          "R(y+1)−R(y)应该非负，所以ReLU(−diff)只惩罚下降。它是软约束，不保证所有像素严格单调。",
+          "本配置总监督=coord+0.4 slope+0.05 thickness+1.0 BCE+0.5 monotonic。"
+        ],
+        "syntax": [
+          "概率是sigmoid乘积，不能直接套一个原始logit的BCEWithLogitsLoss；这里对概率显式binary_cross_entropy。",
+          "禁用autocast并使用.float()，使概率BCE在FP32计算；clamp避免log(0)。"
+        ],
+        "variables": [
+          {
+            "name": "regions",
+            "type": "float Tensor [B,2,h,w]",
+            "meaning": "被夹到[1e−5,1−1e−5]的预测区域。"
+          },
+          {
+            "name": "target,mask",
+            "type": "Tensor / bool Tensor",
+            "meaning": "抗锯齿阶跃目标及同形有效像素掩码。"
+          },
+          {
+            "name": "bce",
+            "type": "scalar Tensor",
+            "meaning": "逐像素二元交叉熵的有效平均。"
+          },
+          {
+            "name": "mono_mask",
+            "type": "bool Tensor [B,2,h−1,w]",
+            "meaning": "上下相邻格子都有效。"
+          },
+          {
+            "name": "monotonic",
+            "type": "scalar Tensor",
+            "meaning": "区域概率沿纵向下降的平均幅度。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L29–30 准备区域目标",
+            "detail": "稳定概率并生成同尺寸监督。"
+          },
+          {
+            "title": "L33–34 计算区域BCE",
+            "detail": "逐元素比较后再用有效掩码归约。"
+          },
+          {
+            "title": "L35–38 加单调并汇总",
+            "detail": "只惩罚纵向下降，按配置合成总监督。"
+          }
+        ],
+        "returns": [
+          "总监督损失标量。"
+        ],
+        "core": true,
+        "pitfall": "纵向单调0.5在源码中固定；config.json没有该系数。",
+        "shapes": ""
+      },
+      {
+        "start": 41,
+        "end": 50,
+        "title": "distillation：教师越可靠，学生越多模仿",
+        "summary": "用训练标注判断教师局部可靠性，再蒸馏坐标和区域分布。",
+        "principle": [
+          "门控g=exp(−|教师坐标−真值|/8)·valid。教师误差为0、8、16像素时权重约1、0.368、0.135；它降低错误教师的影响，但不会使所有错误教师权重严格为0。",
+          "坐标项用SmoothL1让学生接近教师；区域项计算教师Bernoulli分布到学生的KL，含“下方”和“非下方”两项。教师通过detach冻结。",
+          "masked_mean会除以门控权重之和，所以门控主要重新分配各位置的相对信任；若所有权重同时按相同比例缩小且未触及分母下限，这个加权平均不会同比变小。整个蒸馏项的强度另由训练器的0.55和轮次暖启动控制。"
+        ],
+        "syntax": [
+          "torch.exp按元素计算指数；detach断开教师梯度。F.interpolate将逐列门控放到区域图宽度，再expand_as扩展到所有高度。"
+        ],
+        "variables": [
+          {
+            "name": "weight",
+            "type": "Tensor [B,2,W]",
+            "meaning": "由教师在训练标签上的误差得到的置信门控。"
+          },
+          {
+            "name": "coord",
+            "type": "scalar Tensor",
+            "meaning": "学生/教师坐标差的门控加权平均。"
+          },
+          {
+            "name": "s,t",
+            "type": "Tensor [B,2,h,w]",
+            "meaning": "稳定后的学生与教师区域概率。"
+          },
+          {
+            "name": "gate",
+            "type": "Tensor [B,2,h,w]",
+            "meaning": "沿宽度重采样并广播到高度的门控。"
+          },
+          {
+            "name": "kl",
+            "type": "Tensor [B,2,h,w]",
+            "meaning": "t log(t/s)+(1−t)log((1−t)/(1−s))。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "student",
+            "type": "dict[str,Tensor]",
+            "default": "必填",
+            "meaning": "当前学生输出，保留梯度。"
+          },
+          {
+            "name": "teacher",
+            "type": "dict[str,Tensor]",
+            "default": "必填",
+            "meaning": "同图教师输出；detach且入口已no_grad。"
+          },
+          {
+            "name": "y",
+            "type": "Tensor [B,2,W]",
+            "default": "必填",
+            "meaning": "同一增强后的训练真值。"
+          },
+          {
+            "name": "valid",
+            "type": "bool Tensor [B,2,W]",
+            "default": "必填",
+            "meaning": "有效监督列。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L44–45 蒸馏坐标",
+            "detail": "真值仅用于判断教师可靠性，学生目标是教师坐标。"
+          },
+          {
+            "title": "L46–49 蒸馏区域",
+            "detail": "比较同一增强图像下两模型区域分布。"
+          },
+          {
+            "title": "L50 合成",
+            "detail": "返回坐标项与区域KL，训练入口再乘渐增系数。"
+          }
+        ],
+        "returns": [
+          "蒸馏标量，不包含外部0.55与10轮升温因子。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "",
+        "flow": {
+          "title": "可信教师蒸馏",
+          "caption": "验证标签不用于训练时蒸馏门控。",
+          "nodes": [
+            {
+              "id": "0",
+              "title": "同一增强图像",
+              "detail": "学生学习；教师冻结"
+            },
+            {
+              "id": "1",
+              "title": "教师对照训练真值",
+              "detail": "误差越大，exp门控越小"
+            },
+            {
+              "id": "2",
+              "title": "两项模仿",
+              "detail": "坐标SmoothL1＋区域Bernoulli KL"
+            },
+            {
+              "id": "3",
+              "title": "返回蒸馏损失",
+              "detail": "入口乘0.55×min(epoch/10,1)"
+            }
+          ],
+          "edges": [
+            {
+              "to": "1",
+              "from": "0"
+            },
+            {
+              "to": "2",
+              "from": "1"
+            },
+            {
+              "to": "3",
+              "from": "2"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/train.py",
+    "title": "教师与学生如何训练、验证、选优和恢复",
+    "overview": "这个文件把固定数据、区域网络和两类损失装成一次训练任务。seed_worker管理数据工作进程随机性，evaluate统计有效列上的坐标与厚度误差，train完成角色选择、教师隔离、优化器和调度器、梯度累积、验证选优、检查点恢复和最终可视化；save_checkpoint负责临时文件替换。教师以真实标注训练，学生同时接受真实标注与冻结教师的监督。",
+    "role": "run.py启动的实际训练入口；支持两种划分和教师/Large/Small三种角色。",
+    "inputs": [
+      "args.split、args.role；config.json、固定data_index.json、原始数据及初始化骨干权重。",
+      "学生还要求同方案同划分的已完成教师权重与状态记录。"
+    ],
+    "outputs": [
+      "训练中的last恢复状态、按平衡评分选出的best权重、逐轮/最终指标、诊断图及状态文件。"
+    ],
+    "readingGuide": [
+      "先读数据加载和模型/教师装配，再看162–191的训练更新与选优主线。",
+      "teacher.eval与学生model.train在同一轮并存；冻结教师不等于关闭学生的梯度。",
+      "输入示例和现有权重不能证明包中所有六种训练组合都已经执行。",
+      "当前脚本依赖CUDA、Linux工程工具和未附带的初始化/教师资源；学习网页不会执行它。"
+    ],
+    "components": [
+      {
+        "name": "seed_worker",
+        "kind": "函数",
+        "summary": "同步Python/NumPy随机源，并用临时文件保护权重写入。",
+        "segmentStart": 23
+      },
+      {
+        "name": "save_checkpoint",
+        "kind": "函数",
+        "summary": "同步Python/NumPy随机源，并用临时文件保护权重写入。",
+        "segmentStart": 23
+      },
+      {
+        "name": "evaluate",
+        "kind": "函数",
+        "summary": "关闭梯度并切换评估模式，统计逐线误差、阈值准确率与失败样本。",
+        "segmentStart": 34
+      },
+      {
+        "name": "train",
+        "kind": "函数",
+        "summary": "读取配置，选教师或学生骨干，设置随机性及输出位置。",
+        "segmentStart": 74
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 20,
+        "title": "训练模块依赖与方案目录定位",
+        "summary": "根据脚本所在目录找到当前方案，并导入数据、模型、损失与状态工具。",
+        "principle": [
+          "SCHEME固定为脚本的上两级，即072方案目录；从不同工作目录启动仍使用这一方案。"
+        ],
+        "syntax": [
+          "Path(__file__).resolve().parents[1]使用实际脚本路径；__file__是当前模块文件位置。"
+        ],
+        "variables": [
+          {
+            "name": "SCHEME",
+            "type": "Path",
+            "meaning": "当前方案根目录。"
+          },
+          {
+            "name": "BoundaryDataset,build_model,supervised,distillation",
+            "type": "类/函数",
+            "meaning": "数据、模型及两种损失接口。"
+          },
+          {
+            "name": "atomic_json,checkpoint_name,now,refresh",
+            "type": "函数",
+            "meaning": "记录状态、命名权重、更新时间和刷新文档。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L2–20 导入并确定目录",
+            "detail": "import reporting会依赖fcntl，属于Linux实现。"
+          }
+        ],
+        "returns": [
+          "训练脚本的依赖及SCHEME。"
+        ],
+        "core": false,
+        "pitfall": "源码导入不等于执行训练，但reporting的fcntl在原生Windows通常不可用。",
+        "shapes": ""
+      },
+      {
+        "start": 23,
+        "end": 31,
+        "title": "工作进程随机种子与检查点原子替换",
+        "summary": "同步Python/NumPy随机源，并用临时文件保护权重写入。",
+        "principle": [
+          "DataLoader已给各worker分配torch初始种子，这里取32位范围同步其他随机源，让增强抽签更可复现。",
+          "先写临时pth再replace目标，可减少中途失败留下半个目标文件的机会。"
+        ],
+        "syntax": [
+          "%2**32限制NumPy可接受范围；with_name替换文件名而保留父目录；Path.replace完成同文件系统替换。"
+        ],
+        "variables": [
+          {
+            "name": "seed",
+            "type": "int",
+            "meaning": "当前worker派生的32位随机种子。"
+          },
+          {
+            "name": "temporary",
+            "type": "Path",
+            "meaning": "与目标同目录、以.tmp.pth结尾的临时文件。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "worker",
+            "type": "int",
+            "default": "必填",
+            "meaning": "DataLoader传入的工作进程编号，本体用torch.initial_seed获取实际种子。"
+          },
+          {
+            "name": "path",
+            "type": "Path",
+            "default": "必填",
+            "meaning": "检查点最终路径。"
+          },
+          {
+            "name": "payload",
+            "type": "dict",
+            "default": "必填",
+            "meaning": "模型及元信息，或完整恢复状态。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L23–25 同步增强随机源",
+            "detail": "worker参数由DataLoader传入，函数体不直接使用其编号。"
+          },
+          {
+            "title": "L28–31 保存再替换",
+            "detail": "torch.save序列化payload，成功后替换目标。"
+          }
+        ],
+        "returns": [
+          "seed_worker无返回；save_checkpoint写入文件。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 34,
+        "end": 58,
+        "title": "evaluate前半：只在有效列累积误差",
+        "summary": "关闭梯度并切换评估模式，统计逐线误差、阈值准确率与失败样本。",
+        "principle": [
+          "这里按有效点总数归约，不是先算每批均值再平均；不同batch最后一批大小不同也不会等权误算。",
+          "original_scale=view_height/256将纵坐标误差从网络像素换回当前视图像素；这仍不是毫米。每张图任一条线平均误差大于10像素记失败。"
+        ],
+        "syntax": [
+          "@torch.inference_mode减少求导开销；model.eval使BN/Dropout采用评估行为。autocast使用BF16前向，输出转float再计算误差。"
+        ],
+        "variables": [
+          {
+            "name": "total,count,original_total",
+            "type": "ndarray [2]",
+            "meaning": "两条线误差和、有效数量、原视图单位误差和。"
+          },
+          {
+            "name": "accuracy,errors",
+            "type": "ndarray [3] / list[Tensor]",
+            "meaning": "2/3/5像素内点数与所有有效绝对误差。"
+          },
+          {
+            "name": "image,y,valid",
+            "type": "Tensor",
+            "meaning": "移到设备后的batch。"
+          },
+          {
+            "name": "output,error,scale",
+            "type": "dict / Tensor [B,2,W] / [B,1,1]",
+            "meaning": "模型输出、绝对误差及纵向还原比例。"
+          },
+          {
+            "name": "selected,sample_mae,failures,images",
+            "type": "Tensor / Tensor [B,2] / int",
+            "meaning": "有效误差、每图逐线均值、失败数和图数。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "type": "nn.Module",
+            "default": "必填",
+            "meaning": "待评估的教师或学生模型。"
+          },
+          {
+            "name": "loader",
+            "type": "DataLoader",
+            "default": "必填",
+            "meaning": "固定evaluation视图，不进行训练增强。"
+          },
+          {
+            "name": "device",
+            "type": "torch.device",
+            "default": "必填",
+            "meaning": "当前实现为cuda:0。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L36–45 评估前向",
+            "detail": "无梯度，eval模式，按batch读取。"
+          },
+          {
+            "title": "L46–56 累积有效误差",
+            "detail": "检查有限值，按valid取点并保存分位数所需样本。"
+          },
+          {
+            "title": "L57–58 记录失败比例分子",
+            "detail": "任一边界MAE>10的图像记一次失败。"
+          }
+        ],
+        "returns": [
+          "更新统计累加器，下一段归约成指标。"
+        ],
+        "core": true,
+        "pitfall": "evaluation为空时torch.cat(errors)会失败；当前固定清单有830张。此函数写死cuda autocast，不是CPU评估入口。",
+        "shapes": ""
+      },
+      {
+        "start": 59,
+        "end": 71,
+        "title": "evaluate后半：厚度误差、分位数和逐线MAE",
+        "summary": "将累计误差变成完整指标字典。",
+        "principle": [
+          "厚度比较预测两线距离与真值两线距离，只保留两条线都有效的列。总体mae是两条线各自MAE的算术平均；并不等同于所有点混在一起的平均。",
+          "p95_vertical_error是对应列纵向绝对误差的95%分位数，不是Hausdorff距离。"
+        ],
+        "syntax": [
+          "valid.all(1)消去边界轴；sum((0,2))跨batch和列累计，保留边界轴。torch.cat(errors).quantile(.95)在所有有效点上取分位数。"
+        ],
+        "variables": [
+          {
+            "name": "both",
+            "type": "bool Tensor [B,W]",
+            "meaning": "双边界都有效的列。"
+          },
+          {
+            "name": "thickness,thickness_total,thickness_count",
+            "type": "Tensor / float",
+            "meaning": "逐列层厚误差与累计分子分母。"
+          },
+          {
+            "name": "per_line",
+            "type": "ndarray [2]",
+            "meaning": "逐线有效点误差和除数量。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L59–62 累积厚度误差",
+            "detail": "用同列上下界相减比较厚度。"
+          },
+          {
+            "title": "L63–71 生成指标",
+            "detail": "包括输入像素/原视图像素MAE、阈值准确率、p95、失败率、厚度MAE及有效数量。"
+          }
+        ],
+        "returns": [
+          "普通Python字典，主要值为float、int与列表。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "误差[B,2,W] → 两条线MAE＋总体统计"
+      },
+      {
+        "start": 74,
+        "end": 97,
+        "title": "train启动：角色、设备、路径和状态发布",
+        "summary": "读取配置，选教师或学生骨干，设置随机性及输出位置。",
+        "principle": [
+          "教师角色硬编码使用resnet18，学生角色字符串直接作为骨干名称；config中的teacher_backbone并不是这里真正分支的决定条件。",
+          "CUDA_VISIBLE_DEVICES必须等于字符串0，代码限制可见GPU并设置本进程分配器内存占比0.25；这不是显存预留或系统级隔离。"
+        ],
+        "syntax": [
+          "torch.manual_seed及cuda.manual_seed_all同步种子；set_num_threads(4)限制CPU线程。嵌套publish(**updates)捕获外层status与logs，更新状态并调用refresh。"
+        ],
+        "variables": [
+          {
+            "name": "config",
+            "type": "dict",
+            "meaning": "当前config.json。"
+          },
+          {
+            "name": "split,role,role_backbone",
+            "type": "str",
+            "meaning": "划分、角色、最终构建骨干。"
+          },
+          {
+            "name": "seed,epochs,device",
+            "type": "int / int / device",
+            "meaning": "随机种子、当前角色轮数上限、cuda:0。"
+          },
+          {
+            "name": "logs,models,best_file,last_file,metric_file",
+            "type": "Path",
+            "meaning": "状态日志目录、权重目录、best/last文件与逐轮jsonl。"
+          },
+          {
+            "name": "status",
+            "type": "dict",
+            "meaning": "任务当前状态、PID、轮数、时间与最佳误差。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "args",
+            "type": "argparse.Namespace",
+            "default": "必填",
+            "meaning": "至少包含split和role两个字段。"
+          },
+          {
+            "name": "updates",
+            "type": "dict（**关键字参数）",
+            "default": "空",
+            "meaning": "publish接收本次变更，例如epoch、best_score或state。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L75–87 读取配置和设备约束",
+            "detail": "设置随机性、角色骨干与轮数。"
+          },
+          {
+            "title": "L88–97 创建输出与状态接口",
+            "detail": "publish写JSON并刷新README状态。"
+          }
+        ],
+        "returns": [
+          "训练初始状态及嵌套publish函数。"
+        ],
+        "core": false,
+        "pitfall": "新包缺少预期README标记和初始化权重等工程资源，照搬启动并不等于能直接运行。",
+        "shapes": ""
+      },
+      {
+        "start": 99,
+        "end": 113,
+        "title": "固定划分、DataLoader与模型初始化",
+        "summary": "为本次任务创建训练/评估样本流和待优化模型。",
+        "principle": [
+          "train90显式检查训练与评估原图路径无交集；train100不执行这一断言，因为它有意包含所有视图。",
+          "DataLoader默认collate将字典中的张量stack成batch。训练shuffle=True、评估False；generator控制训练抽样随机状态。"
+        ],
+        "syntax": [
+          "persistent_workers=True复用worker；pin_memory帮助CPU到GPU传输；prefetch_factor=2为每worker提前准备批次。",
+          "build_model第三个参数是初始化权重目录，意味着这里从本地ImageNet权重起步。"
+        ],
+        "variables": [
+          {
+            "name": "audit",
+            "type": "dict",
+            "meaning": "标签、数量、指纹和划分关系。"
+          },
+          {
+            "name": "train_data,eval_data",
+            "type": "BoundaryDataset",
+            "meaning": "指定训练集合与固定evaluation。"
+          },
+          {
+            "name": "tr_sources,ev_sources",
+            "type": "set[str]",
+            "meaning": "去除裁剪副本重复后检查原图交集。"
+          },
+          {
+            "name": "generator",
+            "type": "torch.Generator",
+            "meaning": "可保存/恢复的训练采样随机状态。"
+          },
+          {
+            "name": "loader,val_loader",
+            "type": "DataLoader",
+            "meaning": "训练batch16、workers4；评估workers2。"
+          },
+          {
+            "name": "model",
+            "type": "BoundaryNet",
+            "meaning": "选定骨干的当前方案模型。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L100–106 构造并检查集合",
+            "detail": "只有train90要求原图隔离。"
+          },
+          {
+            "title": "L107–112 创建批次流",
+            "detail": "训练打乱且设置worker随机种子。"
+          },
+          {
+            "title": "L113 从初始化权重装配模型",
+            "detail": "新包未附带该目录，读代码时要识别这一外部依赖。"
+          }
+        ],
+        "returns": [
+          "训练/验证loader和model。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "单图字典 → batch image[B,1,256,256]，y/valid[B,2,256]"
+      },
+      {
+        "start": 114,
+        "end": 129,
+        "title": "学生加载同划分教师：验证身份并冻结",
+        "summary": "只有学生训练才加载教师，教师训练本身不再加载另一个教师。",
+        "principle": [
+          "检查教师完成状态、方案名、划分及标注指纹，避免train90学生引用train100教师造成信息混入。",
+          "teacher.eval().requires_grad_(False)同时固定推理模式与参数梯度；后续调用另有no_grad。teacher_hash用来约束恢复训练所用教师不变。"
+        ],
+        "syntax": [
+          "torch.load(weights_only=True)加载模型字典；assert验证元信息；strict=True核对模型参数形状与名字。"
+        ],
+        "variables": [
+          {
+            "name": "teacher,teacher_file,teacher_hash",
+            "type": "Module/None、Path/None、str/None",
+            "meaning": "教师模型、对应best文件及其内容摘要。"
+          },
+          {
+            "name": "teacher_status,saved",
+            "type": "dict",
+            "meaning": "教师任务状态与权重元信息。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L114–121 判断是否需要教师",
+            "detail": "教师角色保持None；学生必须有completed教师记录。"
+          },
+          {
+            "title": "L122–126 校验并恢复教师",
+            "detail": "相同方案、划分、标注指纹与结构。"
+          },
+          {
+            "title": "L127–129 冻结并记录指纹",
+            "detail": "教师不会被学生优化器更新。"
+          }
+        ],
+        "returns": [
+          "冻结教师或None，以及可用于恢复审计的teacher_hash。"
+        ],
+        "core": true,
+        "pitfall": "当前解压包仅附带Large学生best，未附教师权重/状态，不能据此直接继续学生训练。",
+        "shapes": ""
+      },
+      {
+        "start": 130,
+        "end": 138,
+        "title": "AdamW与学习率：5轮预热后余弦下降",
+        "summary": "设置优化器并让学习率随轮数变化。",
+        "principle": [
+          "AdamW初始基础学习率0.0007，weight_decay=1e−4；LambdaLR用schedule返回倍率，而非绝对学习率。",
+          "schedule索引小于5时倍率为(epoch+1)/5；之后余弦从1渐降到约0.05。调度器索引与外层从1开始的训练轮号不同，应按scheduler.step实际调用追踪。"
+        ],
+        "syntax": [
+          "model.parameters提供所有可学习参数；math.cos使用弧度；max(epochs−5,1)保护短训练分母。",
+          "code_digest对排序后的所有py文件名和内容做摘要，后面恢复时检查源码是否变化。"
+        ],
+        "variables": [
+          {
+            "name": "optimizer",
+            "type": "AdamW",
+            "meaning": "当前学生或教师参数的优化器。"
+          },
+          {
+            "name": "scheduler",
+            "type": "LambdaLR",
+            "meaning": "以schedule倍率调节各参数组学习率。"
+          },
+          {
+            "name": "epoch",
+            "type": "int",
+            "meaning": "嵌套schedule的调度器索引。"
+          },
+          {
+            "name": "code_digest,code_hash,path",
+            "type": "hash对象 / str / Path",
+            "meaning": "源码版本内容指纹。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "epoch",
+            "type": "int",
+            "default": "必填",
+            "meaning": "schedule的内部调度索引，非命令行参数。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L130–134 建优化器和调度器",
+            "detail": "定义倍率函数后交给LambdaLR。"
+          },
+          {
+            "title": "L135–138 计算源码指纹",
+            "detail": "保存恢复一致性依据。"
+          }
+        ],
+        "returns": [
+          "optimizer、scheduler及code_hash。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 139,
+        "end": 151,
+        "title": "恢复last：模型之外还要恢复优化器与随机状态",
+        "summary": "已有last时从下一轮继续，并拒绝混用配置、源码或教师。",
+        "principle": [
+          "AdamW动量、学习率进度、随机增强及采样顺序都是训练状态，只恢复模型参数无法续接同一轨迹。代码保存主进程及采样generator状态；persistent worker内部增强随机状态没有逐worker单独保存，因此不能承诺中断后逐位完全一致。"
+        ],
+        "syntax": [
+          "load_state_dict分别恢复模型、优化器和调度器；random.setstate、np.random.set_state及torch.set_rng_state恢复各随机源。"
+        ],
+        "variables": [
+          {
+            "name": "start,best,best_epoch,best_score",
+            "type": "int/float",
+            "meaning": "起始轮、最佳MAE、最佳轮和选优评分。"
+          },
+          {
+            "name": "saved",
+            "type": "dict",
+            "meaning": "last包含模型、优化器、调度器、配置与各随机状态。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L139–144 初始化并验证恢复条件",
+            "detail": "发现last后核对config/source_hash/teacher_sha256。"
+          },
+          {
+            "title": "L145–151 恢复数值与随机状态",
+            "detail": "设置下一轮start，恢复所有已保存状态并释放saved引用。"
+          }
+        ],
+        "returns": [
+          "续训起点与恢复的训练状态；无last则从头训练。"
+        ],
+        "core": false,
+        "pitfall": "weights_only=False用于含NumPy随机状态的完整检查点，只应读取可信本地文件；本教学不执行加载。",
+        "shapes": ""
+      },
+      {
+        "start": 152,
+        "end": 161,
+        "title": "元信息：让best权重说明自己来自哪里",
+        "summary": "记录模型结构、输入输出协议和数据/教师指纹。",
+        "principle": [
+          "最终权重除了state_dict还带方法、骨干、标签顺序和输入协议，infer依这些字段重建模型。train100明确标为training-set reevaluation，不能与独立验证混为一谈。"
+        ],
+        "syntax": [
+          "dict(...,**mapping)合并键；numel求参数元素数；json.dumps使日志可机器解析。"
+        ],
+        "variables": [
+          {
+            "name": "metadata",
+            "type": "dict",
+            "meaning": "方法、角色、划分、标签、配置、输入输出说明与指纹。"
+          },
+          {
+            "name": "train100_evaluation_overlaps",
+            "type": "bool",
+            "meaning": "启动日志中明确指示train100复评重合。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L152–154 输出启动信息",
+            "detail": "记录真实视图数与参数数量。"
+          },
+          {
+            "title": "L155–161 构造权重元信息",
+            "detail": "标注训练协议与老师来源。"
+          }
+        ],
+        "returns": [
+          "用于每次best/last保存的metadata字典。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 162,
+        "end": 186,
+        "title": "训练核心：监督＋渐增蒸馏、梯度累积与更新",
+        "summary": "每个微批前向求损失，按累积组归一后反向，到组末更新参数。",
+        "principle": [
+          "学生损失=监督+0.55×min(epoch/10,1)×蒸馏。教师看到与学生相同的增强图像，teacher无梯度，学生保留梯度。",
+          "默认微批16、累积3批，常规更新约48张图；每组loss除实际group_size再backward，使末尾不足3批时不被错误除3。最后一小批样本数若不同，仍按微批平均，并非严格逐图等权。",
+          "clip_grad_norm_(...,5)限制整体梯度范数，不是把每个参数值夹到±5；step之后清梯度准备下一组。"
+        ],
+        "syntax": [
+          "autocast BF16改变部分算子精度，不更改输入标签含义；模型和BCE关键部分会显式转FP32。",
+          "(loss/group_size).backward累加grad；zero_grad(set_to_none=True)让梯度置None节省写入。"
+        ],
+        "variables": [
+          {
+            "name": "epoch,epoch_start,step,batch",
+            "type": "int/float/dict",
+            "meaning": "外层轮次、计时、微批编号及批字典。"
+          },
+          {
+            "name": "image,y,valid,output",
+            "type": "Tensor / dict",
+            "meaning": "当前输入、标签、掩码与学生输出。"
+          },
+          {
+            "name": "teacher_output",
+            "type": "dict",
+            "meaning": "同输入下的冻结教师预测。"
+          },
+          {
+            "name": "loss",
+            "type": "scalar Tensor",
+            "meaning": "可微监督与可选蒸馏之和。"
+          },
+          {
+            "name": "accumulation,group_start,group_size",
+            "type": "int",
+            "meaning": "累积长度、当前组起点、当前组实际批次数。"
+          },
+          {
+            "name": "grad_norm",
+            "type": "scalar Tensor",
+            "meaning": "裁剪前梯度范数，非有限值触发失败。"
+          },
+          {
+            "name": "running,batches",
+            "type": "float/int",
+            "meaning": "日志用损失总和与批次数，不参与梯度。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L162–174 前向与损失",
+            "detail": "学生train模式；教师保持eval并无梯度；蒸馏系数前10轮升温。"
+          },
+          {
+            "title": "L175–179 检查损失并累积梯度",
+            "detail": "用实际组大小缩放loss。"
+          },
+          {
+            "title": "L180–186 组末更新",
+            "detail": "检查并裁剪梯度，AdamW更新，清梯度，记录日志。"
+          }
+        ],
+        "returns": [
+          "模型参数被更新；本轮累计训练损失供记录。"
+        ],
+        "core": true,
+        "pitfall": "",
+        "shapes": "每批[B,1,256,256] → y[B,2,256]＋regions[B,2,64,64] → 标量loss → 参数梯度",
+        "flow": {
+          "title": "一次累积更新",
+          "caption": "这是梯度累积，不是把三批拼成一张大图；所有可学习模型层共同更新。",
+          "nodes": [
+            {
+              "id": "0",
+              "title": "学生前向",
+              "detail": "同一增强输入"
+            },
+            {
+              "id": "1",
+              "title": "监督＋可选蒸馏",
+              "detail": "教师eval且no_grad"
+            },
+            {
+              "id": "2",
+              "title": "按当前组批次数缩放",
+              "detail": "末组可能少于3批"
+            },
+            {
+              "id": "3",
+              "title": "反向累积",
+              "detail": "保留上一微批grad"
+            },
+            {
+              "id": "4",
+              "title": "到组末",
+              "detail": "裁剪→step→清梯度"
+            }
+          ],
+          "edges": [
+            {
+              "to": "1",
+              "from": "0"
+            },
+            {
+              "to": "2",
+              "from": "1"
+            },
+            {
+              "to": "3",
+              "from": "2"
+            },
+            {
+              "to": "4",
+              "from": "3"
+            }
+          ]
+        }
+      },
+      {
+        "start": 187,
+        "end": 195,
+        "title": "验证与平衡选优：兼顾两条线的相对误差",
+        "summary": "完成一轮后评估，用固定参考归一化两条线误差来选best。",
+        "principle": [
+          "令r1=真皮MAE/1.10525，r2=脂肪MAE/2.02256，score=max(r1,r2)+0.05·(r1+r2)/2。主要优化表现较差的一条，同时保留整体偏好。",
+          "这是模型选择规则，不是用于反向传播的训练loss；best记录的mae与best_score不能混成同一个数。"
+        ],
+        "syntax": [
+          "scheduler.step在每轮训练和验证后调用；optimizer.param_groups[0][\"lr\"]记录的是此时调度后的学习率。"
+        ],
+        "variables": [
+          {
+            "name": "metrics",
+            "type": "dict",
+            "meaning": "evaluate返回的逐线及总体指标。"
+          },
+          {
+            "name": "reference,ratios",
+            "type": "list[float]",
+            "meaning": "固定参考误差及本轮相对误差。"
+          },
+          {
+            "name": "score,best_score",
+            "type": "float",
+            "meaning": "本轮选优分数和历史最低分。"
+          },
+          {
+            "name": "record,best,best_epoch",
+            "type": "dict/float/int",
+            "meaning": "逐轮记录、最佳模型的MAE与轮次。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L187–188 验证并推进调度",
+            "detail": "验证不反向更新模型。"
+          },
+          {
+            "title": "L189–191 计算平衡分数",
+            "detail": "当前selection是balanced_lines。"
+          },
+          {
+            "title": "L192–195 记录并判断改进",
+            "detail": "只在score更小时更新best元信息。"
+          }
+        ],
+        "returns": [
+          "当前metrics、record以及可能更新的best状态。"
+        ],
+        "core": true,
+        "pitfall": "固定参考值并非本模型测得结果；持续据train90指标调参后，它应称开发验证集。",
+        "shapes": ""
+      },
+      {
+        "start": 196,
+        "end": 210,
+        "title": "保存best与last、早停后重载最佳权重",
+        "summary": "分别保存推理需要的最优模型和续训需要的完整状态。",
+        "principle": [
+          "best模型参数detach到CPU便于独立加载；last带AdamW、scheduler和RNG，是恢复训练所需的更完整快照。",
+          "至少训练40轮后，若距离最佳轮已20轮，则早停；结束后一定重载best再评估，因此final_metrics对应best，而非最后一轮参数。"
+        ],
+        "syntax": [
+          "state_dict包含参数及buffer；字典推导逐项detach().cpu()。Path文件写入交给save_checkpoint的临时替换。"
+        ],
+        "variables": [
+          {
+            "name": "payload",
+            "type": "dict",
+            "meaning": "metadata＋epoch＋metrics＋selection_score＋CPU模型state_dict。"
+          },
+          {
+            "name": "last",
+            "type": "dict",
+            "meaning": "模型、优化器、调度器、最佳状态与随机源快照。"
+          },
+          {
+            "name": "final_metrics",
+            "type": "dict",
+            "meaning": "重载best后的复评指标。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L196–204 保存与发布",
+            "detail": "改进时保存best，每轮都保存last和状态。"
+          },
+          {
+            "title": "L205–210 判断早停并重评best",
+            "detail": "读取最佳权重，重做指标并写最终JSON。"
+          }
+        ],
+        "returns": [
+          "best/last、指标与状态文件；最终内存模型为best。"
+        ],
+        "core": false,
+        "pitfall": "训练记录和完整教师/初始化资源未在新包中提供，不能仅因目录支持这些文件就声称六项实验全完成。",
+        "shapes": ""
+      },
+      {
+        "start": 211,
+        "end": 240,
+        "title": "收尾可视化、失败记录与CLI入口",
+        "summary": "绘制少量样本诊断图，完成后清理last，并把异常写入状态。",
+        "principle": [
+          "实线是有效真值、虚线是预测；这只是定性诊断，不替代整个集合的指标。正常最终评估和图像保存完成后才删除last。异常会记录为failed再向外抛出。"
+        ],
+        "syntax": [
+          "matplotlib.use(\"Agg\")使用无窗口后端；np.nan使无效真值不绘线。",
+          "__name__==\"__main__\"保证作为脚本运行才解析必填split/role。"
+        ],
+        "variables": [
+          {
+            "name": "sample,pred",
+            "type": "batch dict / Tensor",
+            "meaning": "第一批前6张样本及best预测。"
+          },
+          {
+            "name": "fig,axes,i,ax,line,color,truth",
+            "type": "绘图对象/循环值",
+            "meaning": "2×3子图和逐线叠加。"
+          },
+          {
+            "name": "error,parser",
+            "type": "BaseException / ArgumentParser",
+            "meaning": "异常对象与命令行参数解析器。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L212–226 画诊断图",
+            "detail": "评估第一批前6张，真值掩码置NaN后画实虚线。"
+          },
+          {
+            "title": "L228–233 完成或失败",
+            "detail": "成功清理last并发布完成；失败写traceback后raise。"
+          },
+          {
+            "title": "L236–240 参数入口",
+            "detail": "split取train90/train100，role取teacher/Large/Small。"
+          }
+        ],
+        "returns": [
+          "预测PNG、最终状态；命令行入口调用train。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/infer.py",
+    "title": "单图推理：从学生权重回到原图坐标",
+    "overview": "这个脚本只做一张原图的预测。main读取checkpoint中的method、backbone、labels来重建网络，加载整套训练权重，把原图灰度缩放到256×256，获得256列边界，再按训练约定还原为原图每一列的高度并写JSON。没有训练、没有教师参与，也不生成区域填色图或批量测试指标。",
+    "role": "独立使用已保存best模型的CPU/GPU推理入口。",
+    "inputs": [
+      "--checkpoint权重、--image原图、--output结果JSON，--device默认cpu。"
+    ],
+    "outputs": [
+      "JSON包含原图路径、宽高，以及两条标签各自原图宽度长度的纵坐标列表。"
+    ],
+    "readingGuide": [
+      "先看权重元信息如何重建模型，再看原图与256网格之间的两个方向坐标换算。",
+      "模型内部会完成三通道扩展和固定归一化，外部只做灰度除255。"
+    ],
+    "components": [
+      {
+        "name": "main",
+        "kind": "函数",
+        "summary": "用权重元信息而非人工猜测确定方法和骨干。",
+        "segmentStart": 1
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 20,
+        "title": "读取参数与重建训练模型",
+        "summary": "用权重元信息而非人工猜测确定方法和骨干。",
+        "principle": [
+          "推理构造不传assets，先创建空结构，再加载整个训练state_dict；因此只要checkpoint完整，就不再需要初始化权重或教师模型。"
+        ],
+        "syntax": [
+          "torch.load(weights_only=True,map_location=\"cpu\")先加载到CPU；.to(args.device).eval()指定设备并使用评估行为。strict=True防止结构参数不匹配。"
+        ],
+        "variables": [
+          {
+            "name": "args",
+            "type": "Namespace",
+            "meaning": "checkpoint、image、output、device四个CLI值。"
+          },
+          {
+            "name": "saved",
+            "type": "dict",
+            "meaning": "含method、backbone、labels、model等字段的best文件。"
+          },
+          {
+            "name": "model",
+            "type": "BoundaryNet",
+            "meaning": "恢复权重后的区域网络。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "--checkpoint",
+            "type": "str",
+            "default": "必填",
+            "meaning": "可信best.pth文件路径。"
+          },
+          {
+            "name": "--image",
+            "type": "str",
+            "default": "必填",
+            "meaning": "待预测原图路径。"
+          },
+          {
+            "name": "--output",
+            "type": "str",
+            "default": "必填",
+            "meaning": "写入结果JSON的目标路径。"
+          },
+          {
+            "name": "--device",
+            "type": "str",
+            "default": "cpu",
+            "meaning": "PyTorch设备，如cpu或cuda:0。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L11–17 解析必填路径",
+            "detail": "device可省略，默认为cpu。"
+          },
+          {
+            "title": "L18–20 重建并加载",
+            "detail": "结构名来自saved，随后装入model参数。"
+          }
+        ],
+        "returns": [
+          "可进行推理的model及CLI参数。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 21,
+        "end": 31,
+        "title": "原图预测与坐标还原",
+        "summary": "把256网格的两条线重采样到原图每一列。",
+        "principle": [
+          "模型输出纵坐标单位是256输入像素；乘原图高/256回到原图高度。横向已知坐标x_known=j·原宽/256，再查询原图整数列。",
+          "这个约定与data.annotation使用j·原宽/256匹配；最右端超出最后x_known的位置由np.interp填最后高度。"
+        ],
+        "syntax": [
+          "[None,None]增加batch和通道轴；inference_mode关闭求导；tolist使NumPy数组可JSON序列化。"
+        ],
+        "variables": [
+          {
+            "name": "width,height,data",
+            "type": "int/int/uint8 ndarray",
+            "meaning": "原尺寸与256灰度图。"
+          },
+          {
+            "name": "tensor",
+            "type": "Tensor [1,1,256,256]",
+            "meaning": "0～1模型输入。"
+          },
+          {
+            "name": "y",
+            "type": "ndarray [2,256]",
+            "meaning": "模型预测的输入像素坐标。"
+          },
+          {
+            "name": "x_known",
+            "type": "ndarray [256]",
+            "meaning": "模型各列在原图中的横向位置。"
+          },
+          {
+            "name": "label,curve,result",
+            "type": "str/ndarray/dict",
+            "meaning": "按checkpoint标签顺序配对各条线及原图宽度结果。"
+          },
+          {
+            "name": "output",
+            "type": "Path",
+            "meaning": "结果JSON目标，父目录按需创建。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L21–25 图像预处理与前向",
+            "detail": "原图不改写；灰度缩放副本送入模型。"
+          },
+          {
+            "title": "L27–29 两个方向还原坐标",
+            "detail": "纵向乘height/256，横向按np.interp重采样。"
+          },
+          {
+            "title": "L30–31 写JSON",
+            "detail": "保留原尺寸与标签名。"
+          }
+        ],
+        "returns": [
+          "原图宽度长度的两条线写入JSON。"
+        ],
+        "core": true,
+        "pitfall": "这是单图推理，无真值评估；不能把成功输出JSON当作模型精度验证。",
+        "shapes": "原图W×H → 256×256 → 2×256坐标 → 2×原图W"
+      },
+      {
+        "start": 34,
+        "end": 34,
+        "title": "推理脚本入口",
+        "summary": "仅在直接执行时启动main。",
+        "principle": [
+          "作为模块导入可以复用定义而不立即处理图像。"
+        ],
+        "syntax": [
+          "__name__ 是Python模块运行身份。"
+        ],
+        "variables": [
+          {
+            "name": "main",
+            "type": "function",
+            "meaning": "读取参数并执行单图推理。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L34 条件启动",
+            "detail": "python infer.py ...时条件成立。"
+          }
+        ],
+        "returns": [
+          "调用main，无独立返回值。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/run.py",
+    "title": "单次任务启动器：环境、日志和中断处理",
+    "overview": "这个文件负责启动一项指定划分和角色的训练，而不实现学习算法。main先检查完成状态，为子进程创建临时缓存、设置GPU和离线环境，把train.py的输出写入日志；stop及异常处理把用户中断转成暂停并停止子进程。它与批量训练.py不同，不会自动创建新方案。",
+    "role": "用户指定--split和--role后启动一个train.py子进程。",
+    "inputs": [
+      "CLI划分与角色；既有方案文件和可用Linux/CUDA环境。"
+    ],
+    "outputs": [
+      "training.log、由train.py更新的状态与权重；停止时paused状态。"
+    ],
+    "readingGuide": [
+      "此文件属于工程支撑，先读train.py学习训练核心。",
+      "/proc/self/cwd与进程组信号是Linux语义，不能直接视为跨平台Windows启动器。"
+    ],
+    "components": [
+      {
+        "name": "main",
+        "kind": "函数",
+        "summary": "解析划分和角色，若对应状态completed则保留权重直接退出。",
+        "segmentStart": 1
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 26,
+        "title": "定位任务并防止重复训练已完成项",
+        "summary": "解析划分和角色，若对应状态completed则保留权重直接退出。",
+        "principle": [
+          "状态文件按split/role隔离；存在best文件本身不等于状态completed。SIGTERM被转为KeyboardInterrupt，走统一停止逻辑。"
+        ],
+        "syntax": [
+          "signal.signal注册回调stop(signum,frame)；return终止main。"
+        ],
+        "variables": [
+          {
+            "name": "SCHEME,logs,status",
+            "type": "Path",
+            "meaning": "方案根、该任务日志目录与状态JSON。"
+          },
+          {
+            "name": "parser,args",
+            "type": "ArgumentParser/Namespace",
+            "meaning": "两个必填CLI参数。"
+          },
+          {
+            "name": "child",
+            "type": "Popen/None",
+            "meaning": "稍后用于控制训练子进程。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "signum",
+            "type": "int",
+            "default": "系统传入",
+            "meaning": "触发stop的信号编号，函数不使用具体值。"
+          },
+          {
+            "name": "frame",
+            "type": "frame / None",
+            "default": "系统传入",
+            "meaning": "信号发生时栈帧，函数不使用。"
+          },
+          {
+            "name": "--split",
+            "type": "str",
+            "default": "必填",
+            "meaning": "train90或train100。"
+          },
+          {
+            "name": "--role",
+            "type": "str",
+            "default": "必填",
+            "meaning": "teacher、mobilenet_v3_large或mobilenet_v3_small。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L14–23 解析并检查状态",
+            "detail": "completed任务不重复跑。"
+          },
+          {
+            "title": "L24–26 定义停止回调",
+            "detail": "收到信号转为中断异常。"
+          }
+        ],
+        "returns": [
+          "任务路径、参数与停止处理器。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 27,
+        "end": 44,
+        "title": "启动隔离缓存与训练子进程",
+        "summary": "设置本次任务环境，把子进程标准输出和错误统一记录。",
+        "principle": [
+          "临时缓存留在本方案训练记录目录，正常退出时自动清理；/proc别名缩短多进程Unix套接字路径。CUDA_VISIBLE_DEVICES=0只暴露指定GPU。",
+          "HF_HUB_OFFLINE=1及本地初始化路径表明设计为离线运行，不自动联网下载权重。"
+        ],
+        "syntax": [
+          "TemporaryDirectory上下文自动收尾；Popen使用参数列表而非拼接shell字符串；start_new_session=True建立新进程组。"
+        ],
+        "variables": [
+          {
+            "name": "temp,socket_temp",
+            "type": "str",
+            "meaning": "实际临时目录与/proc短路径。"
+          },
+          {
+            "name": "env",
+            "type": "dict[str,str]",
+            "meaning": "继承系统环境后覆盖CUDA、线程、缓存和离线设置。"
+          },
+          {
+            "name": "log,child,code",
+            "type": "文件句柄/Popen/int",
+            "meaning": "追加日志、训练子进程与退出码。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L27–38 环境与缓存",
+            "detail": "设置信号处理并创建临时上下文。"
+          },
+          {
+            "title": "L39–44 启动并等待",
+            "detail": "同一日志接收stdout/stderr，-B禁写pyc，-u无缓冲输出。"
+          }
+        ],
+        "returns": [
+          "已结束子进程退出码，或中断进入下一段。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 45,
+        "end": 59,
+        "title": "中断收尾：先温和停止，再记录暂停",
+        "summary": "处理用户停止并确保不遗留训练进程。",
+        "principle": [
+          "先SIGINT等待10秒，超时再SIGTERM终止进程组；已写权重由训练代码负责，启动器只更改任务状态。"
+        ],
+        "syntax": [
+          "poll()为None说明仍在运行；wait(timeout=...)超时抛TimeoutExpired；os.killpg作用于子进程组。"
+        ],
+        "variables": [
+          {
+            "name": "value",
+            "type": "dict",
+            "meaning": "现有状态或空状态，追加paused_at与原因。"
+          },
+          {
+            "name": "child,code",
+            "type": "Popen/int",
+            "meaning": "子进程对象和正常退出码。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L45–50 停止子进程",
+            "detail": "中断后等待保存与退出，超时升级终止信号。"
+          },
+          {
+            "title": "L51–56 发布暂停",
+            "detail": "读现有status、写paused并刷新文档。"
+          },
+          {
+            "title": "L57–59 转交退出码和入口",
+            "detail": "正常时SystemExit(code)，脚本直接运行则main。"
+          }
+        ],
+        "returns": [
+          "暂停状态或与训练一致的进程退出码。"
+        ],
+        "core": false,
+        "pitfall": "refresh依赖两级README及标记，当前解压包没有这些文件，复现运行需补齐工程资源。",
+        "shapes": ""
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/reporting.py",
+    "title": "实验状态与文档汇总工具",
+    "overview": "这个文件把已经写出的状态和指标整理进方案及根目录README，不计算模型预测。now提供时间，atomic_json负责临时写入后替换，checkpoint_name统一权重名，replace_section只替换状态标记之间的文本，refresh扫描两种划分与三种角色并生成状态表。",
+    "role": "train.py、run.py、批量训练.py共同调用的工程记录模块。",
+    "inputs": [
+      "状态JSON、最佳指标JSON、模型文件是否存在、含约定标记的README。"
+    ],
+    "outputs": [
+      "更新后的两级README状态表；原子写入的JSON。"
+    ],
+    "readingGuide": [
+      "先看refresh的数据来源，再看两个原子替换工具。",
+      "这份解压包没有README和训练记录；函数定义存在不能证明表中六项任务已完成。"
+    ],
+    "components": [
+      {
+        "name": "now",
+        "kind": "函数",
+        "summary": "定义方案目录、角色顺序、中文状态名和时间格式。",
+        "segmentStart": 1
+      },
+      {
+        "name": "atomic_json",
+        "kind": "函数",
+        "summary": "把数据写到临时文件后替换目标，并按方案/划分/角色产生权重名。",
+        "segmentStart": 20
+      },
+      {
+        "name": "checkpoint_name",
+        "kind": "函数",
+        "summary": "把数据写到临时文件后替换目标，并按方案/划分/角色产生权重名。",
+        "segmentStart": 20
+      },
+      {
+        "name": "replace_section",
+        "kind": "函数",
+        "summary": "在保留其他说明的同时刷新README中的动态状态表。",
+        "segmentStart": 31
+      },
+      {
+        "name": "refresh",
+        "kind": "函数",
+        "summary": "串行刷新共享文档，逐一读取两种划分与三种角色。",
+        "segmentStart": 39
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 17,
+        "title": "目录约定与本地时区时间",
+        "summary": "定义方案目录、角色顺序、中文状态名和时间格式。",
+        "principle": [
+          "ROOT是所有方案的父目录；同一个refresh会扫描多个方案。now使用机器本地时区，时间串带偏移，不能假定永远北京时间。"
+        ],
+        "syntax": [
+          "datetime.now().astimezone().isoformat(timespec=\"seconds\")保留秒精度。"
+        ],
+        "variables": [
+          {
+            "name": "SCHEME,ROOT",
+            "type": "Path",
+            "meaning": "当前方案和各方案共同的父目录。"
+          },
+          {
+            "name": "START,END",
+            "type": "str",
+            "meaning": "README中状态片段的固定注释标记。"
+          },
+          {
+            "name": "ROLES,ZH",
+            "type": "tuple / dict",
+            "meaning": "教师与两种学生，以及状态值的中文映射。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L9–13 约定路径与状态",
+            "detail": "记录器依赖这套文件布局。"
+          },
+          {
+            "title": "L16–17 生成时间",
+            "detail": "返回带本地时区的ISO字符串。"
+          }
+        ],
+        "returns": [
+          "常量以及now()时间字符串。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 20,
+        "end": 28,
+        "title": "JSON安全替换与权重命名",
+        "summary": "把数据写到临时文件后替换目标，并按方案/划分/角色产生权重名。",
+        "principle": [
+          "临时文件和目标处于同目录，替换减少半写状态被其他进程读取的机会；名称中teacher与distilled区分教师和学生。"
+        ],
+        "syntax": [
+          "json.dumps(ensure_ascii=False,indent=2)保留中文并缩进；Path.with_name只换文件名，replace替换目标。f字符串嵌入字段。"
+        ],
+        "variables": [
+          {
+            "name": "temp",
+            "type": "Path",
+            "meaning": "目标名附加.tmp的临时JSON。"
+          },
+          {
+            "name": "tail",
+            "type": "str",
+            "meaning": "教师用teacher_resnet18，学生用角色名加_distilled。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "path",
+            "type": "str / Path",
+            "default": "必填",
+            "meaning": "JSON最终路径。"
+          },
+          {
+            "name": "value",
+            "type": "JSON可序列化对象",
+            "default": "必填",
+            "meaning": "要保存的状态/指标。"
+          },
+          {
+            "name": "sid",
+            "type": "str",
+            "default": "必填",
+            "meaning": "方案目录名。"
+          },
+          {
+            "name": "split",
+            "type": "str",
+            "default": "必填",
+            "meaning": "train90或train100。"
+          },
+          {
+            "name": "role",
+            "type": "str",
+            "default": "必填",
+            "meaning": "teacher、mobilenet_v3_large或mobilenet_v3_small。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L20–23 写JSON并替换",
+            "detail": "创建父目录，写临时文件，再改名。"
+          },
+          {
+            "title": "L26–28 拼接权重名",
+            "detail": "输出sid_split_tail_best.pth。"
+          }
+        ],
+        "returns": [
+          "atomic_json写文件无显式返回；checkpoint_name返回str。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 31,
+        "end": 36,
+        "title": "replace_section：只替换两个标记之间的正文",
+        "summary": "在保留其他说明的同时刷新README中的动态状态表。",
+        "principle": [
+          "要求START和END各恰好出现一次；格式不符合直接报错，避免错误替换多段文档。"
+        ],
+        "syntax": [
+          "str.split标记将文本拆为before/rest/after；Path.replace在写完临时文件后替换原README。"
+        ],
+        "variables": [
+          {
+            "name": "text,before,rest,after",
+            "type": "str",
+            "meaning": "原文及标记分割后的各部分。"
+          },
+          {
+            "name": "temporary",
+            "type": "Path",
+            "meaning": "README同目录临时文件。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "path",
+            "type": "Path",
+            "default": "必填",
+            "meaning": "已存在且带唯一状态标记的README。"
+          },
+          {
+            "name": "section",
+            "type": "str",
+            "default": "必填",
+            "meaning": "本次生成的状态区正文，不含外层标记。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L32–34 检查并拆分",
+            "detail": "唯一标记是更新协议。"
+          },
+          {
+            "title": "L35–36 拼接后替换",
+            "detail": "保留标记外所有文本。"
+          }
+        ],
+        "returns": [
+          "修改指定README文件。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 39,
+        "end": 59,
+        "title": "refresh前半：加锁扫描各方案任务状态",
+        "summary": "串行刷新共享文档，逐一读取两种划分与三种角色。",
+        "principle": [
+          "目录inode上的排他锁使合作的刷新进程不同时写README；并未创建.lock文件。每个方案仍有六个任务组合，缺状态文件显示queued。"
+        ],
+        "syntax": [
+          "os.open(ROOT,os.O_RDONLY)获得目录描述符；fcntl.flock(...,LOCK_EX)排他锁属于Unix接口。正则^\\d{3,}_识别数字编号方案。"
+        ],
+        "variables": [
+          {
+            "name": "directory_fd",
+            "type": "int",
+            "meaning": "用于目录锁的文件描述符。"
+          },
+          {
+            "name": "summary,rows",
+            "type": "list[str]",
+            "meaning": "根表和单方案表的Markdown行。"
+          },
+          {
+            "name": "folder,split,role",
+            "type": "Path / str",
+            "meaning": "当前方案、划分、模型角色。"
+          },
+          {
+            "name": "state_file,state,status",
+            "type": "Path/dict/str",
+            "meaning": "读取任务状态，缺文件使用queued。"
+          },
+          {
+            "name": "count,active,teacher_metrics",
+            "type": "int/list/dict",
+            "meaning": "完成任务数、活跃状态、train90教师指标。"
+          },
+          {
+            "name": "metric_file,metrics",
+            "type": "Path/dict",
+            "meaning": "该任务最佳指标，缺文件用空字典。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L41–47 加锁并筛选目录",
+            "detail": "只处理符合编号且已有README的方案。"
+          },
+          {
+            "title": "L48–59 遍历六项任务",
+            "detail": "读取状态与指标，收集train90教师供总表显示。"
+          }
+        ],
+        "returns": [
+          "待补全的各方案表格与摘要。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": "",
+        "flow": {
+          "title": "状态文档更新",
+          "caption": "读取已有实验记录，不启动训练，也不重新计算指标。",
+          "nodes": [
+            {
+              "id": "0",
+              "title": "锁定父目录",
+              "detail": "避免合作进程同时刷新"
+            },
+            {
+              "id": "1",
+              "title": "扫描方案",
+              "detail": "数字编号且存在README"
+            },
+            {
+              "id": "2",
+              "title": "读六类任务",
+              "detail": "缺记录显示未开始"
+            },
+            {
+              "id": "3",
+              "title": "生成两级表",
+              "detail": "原子替换状态区"
+            },
+            {
+              "id": "4",
+              "title": "关闭描述符",
+              "detail": "finally保证释放"
+            }
+          ],
+          "edges": [
+            {
+              "to": "1",
+              "from": "0"
+            },
+            {
+              "to": "2",
+              "from": "1"
+            },
+            {
+              "to": "3",
+              "from": "2"
+            },
+            {
+              "to": "4",
+              "from": "3"
+            }
+          ]
+        }
+      },
+      {
+        "start": 60,
+        "end": 78,
+        "title": "refresh后半：写表并区分验证与复评",
+        "summary": "把有效指标、权重链接和任务状态写回文档。",
+        "principle": [
+          "根表展示的是各方案train90教师指标，不是学生指标，也不是300张测试集结果；表中横线表示缺失而不是0误差。",
+          "train100表明训练集复评，不能把它的较小误差与train90独立分组验证直接排名。"
+        ],
+        "syntax": [
+          "f-string格式:.4f限制四位小数；finally确保异常时仍os.close释放目录描述符及锁。"
+        ],
+        "variables": [
+          {
+            "name": "scores,vals",
+            "type": "list[str]",
+            "meaning": "逐线MAE的显示文本，缺失用—。"
+          },
+          {
+            "name": "name,path,link",
+            "type": "str/Path/str",
+            "meaning": "预期权重名、存在性检查与Markdown链接。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L60–68 写单方案表",
+            "detail": "逐线分数与状态行合并，再替换本方案README。"
+          },
+          {
+            "title": "L69–75 写总表并释放锁",
+            "detail": "收集train90教师分数，替换ROOT/README。"
+          },
+          {
+            "title": "L78 脚本入口",
+            "detail": "直接运行时只执行刷新。"
+          }
+        ],
+        "returns": [
+          "两级README状态表。"
+        ],
+        "core": false,
+        "pitfall": "当前包缺ROOT/README.md；直接refresh会因文件缺失失败，不应据此删改模型算法。",
+        "shapes": ""
+      }
+    ]
+  },
+  {
+    "path": "072_区域调优/代码/批量训练.py",
+    "title": "批量任务队列与持续参数搜索",
+    "overview": "这个脚本是训练管理器，不是区域网络本体。schemes/state/jobs发现各方案及六项任务，completed_teachers与frontier从已完成train90教师结果选择非支配候选，experiment_key识别配置重复，propose_next_pair复制代码和固定索引并生成新的参数方案，describe写说明文档；main独占运行、等待GPU/磁盘、依次调用run.py，并在现有任务完成后继续提出新方案。",
+    "role": "可持续创建新方案、启动训练并写入目录的工程脚本；本网站只讲解，不执行。",
+    "inputs": [
+      "多个方案的配置、教师结果、状态、初始化权重、Linux进程/文件锁与GPU0资源。"
+    ],
+    "outputs": [
+      "新参数方案目录、批量状态、训练任务子进程；最终效果需实际指标验证。"
+    ],
+    "readingGuide": [
+      "先读jobs了解顺序，再读main的资源等待与重试；最后看propose_next_pair如何定义调参空间。",
+      "这个旧搜索器只提出ordered_curves与ordinal_regions，不能把它当作新包所有方法的通用搜索器。",
+      "父方案来自验证表现；新方案复制配置与代码，不继承训练好的父模型权重。"
+    ],
+    "components": [
+      {
+        "name": "schemes",
+        "kind": "函数",
+        "summary": "建立教师先于学生的任务列表。",
+        "segmentStart": 1
+      },
+      {
+        "name": "state",
+        "kind": "函数",
+        "summary": "建立教师先于学生的任务列表。",
+        "segmentStart": 1
+      },
+      {
+        "name": "jobs",
+        "kind": "函数",
+        "summary": "建立教师先于学生的任务列表。",
+        "segmentStart": 1
+      },
+      {
+        "name": "completed_teachers",
+        "kind": "函数",
+        "summary": "只从已完成train90教师结果中寻找可用父方案，排除被双线误差同时压制的候选。",
+        "segmentStart": 37
+      },
+      {
+        "name": "frontier",
+        "kind": "函数",
+        "summary": "只从已完成train90教师结果中寻找可用父方案，排除被双线误差同时压制的候选。",
+        "segmentStart": 37
+      },
+      {
+        "name": "experiment_key",
+        "kind": "函数",
+        "summary": "只从已完成train90教师结果中寻找可用父方案，排除被双线误差同时压制的候选。",
+        "segmentStart": 37
+      },
+      {
+        "name": "describe",
+        "kind": "函数",
+        "summary": "把方案来源、配置、数据协议和训练约定写成README正文。",
+        "segmentStart": 58
+      },
+      {
+        "name": "propose_next_pair",
+        "kind": "函数",
+        "summary": "分别为有序曲线和区域方法尝试创建一个新参数组合。",
+        "segmentStart": 127
+      },
+      {
+        "name": "main",
+        "kind": "函数",
+        "summary": "防止重复管理器，并跳过完成或重复失败的任务。",
+        "segmentStart": 175
+      }
+    ],
+    "segments": [
+      {
+        "start": 1,
+        "end": 34,
+        "title": "发现方案、读取状态与排列任务",
+        "summary": "建立教师先于学生的任务列表。",
+        "principle": [
+          "schemes按数字前缀排序，只有含代码/config.json的目录被识别。jobs先排两种划分下所有教师，再排两种学生，减少学生等待教师的情况。"
+        ],
+        "syntax": [
+          "Path.parents[2]指向各方案公共根；re.match筛选命名。缺status时返回queued、attempts=0。列表推导生成(folder,split,role)三元组。"
+        ],
+        "variables": [
+          {
+            "name": "ROOT,ROLES",
+            "type": "Path/tuple",
+            "meaning": "公共根目录与教师、Large、Small角色顺序。"
+          },
+          {
+            "name": "path,folders",
+            "type": "Path/list[Path]",
+            "meaning": "任务状态路径与方案集合。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "folder",
+            "type": "Path",
+            "default": "必填",
+            "meaning": "一个方案目录。"
+          },
+          {
+            "name": "split",
+            "type": "str",
+            "default": "必填",
+            "meaning": "train90或train100。"
+          },
+          {
+            "name": "role",
+            "type": "str",
+            "default": "必填",
+            "meaning": "需要查询的角色。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L21–23 查找方案",
+            "detail": "按数字前缀排序。"
+          },
+          {
+            "title": "L26–28 读取任务状态",
+            "detail": "缺文件不代表失败，视为尚未运行。"
+          },
+          {
+            "title": "L31–34 建任务序列",
+            "detail": "先教师，后学生。"
+          }
+        ],
+        "returns": [
+          "schemes返回目录列表；state返回状态字典；jobs返回任务三元组列表。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 37,
+        "end": 55,
+        "title": "选择Pareto候选与配置去重",
+        "summary": "只从已完成train90教师结果中寻找可用父方案，排除被双线误差同时压制的候选。",
+        "principle": [
+          "若另一方案两条线MAE都不大于当前且至少一条更小，当前被支配；frontier保留所有不被支配者。它不是只按平均MAE取一个冠军。",
+          "experiment_key只摘要指定配置键；当前包括method、lr、蒸馏/损失/增强/选优，未包括architecture、seed等其他可能改变实验的因素。"
+        ],
+        "syntax": [
+          "all/any组成Pareto判断；json.dumps(sort_keys=True)使字典键顺序不影响摘要。sha256识别配置内容而非模型性能。"
+        ],
+        "variables": [
+          {
+            "name": "records",
+            "type": "list[dict]",
+            "meaning": "完成教师的folder、metrics和config。"
+          },
+          {
+            "name": "file,p,r,s",
+            "type": "Path / 候选字典",
+            "meaning": "读取指标文件及两两比较的候选。"
+          },
+          {
+            "name": "keys",
+            "type": "list[str]",
+            "meaning": "纳入实验指纹的配置字段。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "records",
+            "type": "list[dict]",
+            "default": "必填",
+            "meaning": "每项至少有metrics中的dermis_mae与fat_mae。"
+          },
+          {
+            "name": "config",
+            "type": "dict",
+            "default": "必填",
+            "meaning": "待计算指纹的方案配置。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L37–44 收集完成教师",
+            "detail": "必须状态completed且指标文件存在。"
+          },
+          {
+            "title": "L47–50 保留非支配候选",
+            "detail": "逐线比较，不混入train100复评。"
+          },
+          {
+            "title": "L53–55 形成配置摘要",
+            "detail": "用于拒绝重复候选。"
+          }
+        ],
+        "returns": [
+          "教师候选记录、Pareto子集或配置哈希字符串。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 58,
+        "end": 124,
+        "title": "describe：生成新候选的说明文字",
+        "summary": "把方案来源、配置、数据协议和训练约定写成README正文。",
+        "principle": [
+          "这里描述的是待验证方案与设计协议，字符串中“尚未训练”清楚区分创建候选与训练成功。父方案指标只能说明父模型，不是新模型结果。"
+        ],
+        "syntax": [
+          "多行f字符串可嵌入字典访问与json.dumps；返回Markdown正文，不在本函数写文件。"
+        ],
+        "variables": [
+          {
+            "name": "method",
+            "type": "str",
+            "meaning": "按method选择曲线法或区域法的简介。"
+          },
+          {
+            "name": "folder,config,parent",
+            "type": "Path/dict/dict",
+            "meaning": "候选目录、候选配置和父方案记录。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "folder",
+            "type": "Path",
+            "default": "必填",
+            "meaning": "新方案根目录，name用于标题。"
+          },
+          {
+            "name": "config",
+            "type": "dict",
+            "default": "必填",
+            "meaning": "新候选完整配置。"
+          },
+          {
+            "name": "parent",
+            "type": "dict",
+            "default": "必填",
+            "meaning": "含folder与metrics的父教师记录。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L59 选择方法说明",
+            "detail": "此分支仅为ordered_curves与其他按区域法描述。"
+          },
+          {
+            "title": "L60–124 组成文档",
+            "detail": "包含配置、划分、训练、文件布局和来源时间。"
+          }
+        ],
+        "returns": [
+          "一份README Markdown字符串。"
+        ],
+        "core": false,
+        "pitfall": "不能把这个模板中的性能叙述当已完成实验记录；新包实际缺少原模板README。",
+        "shapes": ""
+      },
+      {
+        "start": 127,
+        "end": 149,
+        "title": "提出候选：按非支配父方案扰动参数",
+        "summary": "分别为有序曲线和区域方法尝试创建一个新参数组合。",
+        "principle": [
+          "父方案从相同method的Pareto候选中随机选。学习率对数扰动后截在[0.00005,0.0007]；蒸馏、逐线权重、SmoothL1 beta、斜率/厚度/区域权重及非几何增强概率在明示范围取值。",
+          "这是随机邻域搜索，不是梯度优化超参数；固定seed随方案编号变化。"
+        ],
+        "syntax": [
+          "json往返产生独立配置副本；math.exp使学习率倍数为正；for...else在100次都未找到新指纹时触发异常。"
+        ],
+        "variables": [
+          {
+            "name": "records,existing,created",
+            "type": "list/set/list",
+            "meaning": "完成父教师、已见配置摘要、已创建方案名。"
+          },
+          {
+            "name": "method,label,candidates",
+            "type": "str/str/list",
+            "meaning": "本轮方法与候选父记录。"
+          },
+          {
+            "name": "index,rng,parent,attempt",
+            "type": "int/Random/dict/int",
+            "meaning": "新编号、独立随机源、父方案和尝试次数。"
+          },
+          {
+            "name": "config",
+            "type": "dict",
+            "meaning": "从父配置复制后扰动的新方案。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L128–136 筛选父方案并播种",
+            "detail": "没有完成教师则停止提出候选。"
+          },
+          {
+            "title": "L137–149 扰动并查重",
+            "detail": "最多100次，成功找到新配置才离开。"
+          }
+        ],
+        "returns": [
+          "唯一新候选config，尚未训练或评估。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 150,
+        "end": 172,
+        "title": "创建方案目录、硬链接共享数据并记录来源",
+        "summary": "把候选落盘，确保失败时仅清理本次未完成的新目录。",
+        "principle": [
+          "复制py代码但不复制父方案训练权重；固定data_index和初始化权重用硬链接共享文件内容。修改硬链接文件可能影响所有链接，因此固定清单不应随意原地编辑。",
+          "异常分支shutil.rmtree仅针对刚创建的候选目录；这是执行脚本的真实副作用，阅读网页不会触发。"
+        ],
+        "syntax": [
+          "mkdir创建结构；copy2复制源代码及元数据；os.link要求同文件系统支持硬链接；atomic_json写配置与来源。"
+        ],
+        "variables": [
+          {
+            "name": "folder,code,source",
+            "type": "Path",
+            "meaning": "新方案目录、代码目录和正在复制/链接的文件。"
+          },
+          {
+            "name": "split,role,name",
+            "type": "str",
+            "meaning": "为训练日志、指标、预测及两种划分创建子目录。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L150–161 创建结构",
+            "detail": "复制代码，硬链接索引和初始化权重。"
+          },
+          {
+            "title": "L162–168 记录来源与文档",
+            "detail": "from_scratch=True表示不继承父训练权重，仍使用初始化骨干。"
+          },
+          {
+            "title": "L169–172 收尾",
+            "detail": "失败删除新候选，成功记录名称并刷新表。"
+          }
+        ],
+        "returns": [
+          "新方案目录列表；没有产生任何新模型精度。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 175,
+        "end": 195,
+        "title": "批量主循环：独占运行与教师依赖",
+        "summary": "防止重复管理器，并跳过完成或重复失败的任务。",
+        "principle": [
+          "独占非阻塞目录锁使第二个管理器立即退出。学生任务必须等同方案同划分教师completed；教师永久失败时学生也标记失败而不启动。"
+        ],
+        "syntax": [
+          "fcntl.LOCK_EX|LOCK_NB是排他且不等待；信号回调interrupt抛KeyboardInterrupt统一走停止逻辑。"
+        ],
+        "variables": [
+          {
+            "name": "owner,lock_fd,record_file",
+            "type": "Path/int/Path",
+            "meaning": "首个方案、目录锁和批量状态。"
+          },
+          {
+            "name": "child,progressed,current,status_file",
+            "type": "Popen或None/bool/dict/Path",
+            "meaning": "子进程、是否推进任务及当前状态。"
+          },
+          {
+            "name": "teacher,permanent",
+            "type": "dict/bool",
+            "meaning": "依赖教师状态与两次失败判定。"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "signum",
+            "type": "int",
+            "default": "系统传入",
+            "meaning": "interrupt收到的信号编号，函数仅转为KeyboardInterrupt。"
+          },
+          {
+            "name": "frame",
+            "type": "frame / None",
+            "default": "系统传入",
+            "meaning": "当时栈帧，本回调不读取。"
+          }
+        ],
+        "steps": [
+          {
+            "title": "L176–184 独占启动",
+            "detail": "锁目录，注册中断，准备状态。"
+          },
+          {
+            "title": "L185–195 检查任务依赖",
+            "detail": "已完成/失败两次跳过，学生先检查教师。"
+          }
+        ],
+        "returns": [
+          "进入可运行任务的资源等待阶段。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      },
+      {
+        "start": 196,
+        "end": 220,
+        "title": "等待资源、启动子任务、重试与持续搜索",
+        "summary": "满足资源门槛才运行run.py，已有任务耗尽后继续产生新方案。",
+        "principle": [
+          "GPU空闲显存要求至少6144MiB，磁盘至少10GiB；检查只是一瞬间状态，不能保证启动后其他进程不占资源。",
+          "任务至多按状态尝试两次；没有待重试任务后调用propose_next_pair，并不是自动结束，因此这是持续搜索入口。"
+        ],
+        "syntax": [
+          "subprocess.check_output调用nvidia-smi读取GPU0；disk_usage.free读取空闲字节；Popen参数列表启动单任务，wait等待退出。"
+        ],
+        "variables": [
+          {
+            "name": "free,attempt,code,result",
+            "type": "int/int/int/dict",
+            "meaning": "空闲显存、本次尝试数、退出码与结束状态。"
+          },
+          {
+            "name": "pending,created,error",
+            "type": "list/list/Exception",
+            "meaning": "仍待执行任务、新候选名、搜索失败异常。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L196–201 等资源",
+            "detail": "不满足门槛每30秒写waiting并等待。"
+          },
+          {
+            "title": "L202–214 启动与登记结果",
+            "detail": "调用run.py，记录尝试和失败原因。"
+          },
+          {
+            "title": "L215–220 继续任务或创建候选",
+            "detail": "pending存在则继续，否则进入下一轮搜索。"
+          }
+        ],
+        "returns": [
+          "任务记录更新或新方案创建。"
+        ],
+        "core": false,
+        "pitfall": "新包缺教师训练状态/指标和初始化权重时，这个旧管理器不能自动补齐完整历史。",
+        "shapes": ""
+      },
+      {
+        "start": 221,
+        "end": 236,
+        "title": "搜索等待和用户停止的收尾",
+        "summary": "搜索失败时保留原因并等待；用户停止时结束子进程和释放锁。",
+        "principle": [
+          "停止不会删除已有模型；先SIGINT允许子任务自行收尾，超时再terminate。finally始终关闭目录锁描述符。"
+        ],
+        "syntax": [
+          "except KeyboardInterrupt处理用户停止；wait(timeout=25)和TimeoutExpired构成有限等待。"
+        ],
+        "variables": [
+          {
+            "name": "error,child,record_file,lock_fd",
+            "type": "异常/进程/Path/int",
+            "meaning": "等待原因、训练进程、状态与锁。"
+          }
+        ],
+        "parameters": [],
+        "steps": [
+          {
+            "title": "L221–224 记录搜索失败",
+            "detail": "等待60秒后继续循环。"
+          },
+          {
+            "title": "L225–233 处理中断",
+            "detail": "停止子进程、写paused状态、释放锁。"
+          },
+          {
+            "title": "L236 入口",
+            "detail": "直接执行脚本才运行main。"
+          }
+        ],
+        "returns": [
+          "paused状态或等待中的批量管理器；无模型计算输出。"
+        ],
+        "core": false,
+        "pitfall": "",
+        "shapes": ""
+      }
+    ]
+  }
+]

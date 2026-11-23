@@ -2,24 +2,25 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="从理论到逐段源码，读懂脂肪层边界检测：MobileNetV3、多尺度融合、热图回归与完整训练部署流程。">
+<meta name="description" content="四种脂肪层边界检测方法的项目汇报与源码研读：高斯热图、嵌套区域、距离场和样条控制点。">
 <title>LayerLab · 脂肪层分割学习手册</title>
 <style>/*__STYLE__*/</style>
 </head>
 <body>
 <a class="skip" href="#main">跳到正文</a>
 <header class="header">
-<a class="brand" href="#report/intro"><span class="brand-mark">≋</span><span>LayerLab<small>脂肪层分割 · 源码学习手册</small></span></a>
-<nav class="mode-tabs" aria-label="学习模式"><button data-mode="report" class="active">01 项目汇报</button><button data-mode="code">02 源码研读</button></nav>
+<a class="brand" href="#heatmap/report/intro"><span class="brand-mark">≋</span><span>LayerLab<small>脂肪层分割 · 四种方法</small></span></a>
+<nav class="method-tabs" aria-label="选择算法方法">/*__METHOD_TABS__*/</nav>
 <div class="header-tools"><button id="search-open" aria-label="搜索全文与源码">⌕ <span>搜索</span><kbd>/</kbd></button><button id="menu-toggle" aria-label="展开目录">☰</button></div>
+<div class="method-subbar"><div class="method-caption"><strong id="current-method-title">高斯热图法</strong><span id="current-method-description">逐列边界评分与概率加权坐标</span></div><nav class="mode-tabs" aria-label="当前方法的学习模式"><button data-mode="report" class="active">项目汇报</button><button data-mode="code">源码研读</button></nav></div>
 </header>
-<aside id="sidebar" class="sidebar"><div class="side-label">阅读目录 <span>CONTENTS</span></div><nav id="toc"></nav><div class="side-bottom">基于项目源码 · 2026.11.22<p>先看全局导读，<br>再对照源码与图解。</p><div id="source-summary"></div></div></aside>
+<aside id="sidebar" class="sidebar"><div class="side-label">阅读目录 <span>CONTENTS</span></div><nav id="toc"></nav><div class="side-bottom">基于项目源码 · 2026.11.23<p>先看全局导读，<br>再对照源码与图解。</p><div id="source-summary"></div></div></aside>
 <main id="main">
 <div id="report-view">/*__REPORT__*/</div>
 <div id="code-view" hidden><div id="reader-guide">/*__GUIDE__*/</div><div id="file-view"></div></div>
 <footer>LayerLab · 一份可以反复研读的项目手册 <span>原始实现 / 理论推导 / 改进建议，分别标明。</span></footer>
 </main>
-<dialog id="search-dialog" aria-label="搜索学习手册"><div class="search-bar"><input id="search-input" type="search" placeholder="搜索文件、函数、原理或参数…" aria-label="搜索关键词"><button id="search-close" aria-label="关闭搜索">Esc</button></div><div id="search-results"></div></dialog>
+<dialog id="search-dialog" aria-label="搜索当前方法"><div class="search-bar"><input id="search-input" type="search" placeholder="搜索当前方法的文件、函数、原理或参数…" aria-label="搜索当前方法"><button id="search-close" aria-label="关闭搜索">Esc</button></div><div id="search-results"></div></dialog>
 <dialog id="figure-dialog" aria-labelledby="figure-title"><div class="figure-dialog-head"><h2 id="figure-title">结构图</h2><div><button id="figure-fit">适应窗口</button><button id="figure-minus" aria-label="缩小图示">−</button><span id="figure-scale">100%</span><button id="figure-plus" aria-label="放大图示">＋</button><button id="figure-close" aria-label="关闭图示">×</button></div></div><div id="figure-stage"><img id="figure-image" alt=""></div></dialog>
 <div id="toast" role="status"></div>
 <script id="project-data" type="application/json">/*__DATA__*/</script>

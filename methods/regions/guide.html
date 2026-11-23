@@ -1,0 +1,28 @@
+<section class="project-reading-guide" id="regions-guide">
+  <span class="eyebrow">ORDINAL REGIONS / 源码导读</span>
+  <h1>先读懂两张区域图，<br>再追踪它们怎样学出边界。</h1>
+  <p class="guide-lead">文件地图围绕一次教师或学生训练展开。算法核心在 models.py 与 losses.py；data.py 把固定视图变成样本；train.py 把它们接成学习闭环。其余文件负责使用模型和组织实验。</p>
+  <div class="guide-opening"><h2>先建立这条数据链</h2><p>原图与人工点经过插值、裁剪和增强，得到图像 <code>[B,1,256,256]</code>、坐标与有效掩码 <code>[B,2,256]</code>。模型四尺度融合后输出区域概率 <code>[B,2,64,64]</code>，再对补集沿高度平均并恢复横向宽度，得到预测坐标 <code>[B,2,256]</code>。损失同时监督坐标与区域；学生训练额外读取同图的冻结教师输出。</p><p>两张区域图分别表示“在上边界下方”和“在下边界下方”。先分清这个含义，再读 sigmoid 乘积、积分和阶跃标签，就不会误套热图法的高斯峰解释。</p></div>
+  <aside class="guide-core-legend"><strong>★ 核心：直接参与当前区域法处理与训练</strong><p>数据变换、实际区域模型、损失、教师蒸馏、更新与验证标星。导入、配置、日志、文件保存、调度脚本及当前配置不执行的 ordered_curves 分支不标星。文件中保留完整代码，备用分支有解释但不混入主线。</p></aside>
+</section>
+<section class="guide-order" id="regions-order" aria-labelledby="regions-order-title">
+  <div class="guide-section-head"><h2 id="regions-order-title">建议按六站阅读</h2><p>先从输出含义出发，再回头连接数据和训练；这与程序实际启动顺序不同。</p></div>
+  <ol class="reading-stations">
+    <li><span class="station-number">1</span><div><h3>确认实际选中的分支</h3><p>config 把 method 设为 ordinal_regions；构造器默认 ordered_curves 不代表本方案实际使用它。</p><a href="#code/072_区域调优/代码/config.json">配置与实际调用</a></div></li>
+    <li><span class="station-number">2</span><div><h3>看清区域与积分</h3><p>先看两个概率如何包含，再用8格数例理解 mean(1−regions) 为何得到高度。</p><a href="#code/072_区域调优/代码/models.py?line=84">嵌套概率</a><a href="#code/072_区域调优/代码/models.py?line=98">积分解码</a></div></li>
+    <li><span class="station-number">3</span><div><h3>追踪样本怎样制作</h3><p>稀疏点插值、视图裁剪、尺度换算、valid维护和字典batch逐步连起来。</p><a href="#code/072_区域调优/代码/data.py?line=70">标注与样本</a><a href="#code/072_区域调优/代码/legacy_crops.py?line=5">三种几何变换</a></div></li>
+    <li><span class="station-number">4</span><div><h3>回到网络结构</h3><p>四级骨干特征如何统一通道、逐级相加，并与横纵位置一起输入区域头。</p><a href="#code/072_区域调优/代码/models.py?line=14">骨干取层</a><a href="#code/072_区域调优/代码/models.py?line=76">完整前向</a></div></li>
+    <li><span class="station-number">5</span><div><h3>监督与蒸馏怎样形成梯度</h3><p>先看阶跃目标和五项监督，再看教师可靠性门控与学生更新。</p><a href="#code/072_区域调优/代码/losses.py?line=9">区域标签</a><a href="#code/072_区域调优/代码/losses.py?line=41">教师蒸馏</a><a href="#code/072_区域调优/代码/train.py?line=162">累积更新</a></div></li>
+    <li><span class="station-number">6</span><div><h3>验证、使用和实验管理</h3><p>区分损失与选优评分、验证与复评；最后读单图推理、状态记录和批量搜索。</p><a href="#code/072_区域调优/代码/train.py?line=187">选优规则</a><a href="#code/072_区域调优/代码/infer.py?line=21">还原原图坐标</a><a href="#code/072_区域调优/代码/批量训练.py">批量任务</a></div></li>
+  </ol>
+</section>
+<section class="guide-map" id="regions-map" aria-labelledby="regions-map-title">
+  <div class="guide-section-head"><h2 id="regions-map-title">10 个文件，各自负责哪一段</h2><p>下方按职责分组；左侧文件树保持原方案的“代码”目录结构。</p></div>
+  <div class="file-map-grid">
+    <article><span class="map-category">输入与监督</span><h3>图像和标注变成张量</h3><a href="#code/072_区域调优/代码/data.py">data.py <small>固定索引、标注插值、联合增强、样本字典</small></a><a href="#code/072_区域调优/代码/legacy_crops.py">legacy_crops.py <small>三种旧几何变换及坐标公式</small></a></article>
+    <article><span class="map-category">模型与目标</span><h3>区域图与可学习误差</h3><a href="#code/072_区域调优/代码/models.py">models.py <small>四尺度融合、嵌套区域、积分解码</small></a><a href="#code/072_区域调优/代码/losses.py">losses.py <small>阶跃目标、监督损失与可信蒸馏</small></a><a href="#code/072_区域调优/代码/config.json">config.json <small>实际方法、权重、增强、训练与选优设置</small></a></article>
+    <article><span class="map-category">训练与使用</span><h3>参数怎样更新和应用</h3><a href="#code/072_区域调优/代码/train.py">train.py <small>教师学生装配、更新、验证、保存与恢复</small></a><a href="#code/072_区域调优/代码/infer.py">infer.py <small>单图推理并恢复原图宽高坐标</small></a></article>
+    <article><span class="map-category">工程支撑</span><h3>任务、状态和候选搜索</h3><a href="#code/072_区域调优/代码/run.py">run.py <small>一次训练的环境、日志及中断管理</small></a><a href="#code/072_区域调优/代码/reporting.py">reporting.py <small>读取状态与指标更新文档</small></a><a href="#code/072_区域调优/代码/批量训练.py">批量训练.py <small>教师依赖、资源等待、重试与新参数方案</small></a></article>
+  </div>
+  <div class="note"><strong>固定索引与模型文件怎样处理</strong><p>data_index.json 的结构在 data.py 中逐字段解释：data_root、items、indices、audit。网页不嵌入全量样本路径、原始图像或权重；原始包还含模型与300张测试集目录。train100复评重合、测试清单52条原路径重合的证据边界，见本方法报告。</p></div>
+</section>

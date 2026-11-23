@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720">
+<title>三次小批量怎样积累成一次更新</title><desc>每个小批量先将总损失除以本组实际批次数，再反向传播累加梯度。通常三次小批量后裁剪梯度并更新一次，尾组不足三批时使用实际组大小。</desc>
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#187b6b"/></marker></defs>
+<rect width="960" height="720" fill="white"/>
+<g font-family="Microsoft YaHei,Segoe UI,sans-serif" fill="#173e36">
+<text x="36" y="47" font-size="28" font-weight="bold">三次小批量，累积梯度后更新一次</text>
+<text x="36" y="81" font-size="18" fill="#59796c">配置 batch_size = 16，accumulation = 3；下面用一个参数的梯度举例</text>
+<g fill="#e8f2ed" stroke="#78ac96"><rect x="65" y="122" width="140" height="88"/><rect x="54" y="133" width="140" height="88"/><rect x="43" y="144" width="140" height="88"/>
+<rect x="372" y="122" width="140" height="88"/><rect x="361" y="133" width="140" height="88"/><rect x="350" y="144" width="140" height="88"/>
+<rect x="679" y="122" width="140" height="88"/><rect x="668" y="133" width="140" height="88"/><rect x="657" y="144" width="140" height="88"/></g>
+<text x="66" y="193" font-size="23">第 1 批</text><text x="373" y="193" font-size="23">第 2 批</text><text x="680" y="193" font-size="23">第 3 批</text>
+<text x="45" y="267" font-size="21">原始梯度 0.6</text><text x="352" y="267" font-size="21">原始梯度 0.9</text><text x="659" y="267" font-size="21">原始梯度 0.3</text>
+<text x="45" y="302" font-size="20">loss ÷ 3 → 贡献 0.2</text><text x="352" y="302" font-size="20">loss ÷ 3 → 贡献 0.3</text><text x="659" y="302" font-size="20">loss ÷ 3 → 贡献 0.1</text>
+<path d="M140 324V361H470M444 324V361M751 324V361H470V397" fill="none" stroke="#187b6b" stroke-width="2" marker-end="url(#a)"/>
+<text x="45" y="408" font-size="20">参数的 .grad</text>
+<rect x="230" y="387" width="200" height="42" fill="#168675"/><rect x="430" y="387" width="300" height="42" fill="#7d6ac8"/><rect x="730" y="387" width="100" height="42" fill="#ce8b3c"/>
+<g fill="white" font-size="20"><text x="310" y="415">0.2</text><text x="560" y="415">0.3</text><text x="759" y="415">0.1</text></g>
+<text x="230" y="465" font-size="22">累计梯度 = 0.6；同一组内参数尚未更新</text>
+<text x="230" y="505" font-size="21">裁剪总梯度范数 → AdamW 更新 → 清空梯度</text>
+<rect x="36" y="541" width="888" height="116" rx="8" fill="#f1f7f3" stroke="#d3e3d9"/>
+<text x="57" y="576" font-size="21" font-weight="bold">尾组只有 2 批时，group_size = 2，每批损失除以 2</text>
+<text x="57" y="611" font-size="18">否则仍除以 3，会把最后一组的平均梯度压小。每组最后一批才调用 optimizer.step。</text>
+<text x="57" y="640" font-size="17">通常累积最多 48 张图；含 BatchNorm 等操作时，不等同于一次送入 48 张图。</text>
+<text x="36" y="695" font-size="16" fill="#6b8176">教学数值示例，不是真实训练记录；标量梯度仅用来展示加法，实际为所有参数的梯度张量。</text>
+</g></svg>

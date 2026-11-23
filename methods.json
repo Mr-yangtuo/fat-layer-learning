@@ -1,0 +1,6 @@
+[
+  {"id":"heatmap","title":"高斯热图法","label":"热图法","subtitle":"逐列边界评分与概率加权坐标","intro":"intro","parts":["content-data.json","content-model.json","content-training.json"],"report":"report.html","guide":"reader-guide.html","visuals":"reader-visuals.json","source_root":""},
+  {"id":"regions","title":"嵌套区域法","label":"区域法","subtitle":"预测边界下方区域，再积分得到坐标","intro":"regions-intro","parts":["methods/regions/content.json"],"report":"methods/regions/report.html","guide":"methods/regions/guide.html","visuals":"methods/regions/visuals.json","source_root":"减脂三算法_测试集300张_20261110"},
+  {"id":"distance","title":"距离场边界法","label":"距离场法","subtitle":"从带符号纵向距离还原边界","intro":"distance-intro","parts":["methods/distance/content.json"],"report":"methods/distance/report.html","guide":"methods/distance/guide.html","visuals":"methods/distance/visuals.json","source_root":"减脂三算法_测试集300张_20261110"},
+  {"id":"spline","title":"样条控制点法","label":"样条法","subtitle":"查询控制点，用 B 样条生成曲线","intro":"spline-intro","parts":["methods/spline/content.json"],"report":"methods/spline/report.html","guide":"methods/spline/guide.html","visuals":"methods/spline/visuals.json","source_root":"减脂三算法_测试集300张_20261110"}
+]

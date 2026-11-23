@@ -1,0 +1,4 @@
+[
+  {"id":"shared-new-preprocess","method":"shared","title":"一张灰度图怎样进入三通道骨干","caption":"三种新方案都先把灰度像素除以255，再在模型中扩展为三通道并使用固定的 ImageNet 均值和标准差。三个通道原始灰度相同，归一化后数值不同；与原热图法逐图标准化和可学习去噪的路径不同。图为教学示意。","alt":"灰度图扩展为三个通道并按不同常量归一化，0.5变成约0.066、0.196、0.418。","links":[{"path":"072_区域调优/代码/models.py","contains":"image.expand(-1"},{"path":"103_距离场边界_参数07/代码/models.py","contains":"image.expand(-1"},{"path":"115_样条控制点_参数09/代码/models.py","contains":"image.expand(-1"}]},
+  {"id":"shared-new-accumulation","method":"shared","title":"三批梯度怎样累积成一次参数更新","caption":"三种新配置都使用batch_size=16、accumulation=3。每批总损失先除以当前组的实际批次数，反向传播累加.grad；组末裁剪、更新、清零。最后不足三批时使用实际group_size。梯度数值是教学例子，不能当作实验记录。","alt":"三批损失分别除3，梯度贡献0.2、0.3、0.1相加为0.6，组末才做一次AdamW更新，尾组不足三批按实际数量归一化。","links":[{"path":"072_区域调优/代码/train.py","contains":"group_size=min"},{"path":"103_距离场边界_参数07/代码/train.py","contains":"group_size=min"},{"path":"115_样条控制点_参数09/代码/train.py","contains":"group_size=min"}]}
+]

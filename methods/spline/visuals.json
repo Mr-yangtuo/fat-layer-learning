@@ -1,0 +1,214 @@
+[
+  {
+    "id": "spline-architecture",
+    "title": "四尺度到12个查询的整体结构",
+    "caption": "样条法对四层特征先统一到80通道；最深层先经80→80可分离卷积，然后逐级上采样相加，每次相加后再加工。图中堆叠片数仅示意；真实通道数以标签为准。12个查询不是12个输入像素，每个查询读取整幅图像记忆并产生一对控制高度。",
+    "alt": "四层不同大小特征栈、侧向投影、最深层加工、由深到浅融合，以及图像token、查询向量和两组控制点。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 13
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 28
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 41
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 46
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 86
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 99
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 128
+      }
+    ]
+  },
+  {
+    "id": "spline-query-memory",
+    "title": "查询读取整幅图像记忆",
+    "caption": "着色格仅表示一个查询可能分配的注意力强弱，不是模型实测注意力。真实记忆有1024个80维token；每个query经两轮4头交叉注意力读取同一份记忆。softmax发生在记忆位置轴，不是逐列高度轴。",
+    "alt": "二维图像网格带局部深浅权重，连接到12个查询之一，底部展开注意力残差和前馈更新。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 99
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 146
+      }
+    ]
+  },
+  {
+    "id": "spline-ordered-controls",
+    "title": "从间隔到有序控制高度",
+    "caption": "本例把softmax后的三个间隔设为[0.20,0.35,0.45]，累计前两段得到0.20、0.55。softmax分配的是垂直间隔，不是图像各行的热图概率；三段间隔约束与同一套非负样条基共同保证两条曲线不交叉。",
+    "alt": "一个竖直标尺按三个彩色间隔分段，上下两条控制高度分别标在累计0.20和0.55处。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 99
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 151
+      }
+    ]
+  },
+  {
+    "id": "spline-basis-curve",
+    "title": "三次样条的控制多边形与基函数",
+    "caption": "使用与源码同样的夹持均匀三次B样条节点规则，实际计算12个基函数及合成曲线。上图用Greville横坐标展示控制多边形；内部控制点通常不在曲线上。下图每列基函数非负且和为1；数据仅为教学示例。",
+    "alt": "上方橙色空心控制点和折线与绿色平滑曲线分开，下方绘出12条局部支撑的三次基函数曲线。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 63
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 151
+      }
+    ]
+  },
+  {
+    "id": "spline-matrix",
+    "title": "控制高度乘基函数矩阵的数值例",
+    "caption": "矩阵乘法对每条线的12个控制高度做逐列加权。本例展示第145列四个非零基函数的实际值，合成高度由代码同构的纯数学计算生成；最后乘H−1=255得到输入像素坐标。图中的矩阵列数为压缩示意。",
+    "alt": "两行控制高度乘十二行基函数矩阵得到两行完整曲线，底部列出一个输出列的四个非零贡献。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 63
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 151
+      }
+    ]
+  },
+  {
+    "id": "spline-geometric-loss",
+    "title": "曲率与粗尺度损失到底在比较什么",
+    "caption": "上方示例参考二阶差分2、预测二阶差分1，损失惩罚二者不匹配；并非要求所有边界变成直线。下方将完整曲线池化到K=12个区段；真实adaptive pooling区段在256不能整除12时可能有重叠，图中等宽分块仅表示低分辨率摘要，不能当作精确分桶边界。",
+    "alt": "两组三点折线的二阶差分数值，以及完整曲线被压成12个区段均值的示意格。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/losses.py",
+        "start": 34
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/models.py",
+        "start": 151
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/config.json",
+        "start": 43
+      }
+    ]
+  },
+  {
+    "id": "spline-distillation",
+    "title": "带置信门控的教师学生学习",
+    "caption": "同一增强后的训练图像进入两个模型。教师坐标越偏离人工答案，exp(−误差/8)给的权重越小；这是基于训练标签的门控，不使用测试标签。样条regions由预测曲线派生。图中曲线只是示意，不能据此比较教师学生效果。",
+    "alt": "同一图像分送冻结教师与可训练学生，两组曲线输出在人工标签控制的门控权重下比较。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/losses.py",
+        "start": 61
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/config.json",
+        "start": 17
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/train.py",
+        "start": 172
+      }
+    ]
+  },
+  {
+    "id": "spline-data-geometry",
+    "title": "输入图像、坐标与有效掩码同步变化",
+    "caption": "图中以合成曲线展示三个legacy几何变换。crop_upper_and_stretch实际裁底，crop_lower_and_stretch实际裁顶，不能按函数名猜方向。增强入口会预先检查有效线保留条件，函数自身主要处理图像和坐标。示意只呈现连续几何比例，像素中心的采样细节以源码为准。",
+    "alt": "四张网格图及两条合成边界，分别展示原图、裁底拉伸、压缩补顶和裁顶拉伸的变化。",
+    "links": [
+      {
+        "path": "115_样条控制点_参数09/代码/data.py",
+        "start": 14
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/data.py",
+        "start": 70
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/data.py",
+        "start": 114
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/legacy_crops.py",
+        "start": 1
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/legacy_crops.py",
+        "start": 61
+      },
+      {
+        "path": "115_样条控制点_参数09/代码/legacy_crops.py",
+        "start": 125
+      },
+      {
+        "path": "103_距离场边界_参数07/代码/data.py",
+        "contains": "def augment("
+      },
+      {
+        "path": "103_距离场边界_参数07/代码/data.py",
+        "contains": "def load_view("
+      },
+      {
+        "path": "103_距离场边界_参数07/代码/legacy_crops.py",
+        "contains": "def crop_upper_and_stretch("
+      },
+      {
+        "path": "103_距离场边界_参数07/代码/legacy_crops.py",
+        "contains": "def compress_height_with_pad("
+      },
+      {
+        "path": "103_距离场边界_参数07/代码/legacy_crops.py",
+        "contains": "def crop_lower_and_stretch("
+      },
+      {
+        "path": "072_区域调优/代码/data.py",
+        "contains": "def augment("
+      },
+      {
+        "path": "072_区域调优/代码/data.py",
+        "contains": "def load_view("
+      },
+      {
+        "path": "072_区域调优/代码/legacy_crops.py",
+        "contains": "def crop_upper_and_stretch("
+      },
+      {
+        "path": "072_区域调优/代码/legacy_crops.py",
+        "contains": "def compress_height_with_pad("
+      },
+      {
+        "path": "072_区域调优/代码/legacy_crops.py",
+        "contains": "def crop_lower_and_stretch("
+      }
+    ]
+  }
+]

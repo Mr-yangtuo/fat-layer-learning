@@ -1,0 +1,53 @@
+{
+  "method": "signed_distance",
+  "method_family": "signed_distance",
+  "method_title": "距离场边界",
+  "trial": 7,
+  "teacher_backbone": "resnet18",
+  "seed": 20260925,
+  "data_root": "/home/zlg/0.减脂数据集/无垫/腹部/",
+  "teacher_epochs": 100,
+  "student_epochs": 80,
+  "min_epochs": 40,
+  "patience": 20,
+  "batch_size": 16,
+  "accumulation": 3,
+  "workers": 4,
+  "lr": 0.000416059,
+  "distill_weight": 0.488,
+  "input_size": [
+    256,
+    256
+  ],
+  "gpu": 0,
+  "selection": "balanced_lines",
+  "selection_reference": [
+    1.1052500070819473,
+    2.0225625704037737
+  ],
+  "deployment_limit_bytes": 20000000,
+  "architecture": {
+    "width": 48,
+    "distance_temperature": 0.03
+  },
+  "loss": {
+    "line_weights": [
+      1.076,
+      0.923
+    ],
+    "coord_beta": 1.0,
+    "slope_weight": 0.2,
+    "thickness_weight": 0.3,
+    "field_weight": 0.5,
+    "vertical_weight": 0.1
+  },
+  "augmentation": {
+    "noise_probability": 0.15,
+    "blur_probability": 0.1,
+    "ridge_probability": 0.0
+  },
+  "scheme": "103_距离场边界_参数07",
+  "parent_trial": 6,
+  "parent_scheme": "102_距离场边界_参数06",
+  "parent_role": "mobilenet_v3_large"
+}

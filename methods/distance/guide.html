@@ -1,0 +1,20 @@
+<section class="project-reading-guide" id="distance-guide">
+<span class="eyebrow">DISTANCE FIELD / 全局导读</span><h1>沿着“位置减距离”，<br>读懂这套预测链。</h1>
+<p class="guide-lead">先认清文件分工，再顺着一份样本进入模型、损失和更新。源码左侧按逻辑分段，选中后右侧同步解释；★标记当前距离场处理与训练主线。</p>
+<div class="guide-opening"><h2>这一张文件地图怎样合作</h2><p><strong>config.json</strong>固定103方案设置；<strong>data.py</strong>读取索引、解析标注、构造图像视图并增强，几何变换由<strong>legacy_crops.py</strong>完成。<strong>models.py</strong>输出距离场与坐标，<strong>losses.py</strong>把它们与人工/教师目标比较。<strong>train.py</strong>连接数据、模型、损失、更新和验证。<strong>infer.py</strong>只用已有权重预测原图；<strong>run.py/reporting.py</strong>管理进程、日志和状态。</p><p>目录里的其他表示分支是保留代码，当前配置只启用signed_distance。不要把备用样条、迭代修正、GRU分类也串入距离场的运行流程。</p></div>
+<div class="guide-reading-rule"><strong>追踪四种数据</strong><span>图像 [B,1,256,256]</span><span>人工线/掩码 [B,2,256]</span><span>距离场 [B,2,64,64]</span><span>预测曲线 [B,2,256]</span><p>注意归一化高度0～1与输入像素0～255的转换；场不是概率，近零权重才沿高度归一化。</p></div>
+</section>
+<section class="guide-order" id="distance-order-guide"><div class="guide-section-head"><h2>建议按七站阅读</h2></div><ol class="reading-stations">
+<li><span class="station-number">1</span><div><h3>确认当前实验选择</h3><p>看method、width=48、temperature=.03及监督系数，分清配置值和函数缺省值。</p><a href="#code/103_距离场边界_参数07/代码/config.json?line=29">config.json</a></div></li>
+<li><span class="station-number">2</span><div><h3>从稀疏点得到模型标签</h3><p>先读点分桶、横向插值与valid，再读视图缩放和联合增强，确认标签始终与图像对齐。</p><a href="#code/103_距离场边界_参数07/代码/data.py?line=70">data.py · 标注与样本</a><a href="#code/103_距离场边界_参数07/代码/legacy_crops.py">legacy_crops.py</a></div></li>
+<li><span class="station-number">3</span><div><h3>看完整前向，再拆编码器</h3><p>先知道模型交出field/y/regions，再回到四尺度骨干与逐级拼接，跟踪通道和空间尺寸。</p><a href="#code/103_距离场边界_参数07/代码/models.py?line=139">models.py · 输入与特征</a></div></li>
+<li><span class="station-number">4</span><div><h3>弄懂距离如何变为坐标</h3><p>重点读grid−field、近零权重、同步排序和横向插值；这是本方法最有辨识度的部分。</p><a href="#code/103_距离场边界_参数07/代码/models.py?line=148">models.py · 解码</a><a href="#code/103_距离场边界_参数07/代码/models.py?line=86">同步排序</a></div></li>
+<li><span class="station-number">5</span><div><h3>看什么误差推动学习</h3><p>区分曲线监督、整张距离场监督和教师蒸馏，逐项核对mask、单位和权重分母。</p><a href="#code/103_距离场边界_参数07/代码/losses.py?line=25">losses.py</a></div></li>
+<li><span class="station-number">6</span><div><h3>闭合训练与验证循环</h3><p>同图教师蒸馏、尾组梯度累积、裁剪、AdamW、预热余弦、balanced_lines选模与早停。</p><a href="#code/103_距离场边界_参数07/代码/train.py?line=172">train.py · 学习</a><a href="#code/103_距离场边界_参数07/代码/train.py?line=35">验证统计</a></div></li>
+<li><span class="station-number">7</span><div><h3>使用已有模型，再补工程逻辑</h3><p>理解原图坐标恢复后，再看启动、暂停、原子保存和README汇总；这些段落不标核心星。</p><a href="#code/103_距离场边界_参数07/代码/infer.py">infer.py</a><a href="#code/103_距离场边界_参数07/代码/run.py">run.py</a><a href="#code/103_距离场边界_参数07/代码/reporting.py">reporting.py</a></div></li>
+</ol></section>
+<section class="guide-map" id="distance-file-map"><div class="guide-section-head"><h2>9 个文件放回职责地图</h2><p>完整源码保留；data_index只解释结构与统计，不把样本路径、图像或权重放进公开页面。</p></div><div class="file-map-grid">
+<article><h3>实验与数据</h3><a href="#code/103_距离场边界_参数07/代码/config.json">config.json <small>结构、损失和训练设置</small></a><a href="#code/103_距离场边界_参数07/代码/data.py">data.py <small>索引、标注、增强与Dataset</small></a><a href="#code/103_距离场边界_参数07/代码/legacy_crops.py">legacy_crops.py <small>三种几何变换</small></a></article>
+<article><h3>预测与学习</h3><a href="#code/103_距离场边界_参数07/代码/models.py">models.py <small>四尺度、场与坐标</small></a><a href="#code/103_距离场边界_参数07/代码/losses.py">losses.py <small>监督与蒸馏</small></a><a href="#code/103_距离场边界_参数07/代码/train.py">train.py <small>训练、验证与选模</small></a></article>
+<article><h3>使用与工程</h3><a href="#code/103_距离场边界_参数07/代码/infer.py">infer.py <small>原图推理</small></a><a href="#code/103_距离场边界_参数07/代码/run.py">run.py <small>进程与暂停</small></a><a href="#code/103_距离场边界_参数07/代码/reporting.py">reporting.py <small>状态和文档汇总</small></a></article>
+</div></section>

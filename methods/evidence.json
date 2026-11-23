@@ -1,0 +1,31 @@
+{
+  "checked_on": "2026-11-23",
+  "source_bundle": "减脂三算法_测试集300张_20261110",
+  "inspection": "Static source, configuration, file inventory and JSON/TSV index comparison only; no training or inference was run.",
+  "schemes": ["072_区域调优", "103_距离场边界_参数07", "115_样条控制点_参数09"],
+  "python_files": 25,
+  "configuration_files": 3,
+  "weight_files": 3,
+  "included_weight_filename_role": "train100 / mobilenet_v3_large_distilled_best",
+  "separate_test_metrics_or_training_logs_in_bundle": false,
+  "shared_index": {
+    "sha256_prefix": "7c0c7904669b",
+    "original_pairs": 8300,
+    "all_views": 13277,
+    "train90_originals": 7470,
+    "train90_views": 11617,
+    "evaluation_originals": 830,
+    "train100_evaluation_source_overlap": 830
+  },
+  "provided_test_folder": {
+    "images": 300,
+    "annotations": 300,
+    "matched_stems": 300,
+    "annotations_with_both_target_labels": 300,
+    "movement_manifest_rows": 300,
+    "exact_original_path_overlap_with_train100_index": 52,
+    "exact_original_path_overlap_with_train90_index": 36,
+    "exact_original_path_overlap_with_evaluation_index": 16,
+    "interpretation": "These are index/path overlaps, not verified exposure of the supplied trained checkpoints. Remaining samples have not been verified independent at patient/video/content level."
+  }
+}

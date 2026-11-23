@@ -1,0 +1,63 @@
+{
+  "method": "spline_queries",
+  "method_family": "spline_queries",
+  "method_title": "样条控制点",
+  "trial": 9,
+  "teacher_backbone": "resnet18",
+  "roles": [
+    "teacher",
+    "mobilenet_v3_large",
+    "mobilenet_v3_small"
+  ],
+  "role_backbones": {
+    "teacher": "resnet18",
+    "mobilenet_v3_large": "mobilenet_v3_large",
+    "mobilenet_v3_small": "mobilenet_v3_small"
+  },
+  "seed": 20260925,
+  "data_root": "/home/zlg/0.减脂数据集/无垫/腹部/",
+  "teacher_epochs": 100,
+  "student_epochs": 80,
+  "min_epochs": 40,
+  "patience": 20,
+  "batch_size": 16,
+  "accumulation": 3,
+  "workers": 4,
+  "lr": 0.000316046,
+  "distill_weight": 0.424,
+  "input_size": [
+    256,
+    256
+  ],
+  "gpu": 0,
+  "selection": "balanced_lines",
+  "selection_reference": [
+    1.1052500070819473,
+    2.0225625704037737
+  ],
+  "deployment_limit_bytes": 20000000,
+  "architecture": {
+    "width": 80,
+    "controls": 12
+  },
+  "loss": {
+    "line_weights": [
+      0.916,
+      1.221
+    ],
+    "coord_beta": 1.0,
+    "slope_weight": 0.1,
+    "thickness_weight": 0.15,
+    "curvature_weight": 0.3,
+    "coarse_weight": 0.25
+  },
+  "augmentation": {
+    "noise_probability": 0.05,
+    "blur_probability": 0.05,
+    "ridge_probability": 0.05
+  },
+  "scheme": "115_样条控制点_参数09",
+  "parent_trial": 3,
+  "parent_scheme": "109_样条控制点_参数03",
+  "parent_role": "mobilenet_v3_large"
+}

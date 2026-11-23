@@ -1,0 +1,59 @@
+<section class="section" id="spline-intro" data-title="方法定位与变化">
+  <div class="section-head"><h1>样条控制点法：先预测少量控制高度，再生成整条边界</h1></div>
+  <p class="lead">本方案不为每一列预测一条高度概率分布，而是为两条边界各预测 12 个控制高度，用固定的三次 B 样条基函数展开成 256 列坐标。</p>
+  <p>它仍然解决真皮层下界和脂肪层下界的定位任务，但输入归一化、特征提取层次、融合结构和预测头都与原热图方案不同。灰度图复制成三通道后使用固定均值、标准差归一化；四级骨干特征逐级融合，查询向量读取图像，再生成控制点。卷积、反向传播等基础可参照<a href="#heatmap/report/architecture">热图法的结构说明</a>，这里只讲本方案的变化。</p>
+  <div class="note"><strong>本页以实际配置为准</strong><p>当前方法为 <code>spline_queries</code>，融合宽度 80，控制点数 12。附带权重文件属于 train100 的 MobileNetV3-Large 蒸馏学生；代码还支持教师和其他方法分支，不等于包里提供了所有实验结果。</p></div>
+</section>
+
+<section class="section" id="spline-architecture" data-title="四尺度与查询读取">
+  <div class="section-head"><h2>先把图像变成查询可以读取的记忆</h2></div>
+  <p>对 256×256 输入，MobileNetV3-Large 学生取出 24×64×64、40×32×32、112×16×16、960×8×8 四层特征。每层先用 1×1 卷积统一到 80 通道。最深的 80×8×8 特征先经过一次 80→80 的轻量卷积加工：逐通道 3×3 整理各通道的邻域信息，再用 1×1 混合通道。随后开始三次上采样、与浅层相加，每次相加后再做同样的轻量卷积，让刚汇合的深浅层信息重新组合。卷积的步长与补边保持该层高宽，尺寸增大由上采样完成。最终得到 80×64×64 的融合特征。教师使用 ResNet18，四层通道不同，但解码后的统一宽度相同。</p>
+  <!--VIS:spline-architecture-->
+  <p>网络给特征加上由横、纵坐标投影而成的位置描述，然后平均池化到 16×64，并展平为 <strong>1024 个空间 token，每个有 80 个数</strong>。另一侧有 12 个可学习查询向量；它们尚不是坐标，而是用来从图像中收集证据的描述。</p>
+  <p>两轮交叉注意力让每个查询读取整份图像记忆。每轮有 4 个头，每头 20 维；注意力输出与原查询相加、归一化，再经过 80→160→80 的前馈残差加工。注意力权重是在 <strong>1024 个图像位置之间</strong>分配，和热图法“同一列在不同高度间分配概率”的含义不同。</p>
+  <!--VIS:spline-query-memory-->
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/models.py?line=146">对照查询前向源码</a>
+</section>
+
+<section class="section" id="spline-controls" data-title="有序控制高度">
+  <div class="section-head"><h2>每个查询输出三段间隔，确定上下两个高度</h2></div>
+  <p>线性层把每个查询的 80 个数变成 3 个分数，再用 softmax 得到总和为 1 的三个非负间隔：顶端到上边界、两条边界之间、下边界到底端。累计前两段，就得到该控制位置的上、下两个归一化高度。</p>
+  <div class="math">(a, b, c) = softmax(三个间隔分数)<br>上控制高度 = a　；　下控制高度 = a + b<small>例如 (0.20, 0.35, 0.45) 对应上高度 0.20、下高度 0.55。12 个查询产生两组 12 个控制高度。</small></div>
+  <!--VIS:spline-ordered-controls-->
+  <p>因为间隔非负，上控制高度天然不大于下控制高度。这里预测的是每个控制点的<strong>纵向高度</strong>，横向作用范围由固定样条节点与基函数决定，不另外预测 12 个自由横坐标。</p>
+</section>
+
+<section class="section" id="spline-curve" data-title="样条如何生成曲线">
+  <div class="section-head"><h2>固定基函数把少量控制高度展开成完整曲线</h2></div>
+  <p>基函数矩阵大小为 12×256。第 k 行表示第 k 个控制高度在横向各列的影响；每一列的权重非负且和为 1。网络只需执行矩阵乘法：</p>
+  <div class="math">y<sub>线</sub>(x) = ∑<sub>k=0…11</sub> 控制高度<sub>线,k</sub> × 基函数<sub>k</sub>(x)<br>[B, 2, 12] × [12, 256] → [B, 2, 256]<small>归一化高度最后乘 H−1；H=256 时乘 255，得到输入图像上的像素高度。</small></div>
+  <!--VIS:spline-basis-curve-->
+  <p><strong>控制点通常不在曲线上。</strong>它们不是从标注中挑出的 12 个点，也不要求曲线逐一穿过它们；它们共同决定曲线的形状。三次基函数具有局部作用范围，内部一个输出列通常最多受四个控制高度影响。两条线共用同一套非负权重，控制点的上下顺序因此传递到整条曲线。</p>
+  <!--VIS:spline-matrix-->
+  <p>这种表示把预测限制在较平滑的曲线族中，能减少逐列自由度；代价是 12 个控制点对很局部、很尖锐的真实变化可能表达不足。控制点数量是一项结构选择，其效果应由实验验证。</p>
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/models.py?line=63">基函数构造</a>
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/models.py?line=151">控制点到坐标</a>
+</section>
+
+<section class="section" id="spline-loss" data-title="监督与蒸馏">
+  <div class="section-head"><h2>监督完整曲线，再学习教师的可靠部分</h2></div>
+  <p>标签仍是人工稀疏线插值得到的两条逐列坐标与有效掩码。当前监督损失使用 Smooth L1 比较坐标、斜率、层厚、曲率与粗尺度趋势，<strong>没有重新生成高斯软目标</strong>。</p>
+  <div class="math">L<sub>监督</sub> = L<sub>坐标</sub> + 0.10L<sub>斜率</sub> + 0.15L<sub>层厚</sub> + 0.30L<sub>曲率</sub> + 0.25L<sub>粗尺度</sub><small>坐标项两条线的相对权重为 0.916、1.221，按权重总和归一化；坐标 Smooth L1 的 beta=1 像素。</small></div>
+  <p>斜率项比较预测与标注的一阶差分，曲率项比较两者的二阶差分。它们鼓励形状相符，不是简单把变化压成零。粗尺度项把两条完整曲线平均池化到 12 个区段再比较，<strong>不是直接用 12 个标注高度监督控制点</strong>。相邻差分、三点差分和层厚分别要求对应位置都有效。</p>
+  <!--VIS:spline-geometric-loss-->
+  <p>教师与学生在本方案中使用相同的样条方法、不同骨干；教师冻结，接收与学生完全相同的增强图像。教师坐标越偏离训练标签，门控权重 exp(−误差/8) 越小，减轻错误教师建议的影响。蒸馏同时比较坐标，以及由两条预测曲线派生的平滑区域概率。</p>
+  <div class="math">L<sub>总训练</sub> = L<sub>监督</sub> + 0.424 × min(epoch / 10, 1) × L<sub>蒸馏</sub><br>L<sub>蒸馏</sub> = 带门控的坐标 Smooth L1 + 0.5 × 带门控的区域 Bernoulli KL</div>
+  <!--VIS:spline-distillation-->
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/losses.py?line=34">样条监督</a>
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/losses.py?line=61">蒸馏门控</a>
+</section>
+
+<section class="section" id="spline-training" data-title="训练推理与证据">
+  <div class="section-head"><h2>训练、模型选择和原图推理怎样闭合</h2></div>
+  <p>数据集按固定索引读取原图或裁剪视图，统一到 256²，训练时同步变换坐标与有效掩码。AdamW 的基础学习率为 0.000316046，批量 16、梯度累积 3，使用前期预热与后续余弦调度。教师最多 100 轮，学生最多 80 轮；至少训练 40 轮后，距最佳轮 20 轮无改进可早停。</p>
+  <p>最佳模型按两条线 MAE 相对于固定参考值的平衡分数选择，而不是单看总损失。推理读取 checkpoint 保存的结构配置，重建 80 维、12 控制点模型；得到 256 列坐标后，按原图宽高比例恢复每一列的边界位置，写入 JSON。</p>
+  <div class="note warn"><strong>当前资料能证明什么</strong><p>包内有 train100 蒸馏学生权重，但没有本次 300 张测试结果报告。本页没有运行模型或给三种方法排名。索引中的 train100 复评与训练有重叠；300 张移动清单中有 52 个原图路径也出现在附带 train100 索引里，目前只能确认清单重合，不能直接推断对应权重见过哪些图。需要进一步核实后才能将结果解释为独立测试表现。</p></div>
+  <p>源码保留原 Linux 数据路径、GPU0 约束与 <code>fcntl</code>、<code>/proc</code> 等运行假设；初始化权重、教师训练记录以及状态更新用的 README 未完整随包提供。源码研读会说明这些工程依赖，网站的讲解不等于已完成可直接复跑的训练环境。</p>
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/train.py?line=75">训练主程序</a>
+  <a class="source-link" href="#code/115_样条控制点_参数09/代码/infer.py?line=11">原图推理入口</a>
+</section>

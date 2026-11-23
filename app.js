@@ -1,7 +1,9 @@
 (function(){
 'use strict';
 const DATA=JSON.parse(document.getElementById('project-data').textContent);
-const files=DATA.files;
+let currentMethod=DATA.methods[0],files=DATA.files.filter(f=>f.method===currentMethod.id),sections=[];
+function route(view,target,method=currentMethod.id){return '#'+method+'/'+view+'/'+target}
+function codeHref(path){return route('code',encodeURI(path))}
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let currentFile=null,currentSegment=null,mode='report';
@@ -15,14 +17,30 @@ $('#figure-close').onclick=()=>$('#figure-dialog').close();
 $('#figure-fit').onclick=()=>setFigureScale(($('#figure-stage').clientWidth-32)/figureWidth);
 $('#figure-minus').onclick=()=>setFigureScale(figureScale-.15);
 $('#figure-plus').onclick=()=>setFigureScale(figureScale+.15);
-const sections=$$('.section');
-const reportToc='<a href="#report/intro"><b>00</b>项目概览</a>'+sections.map((s,i)=>'<a href="#report/'+s.id+'"><b>'+String(i+1).padStart(2,'0')+'</b>'+s.dataset.title+'</a>').join('');
-function treeHTML(){const root={};files.forEach(f=>{const parts=f.path.split('/');let node=root;parts.forEach((p,i)=>{if(i===parts.length-1)node[p]=f;else node=node[p]||(node[p]={})})});function walk(obj){return Object.entries(obj).sort((a,b)=>{const ad=!a[1].path,bd=!b[1].path;return ad===bd?a[0].localeCompare(b[0]):ad?-1:1}).map(([name,value])=>value.path?'<a class="tree-file" href="#code/'+encodeURI(value.path)+'" data-file="'+esc(value.path)+'"><span>'+(/\.py$/.test(name)?'PY':'SH')+'</span>'+esc(name)+'</a>':'<details class="tree-folder" open><summary>▱ '+esc(name)+'</summary>'+walk(value)+'</details>').join('')}return '<a id="project-guide-link" class="project-guide-link" href="#code/guide">整体导读与阅读顺序</a><p class="tree-intro">主程序串起数据、模型与损失。先读导读中的主线，再按目录补齐细节。</p><div class="tree-map-label">文件地图</div>'+walk(root)+'<p class="coverage-note">完整核心 .py / .sh 文件。运行产物、权重、缓存和原始样本不属于源码，未嵌入。</p>'}
-function updateCounts(){$('#source-summary').textContent=files.length+' 个文件 · '+files.reduce((n,f)=>n+f.segments.length,0)+' 段讲解';$('#hero-file-count').textContent=files.length}
-function switchMode(next){mode=next;document.body.dataset.mode=mode;if(mode==='report')document.body.classList.remove('reader-wide');$('#report-view').hidden=mode!=='report';$('#code-view').hidden=mode!=='code';$$('.mode-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));$('.side-label').innerHTML=mode==='report'?'阅读目录 <span>CONTENTS</span>':'核心源码 <span>FILE EXPLORER</span>';$('#toc').innerHTML=mode==='report'?reportToc:treeHTML();$('#sidebar').classList.remove('open')}
+function selectMethod(id){
+  currentMethod=DATA.methods.find(m=>m.id===id)||DATA.methods[0];
+  files=DATA.files.filter(f=>f.method===currentMethod.id);
+  $$('[data-report-method]').forEach(el=>el.hidden=el.dataset.reportMethod!==currentMethod.id);
+  $$('[data-guide-method]').forEach(el=>el.hidden=el.dataset.guideMethod!==currentMethod.id);
+  sections=$$('[data-report-method="'+currentMethod.id+'"] .section');
+  $$('.method-tabs button').forEach(b=>{const active=b.dataset.method===currentMethod.id;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active))});
+  $('#current-method-title').textContent=currentMethod.title;$('#current-method-description').textContent=currentMethod.subtitle;
+  document.title=currentMethod.title+' · LayerLab 脂肪层学习手册';updateCounts();
+  document.body.dataset.method=currentMethod.id;
+}
+function reportToc(){
+  const entries=[{id:currentMethod.intro,title:'方法概览'},...sections.filter(s=>s.id!==currentMethod.intro).map(s=>({id:s.id,title:s.dataset.title}))];
+  return entries.map((s,i)=>'<a href="'+route('report',s.id)+'"><b>'+String(i+1).padStart(2,'0')+'</b>'+esc(s.title)+'</a>').join('');
+}
+function treeHTML(){const root={};files.forEach(f=>{const parts=f.path.split('/');let node=root;parts.forEach((p,i)=>{if(i===parts.length-1)node[p]=f;else node=node[p]||(node[p]={})})});function walk(obj){return Object.entries(obj).sort((a,b)=>{const ad=!a[1].path,bd=!b[1].path;return ad===bd?a[0].localeCompare(b[0]):ad?-1:1}).map(([name,value])=>value.path?'<a class="tree-file" href="'+codeHref(value.path)+'" data-file="'+esc(value.path)+'"><span>'+(/\.py$/.test(name)?'PY':/\.json$/.test(name)?'JSON':'SH')+'</span>'+esc(name)+'</a>':'<details class="tree-folder" open><summary>▱ '+esc(name)+'</summary>'+walk(value)+'</details>').join('')}return '<a id="project-guide-link" class="project-guide-link" href="'+codeHref('guide')+'">整体导读与阅读顺序</a><p class="tree-intro">主程序串起数据、模型与损失。先读导读中的主线，再按目录补齐细节。</p><div class="tree-map-label">文件地图</div>'+walk(root)+'<p class="coverage-note">完整源码与配置；样本索引仅在导读中解释结构，原始样本、权重和运行产物未嵌入。</p>'}
+function updateCounts(){$('#source-summary').textContent=files.length+' 个文件 · '+files.reduce((n,f)=>n+f.segments.length,0)+' 段讲解';$('#hero-file-count').textContent=DATA.files.filter(f=>f.method==='heatmap').length}
+function switchMode(next){mode=next;document.body.dataset.mode=mode;if(mode==='report')document.body.classList.remove('reader-wide');$('#report-view').hidden=mode!=='report';$('#code-view').hidden=mode!=='code';$$('.mode-tabs button').forEach(b=>{b.classList.toggle('active',b.dataset.mode===mode);b.setAttribute('aria-pressed',String(b.dataset.mode===mode))});$('.side-label').innerHTML=mode==='report'?'阅读目录 <span>CONTENTS</span>':'核心源码 <span>FILE EXPLORER</span>';$('#toc').innerHTML=mode==='report'?reportToc():treeHTML();$('#sidebar').classList.remove('open')}
 /*__READER__*/
 function navigate(){
-  const hash=decodeURI(location.hash.slice(1)||'report/intro');
+  let hash=decodeURI(location.hash.slice(1)||'heatmap/report/intro');
+  const known=DATA.methods.find(m=>hash.startsWith(m.id+'/'));
+  if(known){selectMethod(known.id);hash=hash.slice(known.id.length+1)}
+  else selectMethod('heatmap'); // Keep existing report/code URLs working.
   if(hash.startsWith('code/')){
     switchMode('code');const [path,query='']=hash.slice(5).split('?');
     if(path==='guide'||!path){showProjectGuide();return}
@@ -32,16 +50,18 @@ function navigate(){
     openSegment(found>=0?found:0,{updateURL:false,reveal:false});
     if(line)requestAnimationFrame(revealWorkbench);else window.scrollTo(0,0);
   }else{
-    switchMode('report');const id=hash.replace(/^report\//,'');
-    requestAnimationFrame(()=>document.getElementById(id)?.scrollIntoView({behavior:'instant',block:'start'}));
+    switchMode('report');const id=hash.replace(/^report\//,'')||currentMethod.intro;
+    const target=document.querySelector('[data-report-method="'+currentMethod.id+'"] [id="'+CSS.escape(id)+'"]')||document.getElementById(currentMethod.intro);
+    requestAnimationFrame(()=>target?.scrollIntoView({behavior:'instant',block:'start'}));
   }
 }
 function go(hash){if(location.hash===hash)navigate();else location.hash=hash}
-$$('[data-mode]').forEach(b=>b.onclick=()=>go(b.dataset.mode==='report'?'#report/intro':'#code/guide'));
+$$('.mode-tabs [data-mode]').forEach(b=>b.onclick=()=>go(route(b.dataset.mode,b.dataset.mode==='report'?currentMethod.intro:'guide')));
+$$('.method-tabs [data-method]').forEach(b=>b.onclick=()=>{const method=DATA.methods.find(m=>m.id===b.dataset.method);go(route(mode,mode==='report'?method.intro:'guide',method.id))});
 window.addEventListener('hashchange',()=>{$$('dialog[open]').forEach(dialog=>dialog.close());navigate()});
 $('#menu-toggle').onclick=()=>$('#sidebar').classList.toggle('open');
-function search(){const q=$('#search-input').value.trim().toLowerCase();if(!q){$('#search-results').innerHTML='<div class="empty-search">试试 soft_argmax、valid、数据泄漏、AdamW 或任意源码参数。<br>同时搜索报告、原始代码与逐段解释。</div>';return}const results=[];if($('#reader-guide').textContent.toLowerCase().includes(q))results.push({title:'全局导读与阅读顺序',sub:'源码研读 · 文件地图',hash:'#code/guide'});sections.forEach(s=>{if((s.textContent+s.dataset.title).toLowerCase().includes(q))results.push({title:s.dataset.title,sub:'项目汇报 · '+s.id,hash:'#report/'+s.id})});files.forEach(f=>{if((f.path+' '+f.overview+' '+JSON.stringify(f.components)+' '+JSON.stringify(f.readingGuide)).toLowerCase().includes(q))results.push({title:f.title,sub:f.path,hash:'#code/'+f.path});f.segments.forEach(s=>{if((JSON.stringify(s)+' '+f.lines.slice(s.start-1,s.end).join('\n')).toLowerCase().includes(q))results.push({title:s.title,sub:f.path+' · L'+s.start+'–'+s.end,hash:'#code/'+f.path+'?line='+s.start})})});$('#search-results').innerHTML=results.length?results.slice(0,70).map((r,i)=>'<button class="search-result" data-result="'+i+'">'+esc(r.title)+'<small>'+esc(r.sub)+'</small></button>').join(''):'<div class="empty-search">没有匹配结果，试试函数名或更短的关键词。</div>';$$('[data-result]').forEach(b=>b.onclick=()=>{$('#search-dialog').close();go(results[Number(b.dataset.result)].hash)})}
-function openSearch(){$('#search-dialog').showModal();search();$('#search-input').focus()}
+function search(){const q=$('#search-input').value.trim().toLowerCase();if(!q){$('#search-results').innerHTML='<div class="empty-search">试试 soft_argmax、valid、数据泄漏、AdamW 或任意源码参数。<br>同时搜索报告、原始代码与逐段解释。</div>';return}const results=[];if(document.querySelector('[data-guide-method="'+currentMethod.id+'"]').textContent.toLowerCase().includes(q))results.push({title:'全局导读与阅读顺序',sub:'源码研读 · 文件地图',hash:codeHref('guide')});sections.forEach(s=>{if((s.textContent+s.dataset.title).toLowerCase().includes(q))results.push({title:s.dataset.title,sub:currentMethod.title+' · 项目汇报',hash:route('report',s.id)})});files.forEach(f=>{if((f.path+' '+f.overview+' '+JSON.stringify(f.components)+' '+JSON.stringify(f.readingGuide)).toLowerCase().includes(q))results.push({title:f.title,sub:f.path,hash:codeHref(f.path)});f.segments.forEach(s=>{if((JSON.stringify(s)+' '+f.lines.slice(s.start-1,s.end).join('\n')).toLowerCase().includes(q))results.push({title:s.title,sub:f.path+' · L'+s.start+'–'+s.end,hash:codeHref(f.path)+'?line='+s.start})})});$('#search-results').innerHTML=results.length?results.slice(0,70).map((r,i)=>'<button class="search-result" data-result="'+i+'">'+esc(r.title)+'<small>'+esc(r.sub)+'</small></button>').join(''):'<div class="empty-search">没有匹配结果，试试函数名或更短的关键词。</div>';$$('[data-result]').forEach(b=>b.onclick=()=>{$('#search-dialog').close();go(results[Number(b.dataset.result)].hash)})}
+function openSearch(){$('#search-input').placeholder='搜索'+currentMethod.title+'的文件、函数、原理…';$('#search-dialog').showModal();search();$('#search-input').focus()}
 $('#search-open').onclick=openSearch;$('#search-close').onclick=()=>$('#search-dialog').close();$('#search-input').oninput=search;
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){const opened=$$('dialog[open]').at(-1);if(opened){e.preventDefault();opened.close()}return}if(e.key==='/'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();openSearch()}});
 function download(text,name,type){const a=document.createElement('a'),url=URL.createObjectURL(new Blob([text],{type}));a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
@@ -72,6 +92,8 @@ $('#interp-chart').innerHTML=svg;
 }
 $('#interp-column').oninput=interpolationDemo;interpolationDemo();
 
-$('#temp').oninput=softDemo;$('#peak').oninput=softDemo;softDemo();updateCounts();navigate();
-let scrollPending=false;window.addEventListener('scroll',()=>{if(mode!=='report'||scrollPending)return;scrollPending=true;requestAnimationFrame(()=>{let active='intro';sections.forEach(s=>{if(s.getBoundingClientRect().top<180)active=s.id});$$('#toc a').forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#report/'+active));scrollPending=false})},{passive:true});
+$('#temp').oninput=softDemo;$('#peak').oninput=softDemo;softDemo();
+function syncHeaderHeight(){document.documentElement.style.setProperty('--app-header',$('.header').getBoundingClientRect().height+'px')}
+new ResizeObserver(syncHeaderHeight).observe($('.header'));syncHeaderHeight();navigate();
+let scrollPending=false;window.addEventListener('scroll',()=>{if(mode!=='report'||scrollPending)return;scrollPending=true;requestAnimationFrame(()=>{let active=currentMethod.intro;sections.forEach(s=>{if(s.getBoundingClientRect().top<$('.header').getBoundingClientRect().height+40)active=s.id});$$('#toc a').forEach(a=>a.classList.toggle('active',a.getAttribute('href')===route('report',active)));scrollPending=false})},{passive:true});
 })();

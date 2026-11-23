@@ -1,8 +1,8 @@
 {
-  "files": 19,
-  "segments": 114,
-  "source_lines": 2572,
-  "html_bytes": 2833748,
+  "files": 47,
+  "segments": 316,
+  "source_lines": 5905,
+  "html_bytes": 4729373,
   "hashes": {
     "LineDet/dataset/__init__.py": "bae4c91e4ec7411341a0714ce1530c11c6f03a490490e0f43d82944554a35425",
     "LineDet/dataset/dataset.py": "e8f4ecfc579411b3dd38ef7ce57663de1479a57d3f42c1d86b1edcff190920a5",
@@ -22,13 +22,59 @@
     "main.py": "8023e3de61ce109132a4b44aaed8b741a33cdc5d556460016b486a03ea11361e",
     "run_dual_split.sh": "7996e7e751ed86c8de164e9bbafc9ea547c2f87f1407da2a5a648b535bcc27ba",
     "train减脂.sh": "8ea3f48f2e20a739b5ed0f54bfbbae73b9343fae9fad146c335aee6f73a223fa",
-    "summarize_comparison.py": "464799b1bcdb0baa55f03912d7e4605d381ed56791beed39d5165927a7751dce"
+    "summarize_comparison.py": "464799b1bcdb0baa55f03912d7e4605d381ed56791beed39d5165927a7751dce",
+    "072_区域调优/代码/config.json": "837cb173ee10d440180123708032693c107685e4ffe7197b0c61b913e9565f59",
+    "072_区域调优/代码/data.py": "a853bcf4b32effeab16e6928e6b16d60b3d60d6ac20acad96bc541341994e5b7",
+    "072_区域调优/代码/legacy_crops.py": "3a2e27d4b88c3359f2563149fa8a5fce46664ed3be14b18c4756c03eb262a10a",
+    "072_区域调优/代码/models.py": "ef30aa1bd29f6700f711c947f9b6f174a9ea1bed42cacfb76ec1adbd325e8ce9",
+    "072_区域调优/代码/losses.py": "bc47d5bf8ce4bd59dc80efdef87312e76768a9bd94f1d32c0c2c16a18cfa74cf",
+    "072_区域调优/代码/train.py": "0ac6a4af455a603f8df5f491bc7ac11248946b342257ad5ecc7b1b236dcb31b2",
+    "072_区域调优/代码/infer.py": "1d24f2562a593953ee924ffb41a3fee89a50e1a465a4b5ed622fcf6ef80ce8d3",
+    "072_区域调优/代码/run.py": "29cf5459d80bb5e6e1076e0b1886e26900dafdc64cbf4da55b480819edd6285d",
+    "072_区域调优/代码/reporting.py": "dd9e4f6a1809dba02029771b6b9dafd517e45f9ef588aad8bde81fecdff11403",
+    "072_区域调优/代码/批量训练.py": "7225a0e900900dd8581a0eab1dc3ef987dad4438d3a84b7330b4655621b2c13e",
+    "103_距离场边界_参数07/代码/config.json": "5af3a3790bb9ee20ece3ae4d779c3f6b8bb7ff59897d83aeaaae04c3ec7f0a6a",
+    "103_距离场边界_参数07/代码/data.py": "a853bcf4b32effeab16e6928e6b16d60b3d60d6ac20acad96bc541341994e5b7",
+    "103_距离场边界_参数07/代码/legacy_crops.py": "3a2e27d4b88c3359f2563149fa8a5fce46664ed3be14b18c4756c03eb262a10a",
+    "103_距离场边界_参数07/代码/models.py": "20f745713090ec8339853d72df46959fb1c4b85afb360017cf0819ac8e6bd048",
+    "103_距离场边界_参数07/代码/losses.py": "1d2097f086bd3980f5d0259b64ba5127c1b8c50681a00be738a13498e89b1721",
+    "103_距离场边界_参数07/代码/train.py": "4dbbe28e9a5047bcbc50b6ca6ab8d466971751fb766588f167d0c66f4a42c7e6",
+    "103_距离场边界_参数07/代码/infer.py": "b5f49da9d28762a4dbe20ed5214cd07b53d7e3b8331e9441e885e5272f50040b",
+    "103_距离场边界_参数07/代码/run.py": "29cf5459d80bb5e6e1076e0b1886e26900dafdc64cbf4da55b480819edd6285d",
+    "103_距离场边界_参数07/代码/reporting.py": "54f6233e9439f7aa5472a527a6ac2cfe8aa9e1a04894f149f5e37ea039ae7f94",
+    "115_样条控制点_参数09/代码/config.json": "328da580fef3054f4b73a31d902982ea159c7d6914d92e2f629a4a38763b2f36",
+    "115_样条控制点_参数09/代码/data.py": "a853bcf4b32effeab16e6928e6b16d60b3d60d6ac20acad96bc541341994e5b7",
+    "115_样条控制点_参数09/代码/legacy_crops.py": "3a2e27d4b88c3359f2563149fa8a5fce46664ed3be14b18c4756c03eb262a10a",
+    "115_样条控制点_参数09/代码/models.py": "ee66f08addc1136017e97718e40b50446508f0fc29021084e2d8741d9758ea0f",
+    "115_样条控制点_参数09/代码/losses.py": "1d2097f086bd3980f5d0259b64ba5127c1b8c50681a00be738a13498e89b1721",
+    "115_样条控制点_参数09/代码/train.py": "4dbbe28e9a5047bcbc50b6ca6ab8d466971751fb766588f167d0c66f4a42c7e6",
+    "115_样条控制点_参数09/代码/infer.py": "b5f49da9d28762a4dbe20ed5214cd07b53d7e3b8331e9441e885e5272f50040b",
+    "115_样条控制点_参数09/代码/run.py": "29cf5459d80bb5e6e1076e0b1886e26900dafdc64cbf4da55b480819edd6285d",
+    "115_样条控制点_参数09/代码/reporting.py": "54f6233e9439f7aa5472a527a6ac2cfe8aa9e1a04894f149f5e37ea039ae7f94"
   },
-  "definitions": 93,
-  "parameter_entries": 349,
-  "variable_entries": 595,
-  "flowcharts": 53,
-  "concept_illustrations": 29,
-  "illustrated_segments": 82,
-  "core_segments": 56
+  "definitions": 222,
+  "parameter_entries": 603,
+  "variable_entries": 1305,
+  "flowcharts": 105,
+  "concept_illustrations": 52,
+  "illustrated_segments": 149,
+  "methods": {
+    "heatmap": {
+      "files": 19,
+      "segments": 114
+    },
+    "regions": {
+      "files": 10,
+      "segments": 63
+    },
+    "distance": {
+      "files": 9,
+      "segments": 70
+    },
+    "spline": {
+      "files": 9,
+      "segments": 69
+    }
+  },
+  "core_segments": 158
 }

@@ -9,6 +9,7 @@ SNAPSHOTS = ROOT / "source"
 OUT.mkdir(exist_ok=True)
 SNAPSHOTS.mkdir(exist_ok=True)
 files = []
+methods = json.loads((ROOT / "methods.json").read_text(encoding="utf-8"))
 
 def validate_flow(flow, context):
     if not flow:
@@ -33,14 +34,20 @@ def source_inventory(tree, segments):
                 signature = ("class " + node.name + "(" + ", ".join(ast.unparse(b) for b in node.bases) + ")") if is_class else node.name + "(" + ast.unparse(node.args) + ")"
                 definitions.append({"name":node.name, "scope":scope, "signature":signature, "line":node.lineno, "end":node.end_lineno, "segmentStart":owner["start"], "kind":"class" if is_class else "function"})
                 walk(node.body, (scope + "." if scope else "") + node.name)
+            else:
+                # Definitions can live inside try/if/with blocks as well.
+                walk(ast.iter_child_nodes(node), scope)
     walk(tree.body)
     return definitions
 
-for part in ("data", "model", "training"):
-    items = json.loads((ROOT / f"content-{part}.json").read_text(encoding="utf-8-sig"))
+for method in methods:
+    items = []
+    for part in method["parts"]:
+        items.extend(json.loads((ROOT / part).read_text(encoding="utf-8-sig")))
     for item in items:
         relative = Path(item["path"])
-        original = PROJECT / relative
+        original = PROJECT / method["source_root"] / relative
+        item["method"] = method["id"]
         snapshot = SNAPSHOTS / relative
         # On a stand-alone checkout, use committed snapshots.
         if original.is_file():
@@ -98,6 +105,8 @@ for item in files:
                 base = package[:len(package)-node.level+1] if node.level else []
                 module = base + (node.module.split(".") if node.module else [])
                 candidates = ["/".join(module) + ".py", "/".join(module + ["__init__.py"])]
+                if not node.level:
+                    candidates += ["/".join(package + module) + ".py"]
                 for candidate in candidates:
                     if candidate != item["path"] and candidate in {f["path"] for f in files} and candidate not in dependencies:
                         dependencies.append(candidate)
@@ -138,7 +147,13 @@ for path, line in re.findall(r'href="#code/([^"?]+)(?:\?line=(\d+))?"', guide):
     assert file, ("guide links to unknown file", path)
     if line:
         assert any(s["start"] <= int(line) <= s["end"] for s in file["segments"]), (path, line)
-visuals = json.loads((ROOT / "reader-visuals.json").read_text(encoding="utf-8-sig"))
+visuals = []
+for method in methods:
+    additions = json.loads((ROOT / method["visuals"]).read_text(encoding="utf-8-sig"))
+    for visual in additions:
+        visual["method"] = method["id"]
+    visuals.extend(additions)
+visuals.extend(json.loads((ROOT / "methods/shared-visuals.json").read_text(encoding="utf-8")))
 assert len({v["id"] for v in visuals}) == len(visuals)
 for visual in visuals:
     svg = (ROOT / "figures" / (visual["id"] + ".svg")).read_bytes()
@@ -148,13 +163,51 @@ for visual in visuals:
     visual.update(uri="data:image/svg+xml;base64," + base64.b64encode(svg).decode(), width=float(box[2]), height=float(box[3]))
     for link in visual["links"]:
         file = next(f for f in files if f["path"] == link["path"])
+        if "contains" in link:
+            matches = [i + 1 for i, line in enumerate(file["lines"]) if link["contains"] in line]
+            assert len(matches) == 1, (visual["id"], link, matches)
+            link["start"] = next(s["start"] for s in file["segments"] if s["start"] <= matches[0] <= s["end"])
         segment = next(s for s in file["segments"] if s["start"] == link["start"])
         segment.setdefault("visuals", []).append(visual["id"])
-manifest = {"created":"2026-11-14","updated":"2026-11-22","reader_version":7,"files":files,"visuals":visuals}
+def embed_concept(match):
+    visual = next(v for v in visuals if v["id"] == match.group(1))
+    esc = html_module.escape
+    return ('<figure class="concept-figure"><div class="concept-heading"><strong>' + esc(visual["title"]) +
+            '</strong><button type="button" data-visual-zoom="' + visual["id"] + '">放大图解</button></div>' +
+            '<button class="concept-image" data-visual-zoom="' + visual["id"] + '" aria-label="放大：' + esc(visual["title"]) +
+            '"><img src="' + visual["uri"] + '" alt="' + esc(visual["alt"]) + '" width="' + str(visual["width"]) +
+            '" height="' + str(visual["height"]) + '" loading="lazy"></button><figcaption>' + esc(visual["caption"]) + '</figcaption></figure>')
+
+def method_document(text, method):
+    for path, line in re.findall(r'href="#code/([^"?]+)(?:\?line=(\d+))?"', text):
+        if path == "guide":
+            continue
+        file = next((f for f in files if f["path"] == path and f["method"] == method["id"]), None)
+        assert file, ("invalid method source link", method["id"], path)
+        if line:
+            assert any(s["start"] <= int(line) <= s["end"] for s in file["segments"]), (path, line)
+    text = text.replace('href="#code/', 'href="#' + method["id"] + '/code/')
+    text = text.replace('href="#report/', 'href="#' + method["id"] + '/report/')
+    text = re.sub(r"<!--VIS:([a-z0-9-]+)-->", embed_concept, text)
+    assert "<!--VIS:" not in text
+    return text
+
+reports, guides = [], []
+for method in methods:
+    body = report if method["id"] == "heatmap" else (ROOT / method["report"]).read_text(encoding="utf-8-sig")
+    intro = method["intro"]
+    assert re.search(r'id=[\"\']' + re.escape(intro) + r'[\"\']', body), ("missing intro", intro)
+    reports.append('<div class="method-report" data-report-method="' + method["id"] + '" hidden>' + method_document(body, method) + '</div>')
+    body = guide if method["id"] == "heatmap" else (ROOT / method["guide"]).read_text(encoding="utf-8-sig")
+    guides.append('<div class="method-guide" data-guide-method="' + method["id"] + '" hidden>' + method_document(body, method) + '</div>')
+report, guide = "\n".join(reports), "\n".join(guides)
+public_methods = [{k:m[k] for k in ("id","title","label","subtitle","intro")} for m in methods]
+manifest = {"created":"2026-11-14","updated":"2026-11-23","reader_version":8,"methods":public_methods,"files":files,"visuals":visuals}
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {
-    "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "reader.css").read_text(encoding="utf-8-sig"),
+    "STYLE":(ROOT / "style.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "reader.css").read_text(encoding="utf-8-sig") + "\n" + (ROOT / "methods.css").read_text(encoding="utf-8-sig"),
+    "METHOD_TABS":"".join('<button data-method="' + m["id"] + '" aria-pressed="false">' + html_module.escape(m["label"]) + '</button>' for m in methods),
     "REPORT":report,
     "GUIDE":guide,
     "DATA":payload,
@@ -167,6 +220,7 @@ assert "/*__" not in html
 summary = {"files":len(files),"segments":sum(len(f["segments"]) for f in files),"source_lines":sum(len(f["lines"]) for f in files),"html_bytes":len(html.encode()),"hashes":{f["path"]:f["sha256"] for f in files}}
 summary.update(definitions=sum(len(f.get("definitions",[])) for f in files), parameter_entries=sum(len(s["parameters"]) for f in files for s in f["segments"]), variable_entries=sum(len(s["variables"]) for f in files for s in f["segments"]), flowcharts=sum(bool(f.get("pipeline")) + sum(bool(s.get("flow")) for s in f["segments"]) for f in files))
 summary.update(concept_illustrations=len(visuals), illustrated_segments=sum(bool(s.get("visuals")) for f in files for s in f["segments"]))
+summary.update(methods={m["id"]:{"files":sum(f["method"]==m["id"] for f in files),"segments":sum(len(f["segments"]) for f in files if f["method"]==m["id"])} for m in methods})
 summary.update(core_segments=sum(s["core"] for f in files for s in f["segments"]))
 (ROOT / "build-manifest.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
 print(json.dumps({k:v for k,v in summary.items() if k!="hashes"},ensure_ascii=False))

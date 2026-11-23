@@ -1,0 +1,43 @@
+/* Four methods, two reading modes each. Scoped adjustments preserve the compact reader. */
+:root{--app-header:140px}
+html{scroll-padding-top:calc(var(--app-header) + 14px)}
+.header{height:auto;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px 26px;padding:13px 26px 0}
+.brand{font-size:22px}.brand small{letter-spacing:.5px}
+.method-tabs{display:flex;justify-content:center;gap:5px;min-width:0}
+.method-tabs button{padding:9px 19px;border-color:transparent;font-size:15px;color:#537264;white-space:nowrap}
+.method-tabs button.active{background:#147c6a;color:white;border-color:#147c6a;font-weight:600}
+.method-tabs button:hover:not(.active){background:#e6eee8}
+.method-subbar{grid-column:1/-1;border-top:1px solid #dde6dd;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:8px 0}
+.method-caption{display:flex;align-items:baseline;gap:14px;min-width:0}.method-caption strong{font-size:14px;color:#245943}.method-caption span{font-size:13px;color:#6c8175}
+.method-subbar .mode-tabs{padding:3px}.method-subbar .mode-tabs button{font-size:13px;padding:5px 18px}
+.sidebar{top:var(--app-header)}
+.reader-workbench{height:calc(100dvh - var(--app-header) - 20px);scroll-margin-top:calc(var(--app-header) + 10px)}
+.method-report:not([data-report-method="heatmap"]){max-width:1120px;margin:0 auto}
+.method-report:not([data-report-method="heatmap"])>.section:first-child{padding-top:0}
+.method-report:not([data-report-method="heatmap"]) h1{font-size:36px;line-height:1.4;letter-spacing:-.7px}
+.method-report:not([data-report-method="heatmap"]) .section{padding-bottom:29px}
+.method-report:not([data-report-method="heatmap"]) .section p,.method-report:not([data-report-method="heatmap"]) .section li{font-size:15px;line-height:1.9}
+.method-report:not([data-report-method="heatmap"]) .section h2{font-size:25px;margin:22px 0 14px}
+.method-report:not([data-report-method="heatmap"]) .math{font-size:17px;white-space:normal;overflow-wrap:anywhere}
+.method-report:not([data-report-method="heatmap"]) .concept-figure{max-width:960px;margin:24px auto}
+.method-report:not([data-report-method="heatmap"]) table{font-size:14px}
+.method-report:not([data-report-method="heatmap"]) th,.method-report:not([data-report-method="heatmap"]) td{overflow-wrap:anywhere}
+.method-guide{max-width:1160px;margin:auto}
+.method-guide .guide-lead{max-width:900px}
+.method-guide .reading-stations a,.method-guide .file-map-grid a{overflow-wrap:anywhere}
+.file-guide .reader-flow-canvas svg{width:100%;min-width:0;height:auto}
+.file-details:not([open])>:not(summary),.definition-index:not([open])>:not(summary),.control-flow-details:not([open])>:not(summary){display:none}
+.reader-table-wrap{position:relative}
+@media(max-width:1100px){
+ .header{padding-left:19px;padding-right:19px;column-gap:15px}.method-tabs button{padding:8px 12px;font-size:14px}.method-caption span{display:none}
+}
+@media(max-width:700px){
+ .header{grid-template-columns:1fr auto;padding:9px 12px 0;gap:7px 10px}.brand{font-size:18px}.brand small{display:none}.brand-mark{width:31px;height:33px;font-size:27px;line-height:30px}
+ .header-tools{grid-column:2;grid-row:1}.method-tabs{grid-column:1/-1;grid-row:2;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+ .method-tabs button{padding:6px 4px;font-size:13px;border:1px solid #dce5dc;border-radius:5px}
+ .method-subbar{grid-row:3;padding:6px 0;gap:7px}.method-caption strong{font-size:12px}.method-subbar .mode-tabs button{font-size:12px;padding:4px 11px}
+ .reader-workbench{height:calc(100dvh - var(--app-header) - 16px);min-height:570px}
+ .method-report:not([data-report-method="heatmap"]) h1{font-size:28px}.method-report:not([data-report-method="heatmap"]) .section h2{font-size:23px}
+ .method-report:not([data-report-method="heatmap"]) .section p,.method-report:not([data-report-method="heatmap"]) .section li{font-size:14px}
+}
+@media print{.method-report[hidden],.method-guide[hidden]{display:none!important}.method-tabs,.method-subbar{display:none!important}}

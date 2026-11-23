@@ -1,0 +1,29 @@
+<section class="project-reading-guide" id="spline-reader-intro">
+  <span class="eyebrow">SPLINE / 样条控制点法源码导读</span>
+  <h1>顺着“特征、查询、控制点、曲线”读。</h1>
+  <p class="guide-lead">这套代码从固定数据索引取得样本，以四尺度特征支撑 12 个查询，生成上下两组有序控制高度，再用固定三次 B 样条展开成逐列边界。先把这条链路读通，再补训练组织与工程工具。</p>
+  <div class="guide-opening"><h2>文件地图中的模块怎样合作</h2><p><strong>data.py 与 legacy_crops.py</strong>把图像和稀疏标注变成尺寸一致的训练样本；<strong>models.py</strong>完成四尺度融合、交叉注意力、控制高度和样条曲线；<strong>losses.py</strong>监督曲线并比较教师学生；<strong>train.py</strong>把数据、模型、损失和优化器闭合成训练循环。</p><p><strong>config.json</strong>给出当前 80 维、12 个控制点及损失权重；<strong>infer.py</strong>把模型坐标恢复到原图；<strong>run.py</strong>启动训练子进程并处理停止；<strong>reporting.py</strong>负责状态与报告文件。模型和损失文件还保留其他方法的分支，看到它们不代表当前样条方案会执行。</p></div>
+  <aside class="guide-core-legend"><strong>★ 先读带星号的代码段</strong><p>当前样条法的数据处理、特征融合、查询读取、控制点生成、监督、蒸馏和参数更新标星；导入、日志、文件保存、备用方法与实验记录不标星。星号表示阅读主线，具体实现的限制仍在各段解析中说明。</p></aside>
+  <div class="guide-reading-rule"><strong>先认出五种数据</strong><span>图像 <code>[B,1,256,256]</code></span><span>标注与掩码 <code>[B,2,256]</code></span><span>图像记忆 <code>[B,1024,80]</code></span><span>控制高度 <code>[B,2,12]</code></span><span>输出曲线 <code>[B,2,256]</code></span><p>归一化控制高度和曲线位于 0～1；最后乘 255 才是输入图像的像素高度。不要把控制点数、通道数和输出列数混为一谈。</p></div>
+</section>
+<section class="guide-order" id="spline-reader-order">
+  <div class="guide-section-head"><h2>建议阅读顺序</h2><p>先抓模型独有的部分，再从样本到训练闭环补齐全链路。</p></div>
+  <ol class="reading-stations">
+    <li><span class="station-number">1</span><div><h3>确认当前方案配置</h3><p>看 width=80、controls=12，以及哪些字段真正被训练器读取。</p><a href="#code/115_样条控制点_参数09/代码/config.json?line=33">config.json · 结构与选择规则</a></div></li>
+    <li><span class="station-number">2</span><div><h3>一口气跟完模型前向</h3><p>图像归一化、四级融合、空间记忆、查询读取、控制点和最终像素坐标。</p><a href="#code/115_样条控制点_参数09/代码/models.py?line=128">models.py · 完整前向</a></div></li>
+    <li><span class="station-number">3</span><div><h3>理解样条如何生成曲线</h3><p>把三段间隔与两条有序控制线对应起来，再理解 basis 的非负权重、局部作用和矩阵乘法。</p><a href="#code/115_样条控制点_参数09/代码/models.py?line=151">控制点到曲线</a><a href="#code/115_样条控制点_参数09/代码/models.py?line=63">固定基函数</a></div></li>
+    <li><span class="station-number">4</span><div><h3>确认每个训练答案怎样产生</h3><p>稀疏点插值、固定裁剪视图、原图坐标缩放、增强及有效掩码。</p><a href="#code/115_样条控制点_参数09/代码/data.py?line=74">data.py · 标签与样本</a><a href="#code/115_样条控制点_参数09/代码/legacy_crops.py?line=5">三种几何变换</a></div></li>
+    <li><span class="station-number">5</span><div><h3>读懂损失究竟比较什么</h3><p>坐标、斜率、厚度、曲率、粗尺度的对象不同；再看教师置信门控与区域蒸馏。</p><a href="#code/115_样条控制点_参数09/代码/losses.py?line=14">监督损失</a><a href="#code/115_样条控制点_参数09/代码/losses.py?line=61">蒸馏损失</a></div></li>
+    <li><span class="station-number">6</span><div><h3>闭合训练并回到原图</h3><p>跟踪梯度累积、调度、指标与最佳权重，再看推理坐标如何映射到原图列。</p><a href="#code/115_样条控制点_参数09/代码/train.py?line=75">train.py · 训练闭环</a><a href="#code/115_样条控制点_参数09/代码/infer.py?line=11">infer.py · 原图输出</a></div></li>
+  </ol>
+</section>
+<section class="guide-map" id="spline-reader-map">
+  <div class="guide-section-head"><h2>9 个文件，放回各自职责</h2><p>完整原始 Python 源码与配置按所给目录保留；数据索引只解释结构与用途，不嵌入样本路径清单、原始图像或模型权重。</p></div>
+  <div class="file-map-grid">
+    <article><span class="map-category">预测结构</span><h3>图像怎样变成曲线</h3><a href="#code/115_样条控制点_参数09/代码/models.py">models.py <small>四尺度融合、查询、控制点、样条和备用方法</small></a><a href="#code/115_样条控制点_参数09/代码/losses.py">losses.py <small>监督几何与带门控蒸馏</small></a><a href="#code/115_样条控制点_参数09/代码/config.json">config.json <small>实际方法、结构、权重和训练参数</small></a></article>
+    <article><span class="map-category">数据与标签</span><h3>图像、边界和掩码怎样一起变</h3><a href="#code/115_样条控制点_参数09/代码/data.py">data.py <small>索引读取、标注插值、视图缩放和增强</small></a><a href="#code/115_样条控制点_参数09/代码/legacy_crops.py">legacy_crops.py <small>裁底拉伸、压缩补顶、裁顶拉伸</small></a></article>
+    <article><span class="map-category">训练与推理</span><h3>学习、评估与使用模型</h3><a href="#code/115_样条控制点_参数09/代码/train.py">train.py <small>教师学生、梯度累积、指标、续训和最佳模型</small></a><a href="#code/115_样条控制点_参数09/代码/infer.py">infer.py <small>加载权重并恢复原图逐列坐标</small></a></article>
+    <article><span class="map-category">工程支撑</span><h3>启动任务和记录状态</h3><a href="#code/115_样条控制点_参数09/代码/run.py">run.py <small>子进程、临时目录、日志和停止信号</small></a><a href="#code/115_样条控制点_参数09/代码/reporting.py">reporting.py <small>状态 JSON、文件命名及 README 汇总</small></a></article>
+  </div>
+</section>
+<section class="guide-howto" id="spline-reader-howto"><h2>左侧看源码，右侧跟变化</h2><p>选择一个代码段，右侧会同步显示作用原理、图解、执行步骤、全部入参、重要变量及语法。步骤中的行号可定位到左侧；长代码自动换行，图解可放大。工程段与备用分支保留完整解析，第一遍可沿星号主线读。</p><a class="primary" href="#code/115_样条控制点_参数09/代码/models.py?line=146">从查询读取图像开始</a></section>

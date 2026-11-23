@@ -6,3 +6,10 @@ build-training-content.py
 collect-evidence.py
 qa.cjs
 qa-*.cjs
+methods/*/make*.py
+methods/*/generate*.py
+methods/*/*.py
+methods/*/*-content.json
+methods/*/shared-tools.json
+methods/*/qa/
+methods/*/render_visuals.cjs
