@@ -47,16 +47,56 @@
 </section>
 
 <section class="section" id="regions-head" data-title="特征怎样变成区域图" data-toc-number="04" data-phase="predict">
-  <div class="paper-section-heading"><span class="paper-step">04</span><div><div class="paper-kicker">预测路线 · 生成区域概率</div><h2>网络输出的两张区域图，各自代表什么？</h2></div></div>
-  <p class="paper-answer"><strong>第一张表示“位于上边界下方”的概率，第二张表示“位于下边界下方”的概率。</strong>这里的上、下边界分别是真皮层下界、脂肪层下界。</p>
-  <div class="paper-subsection"><h3>4.1 先明确输出含义，再看怎样计算</h3><div class="paper-figure-block"><p class="paper-figure-question"><strong>沿图像从上往下读：</strong>上方、两条线之间、两条线下方，分别应怎样填色？</p><!--VIS:regions-paper-meaning--><div class="paper-readout"><p><strong>两条线以上：</strong>两张图都接近 0。<strong>两条线之间：</strong>第一张接近 1，第二张接近 0。<strong>两条线以下：</strong>两张图都接近 1。</p><p>因此两张图是包含关系。第二张的“下方区域”包含在第一张里面；同一像素可以在两张图里同时接近 1。</p></div></div></div>
-  <div class="paper-subsection"><h3>4.2 用预测头把特征变成这两个概率</h3><p>给 64 通道融合特征附加两张位置图：一张标记从上到下的相对位置，一张标记从左到右的相对位置。这里按通道拼接，增加两个位置通道，于是输入变成 <strong>66×64×64</strong>。预测头先用 3×3 卷积、GroupNorm、SiLU 加工回 64 通道，再用 1×1 卷积输出两个分数。</p>
-  <div class="paper-figure-block"><p class="paper-figure-question"><strong>这张图看数值怎样变：</strong>64 个特征通道怎样变成两个分数；两个分数又怎样保证区域的包含关系。</p><!--VIS:regions-paper-head--><div class="paper-readout"><p><strong>先得两个分数：</strong>最后的 1×1 卷积有两组可学习权重，在每个位置把 64 个特征组合成两个数。分数本身尚不是概率。</p><p><strong>再得两个概率：</strong>第一个分数经 sigmoid 得到上界下方概率；第二个分数经 sigmoid 后，再乘前一个概率，得到下界下方概率。</p></div></div>
-  <div class="paper-formula">R<sub>上</sub> = sigmoid(z₁)<br>R<sub>下</sub> = R<sub>上</sub> × sigmoid(z₂)<small>z₁、z₂：该位置的两个原始分数；R<sub>上</sub>、R<sub>下</sub>：对应的两种“在边界下方”的概率。乘积保证 0 ≤ R<sub>下</sub> ≤ R<sub>上</sub> ≤ 1。例如 0.8×0.5＝0.4。</small></div></div>
+  <div class="paper-section-heading"><span class="paper-step">04</span><div><div class="paper-kicker">预测路线 · 从特征描述到两个判断</div><h2>64 个特征通道，怎样变成两张区域概率图？</h2></div></div>
+  <p class="paper-answer">上一节得到 <strong>64×64×64 的融合特征</strong>：后两个 64 表示空间网格，前一个 64 表示<strong>每个位置有 64 个特征数</strong>。这些数是网络学出的描述，还没有“在线上方或下方”的明确含义。本节要把它们加工成<strong>每个位置两个有明确含义的概率</strong>。</p>
+  <div class="paper-claim"><strong>先确定两个输出要回答什么，再看这两个数怎样算出来。</strong><small>下面的“位置”指 64×64 预测网格中的一个格子；不是直接给原图每个像素输出答案。图中的颜色和数值都用于说明原理。</small></div>
+
+  <div class="paper-subsection">
+    <h3>4.1 先定含义：同一个位置，要回答哪两个问题？</h3>
+    <p>这里的<strong>上边界是真皮层下界，下边界是脂肪层下界</strong>。对同一个位置，第一张图回答“它在上边界下方吗？”，第二张图回答“它在下边界下方吗？”。每个问题各有一个标签，网络各给一个概率。</p>
+    <table class="paper-table paper-label-table"><caption>先看完整位于某一区域内的格子：0 表示否，1 表示是。</caption><thead><tr><th scope="col">格子的位置</th><th scope="col">标签①<br>上边界下方？</th><th scope="col">标签②<br>下边界下方？</th></tr></thead><tbody><tr><th scope="row">上边界以上</th><td>0</td><td>0</td></tr><tr><th scope="row">两条边界之间<br>即脂肪层内</th><td>1</td><td>0</td></tr><tr><th scope="row">下边界以下</th><td>1</td><td>1</td></tr></tbody></table>
+    <p><strong>例如，脂肪层里的某个格子，目标标签是 [1, 0]。</strong>我们希望它在第一张图中的概率接近 1、在第二张图中的概率接近 0。同一个格子如果位于两条线下方，两个标签就都是 1，因此这里没有让两个输出“二选一”。</p>
+    <div class="paper-figure-block"><p class="paper-figure-question"><strong>把表格放回图像：</strong>绿色从上边界填到底，蓝色从下边界填到底。观察两条线下方的同一位置，它会同时被两张图填色。</p><!--VIS:regions-paper-meaning--><div class="paper-readout"><p><strong>第一张图不是脂肪层本身：</strong>它还包含下边界以下的区域。第二张区域包含在第一张内部，因为“已经在下边界以下”必然意味着“也在上边界以下”。</p><p><strong>标签与预测要分清：</strong>标签由人工边界计算；预测由图像经过网络算出。表中的 0/1 是训练答案，模型输出通常是接近这些答案的连续概率。</p></div></div>
+    <p>边界穿过某个格子时，标签按该格子位于边界下方的比例取小数，例如 0.3；它不是第三种“边界类别”。这些标签怎样由离散标注点生成，见<a href="#report/regions-target">第 06 节</a>。<strong>预测新图时不需要人工标签。</strong></p>
+  </div>
+
+  <div class="paper-subsection">
+    <h3>4.2 加入位置：为什么从 64 通道变成 66 通道？</h3>
+    <p>已有的 64 个数描述这个位置的图像特征。预测头还额外接收两个数：<strong>这个位置有多靠下、有多靠右</strong>。代码因此制作两张固定位置图：</p>
+    <ul><li><strong>纵向位置图：</strong>最上行全为 0，最下行全为 1，中间按行均匀递增；同一行的值相同。</li><li><strong>横向位置图：</strong>最左列全为 0，最右列全为 1，中间按列均匀递增；同一列的值相同。</li></ul>
+    <p>在从 0 开始的第 r 行、第 c 列，两个数分别为 <strong>r／63、c／63</strong>。例如第 21 行、第 42 列附加的是约 0.333、0.667。于是这个位置从 64 个特征数变为“64 个特征数＋2 个位置数”，整组形状变成 <strong>66×64×64</strong>。</p>
+    <p>这里做的是<strong>按通道拼接</strong>，不是把位置数加到原特征上。这两张位置图对同样大小的输入都一样，不是人工画出的边界，也不提供正确答案；它们让后面的网络可以结合图像特征和绝对位置作判断。</p>
+  </div>
+
+  <div class="paper-subsection">
+    <h3>4.3 再加工：3×3 卷积、GroupNorm、SiLU 分别做什么？</h3>
+    <p>位置刚刚拼进去，还没有和图像特征共同计算。下一步用<strong>普通 3×3 卷积</strong>，让每个输出位置同时读取周围 3×3 范围内、全部 66 个输入通道的数，并学习怎样把这些信息组合起来。</p>
+    <p>具体说，生成一个输出通道在某个位置的值，要对 <strong>66×3×3＝594 个数</strong>加权求和。这层有 <strong>64 个卷积核</strong>，因此生成 64 个输出通道；不是各通道独立卷积，也不是简单删掉那两个位置通道。位置的信息可以通过权重进入这 64 个新的特征通道。</p>
+    <div class="paper-figure-block"><p class="paper-figure-question"><strong>先看上半图的拼接，再看下半图的局部窗口：</strong>宽高一直是 64×64，变化的是每个位置携带的信息及通道数。</p><!--VIS:regions-paper-head-features--><div class="paper-readout"><p><strong>为什么尺寸不变？</strong>3×3 卷积步长为 1，四周补 1 格，输出仍为 64×64；输出通道数 64 是这一层设置的卷积核数量。</p><p><strong>GroupNorm：</strong>对每张图单独把 64 个输出通道分成 8 组，每组 8 通道，按组内通道及空间位置计算均值、方差，调整数值尺度，再做可学习的缩放和平移。</p><p><strong>SiLU：</strong>逐个数执行 t×sigmoid(t)，加入非线性，让前后两层卷积能够学习更灵活的组合关系。它不是将特征转为区域概率；此时结果仍是 64 通道特征。</p></div></div>
+    <p><strong>为什么融合之后还要这一层？</strong>前面的融合模块汇合不同尺度的信息；这一层继续结合刚加入的位置线索，为接下来的两个输出学习适合的特征。它是一项网络结构设计，并非“已经有特征就不能再卷积”。</p>
+  </div>
+
+  <div class="paper-subsection">
+    <h3>4.4 生成分数：1×1 卷积怎样把 64 个数变成两个数？</h3>
+    <p>现在只盯住一个位置，把它的 64 个特征数记为 f₁ 到 f₆₄。最后的 <strong>1×1 卷积有两套独立的权重</strong>：每套包含 64 个通道权重和一个偏置。两套权重分别对这 64 个数加权求和，得到两个原始分数 a、b：</p>
+    <div class="paper-formula">分数 a＝u₁f₁＋u₂f₂＋…＋u₆₄f₆₄＋偏置 a<br>分数 b＝v₁f₁＋v₂f₂＋…＋v₆₄f₆₄＋偏置 b<small>f 表示这个位置的特征；u、v 是两套训练得到的权重。“1×1”表示这层直接读取当前空间位置，但会读取这个位置的全部 64 个通道。特征中已经包含前面网络提取的周围信息。</small></div>
+    <p>这两套权重在全部 <strong>64×64＝4096 个位置共享使用</strong>。每个位置的特征不同，算出的分数便可不同；所有位置的分数放回各自位置，就得到<strong>两张 64×64 分数图</strong>。因此，这一层的完整权重形状是 2×64×1×1，另有 2 个偏置。</p>
+    <p><strong>为什么最后是两个通道？</strong>因为我们要对两条边界分别给出一个判断，不是因为图像只有两种组织。分数可以为负，也可以大于 1，还不能直接称为概率；尤其第二个分数还需要下面的乘法才能得到最终输出。</p>
+  </div>
+
+  <div class="paper-subsection">
+    <h3>4.5 变成概率：为什么第二张图还要乘第一张图？</h3>
+    <p>先认识 sigmoid：它把任意实数转换到 0～1 之间，公式为 <strong>sigmoid(t)＝1／(1＋e<sup>−t</sup>)</strong>；t 为 0 时得到 0.5，分数越大结果越接近 1，越小越接近 0。对每个位置，代码按下面的顺序计算：</p>
+    <ol class="paper-sequence"><li><div><strong>第一个分数 a 经过 sigmoid：</strong>直接得到“位于上边界下方”的概率，记为 R<sub>上</sub>。</div></li><li><div><strong>第二个分数 b 经过 sigmoid：</strong>先得到一个 0～1 的比例，记为 g。它是中间结果，还不是最终的“位于下边界下方”的概率。</div></li><li><div><strong>将第一步的概率乘这个比例：</strong>得到第二张图的最终概率 R<sub>下</sub>＝R<sub>上</sub>×g。</div></li></ol>
+    <div class="paper-formula">R<sub>上</sub>＝sigmoid(a)<br>g＝sigmoid(b)<br>R<sub>下</sub>＝R<sub>上</sub>×g<small>下标“上／下”指对应哪一条边界；两个 R 都表示位于该边界<strong>下方</strong>的概率。</small></div>
+    <div class="paper-figure-block"><p class="paper-figure-question"><strong>把 4.4 和 4.5 接起来：</strong>上半图展示一个位置怎样得到两个分数，下半图展示两个分数怎样得到最终的 0.8 和 0.4。</p><!--VIS:regions-paper-head-scores--><div class="paper-readout"><p><strong>一组可验算的数：</strong>假设这个位置算出 a＝ln(4)≈1.386、b＝0，则 R<sub>上</sub>＝0.8、g＝0.5，最终 R<sub>下</sub>＝0.8×0.5＝0.4。两张图在这个位置存的是 <strong>[0.8, 0.4]</strong>，不是 [0.8, 0.5]。</p><p><strong>乘法保证什么？</strong>因为 g 在 0～1 之间，乘完必有 R<sub>下</sub>≤R<sub>上</sub>。这对应前面的包含关系：在下边界下方的可能性，不应超过在上边界下方的可能性。</p></div></div>
+    <p>两个输出不需要相加为 1，上例相加就是 1.2；同一列所有位置的概率也不需要加起来为 1。这里<strong>没有像热图法那样沿高度做 softmax</strong>。乘法保证的是同一位置两张图的大小关系；它并不保证单张图从上往下一定单调，那还需要第 07 节的损失约束。</p>
+    <p><strong>回到训练答案：</strong>如果上例的格子实际位于脂肪层内，人工标签就是 [1, 0]。区域损失比较的是最终预测 [0.8, 0.4] 与标签 [1, 0]，通过反向传播学习权重，让预测更符合答案。推理时则只用图像计算这两个概率，不读取标签。</p>
+  </div>
   <div class="paper-io"><div><span>本步接收</span>64×64×64 融合特征</div><div><span>交给下一步</span><strong>两张 64×64 区域概率图</strong></div></div>
-  <div class="paper-takeaway"><b>本节记住</b><span>两张图并非两个互斥类别；它们也不要求同一列的概率总和为 1。每格都在回答一个“是否位于这条边界下方”的问题。</span></div>
-  <p class="paper-next">下一步：已知一列哪些位置更可能在边界下方，怎样算出边界的具体高度？</p>
-  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/models.py?line=84">位置通道、分数与嵌套概率</a></p>
+  <div class="paper-takeaway"><b>本节记住</b><span><strong>拼位置 → 3×3 加工特征 → 1×1 产生两个分数 → sigmoid 与乘法产生两个区域概率。</strong>到这里还没有直接给出边界纵坐标，下一节再从区域图计算。</span></div>
+  <p class="paper-next">下一步：一列里已经有了各个高度的“在线下方”概率，怎样把这一整列变成一个边界坐标？</p>
+  <p class="paper-source">源码对应：<a href="#code/072_区域调优/代码/models.py?line=47">3×3、GroupNorm 与 SiLU</a> · <a href="#code/072_区域调优/代码/models.py?line=60">预测头的两层卷积</a> · <a href="#code/072_区域调优/代码/models.py?line=84">位置拼接与两个概率</a> · <a href="#code/072_区域调优/代码/losses.py?line=9">两个区域标签</a></p>
 </section>
 
 <section class="section" id="regions-integral" data-title="区域怎样变成边界坐标" data-toc-number="05" data-phase="predict">

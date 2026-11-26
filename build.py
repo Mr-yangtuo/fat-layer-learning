@@ -202,7 +202,7 @@ for method in methods:
     guides.append('<div class="method-guide" data-guide-method="' + method["id"] + '" hidden>' + method_document(body, method) + '</div>')
 report, guide = "\n".join(reports), "\n".join(guides)
 public_methods = [{k:m[k] for k in ("id","title","label","subtitle","intro")} for m in methods]
-manifest = {"created":"2026-11-14","updated":"2026-11-23","reader_version":8,"methods":public_methods,"files":files,"visuals":visuals}
+manifest = {"created":"2026-11-14","updated":"2026-11-26","reader_version":8,"methods":public_methods,"files":files,"visuals":visuals}
 payload = json.dumps(manifest,ensure_ascii=False,separators=(",",":")).replace("<","\\u003c")
 html = (ROOT / "template.html").read_text(encoding="utf-8-sig")
 for key,value in {

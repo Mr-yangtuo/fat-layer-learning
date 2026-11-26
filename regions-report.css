@@ -51,6 +51,13 @@
 [data-report-method="regions"] .paper-table th,[data-report-method="regions"] .paper-table td{padding:13px 14px;border:1px solid #dbe5dd;vertical-align:top;line-height:1.8;overflow-wrap:anywhere}
 [data-report-method="regions"] .paper-table th{text-align:left;color:#345b48;background:#edf4ed}
 [data-report-method="regions"] .paper-table td{background:white}
+[data-report-method="regions"] .paper-label-table caption{text-align:left;font-size:14px;color:#5f7769;padding:0 0 10px;line-height:1.8}
+[data-report-method="regions"] .paper-label-table th:first-child{width:40%}
+[data-report-method="regions"] .paper-label-table thead th:not(:first-child),[data-report-method="regions"] .paper-label-table td{text-align:center}
+[data-report-method="regions"] .paper-label-table tbody th{font-weight:500;background:#f8faf8}
+[data-report-method="regions"] .paper-label-table td{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+[data-report-method="regions"] .paper-label-table td:nth-child(2){color:#137c69;background:#f1f8f4}
+[data-report-method="regions"] .paper-label-table td:nth-child(3){color:#346e9e;background:#f1f6fb}
 [data-report-method="regions"] .paper-emphasis{font-weight:650;color:#175c48}
 [data-report-method="regions"] .paper-sequence{counter-reset:paper-process;padding:0;list-style:none;margin:20px 0}
 [data-report-method="regions"] .paper-sequence li{counter-increment:paper-process;display:grid;grid-template-columns:29px 1fr;gap:12px;margin:14px 0;line-height:1.85}
